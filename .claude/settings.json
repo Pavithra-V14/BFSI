@@ -1,0 +1,105 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(.env.production)",
+      "Read(.env.eval)",
+      "Read(.env.development)",
+      "Read(.env.staging)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/secrets/**)",
+      "Read(**/credentials*)",
+      "Edit(.env)",
+      "Edit(.env.local)",
+      "Edit(.env.production)",
+      "Edit(.env.eval)",
+      "Bash(git push *)",
+      "Bash(git push)",
+      "PowerShell(git push *)",
+      "PowerShell(git push)"
+    ],
+    "ask": [
+      "Bash(pip install *)",
+      "Bash(pip uninstall *)",
+      "Bash(uv pip install *)",
+      "Bash(uv pip uninstall *)",
+      "Bash(uv pip sync *)",
+      "Bash(uv add *)",
+      "Bash(uv remove *)",
+      "Bash(uv sync *)",
+      "Bash(uv tool install *)",
+      "Bash(uvx *)",
+      "Bash(uv venv)",
+      "Bash(uv venv *)",
+      "Bash(git commit *)",
+      "Bash(locust *)",
+      "PowerShell(pip install *)",
+      "PowerShell(pip uninstall *)",
+      "PowerShell(uv pip install *)",
+      "PowerShell(uv pip uninstall *)",
+      "PowerShell(uv pip sync *)",
+      "PowerShell(uv add *)",
+      "PowerShell(uv remove *)",
+      "PowerShell(uv sync *)",
+      "PowerShell(uv tool install *)",
+      "PowerShell(uvx *)",
+      "PowerShell(uv venv)",
+      "PowerShell(uv venv *)",
+      "PowerShell(git commit *)",
+      "PowerShell(locust *)",
+      "Edit(spec/**)",
+      "Write(spec/**)"
+    ],
+    "allow": [
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log)",
+      "Bash(git log *)",
+      "PowerShell(uv run pytest *)",
+      "PowerShell(uv run ruff *)",
+      "PowerShell(git status)",
+      "PowerShell(git status *)",
+      "PowerShell(git diff)",
+      "PowerShell(git diff *)",
+      "PowerShell(git log)",
+      "PowerShell(git log *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|NotebookEdit|Grep|Glob|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/secret_guard.py"]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/format_python.py",
+              "${CLAUDE_PROJECT_DIR}"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

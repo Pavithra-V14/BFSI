@@ -1,0 +1,8 @@
+# Runtime packages (spec section 2). Production (Render) installs only this file.
+# Every package is pinned with ==. The packages these depend on are resolved
+# at install time.
+#
+# Phase 1 needs only the Postgres driver. Later phases add the packages they
+# use here (spec section 13.2: no unused packages). The small spaCy model
+# (en_core_web_sm) is added when query masking is built.
+psycopg[binary]==3.3.6

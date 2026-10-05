@@ -1,0 +1,30 @@
+[project]
+name = "bfsi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+# Tool settings only. Dependencies live in the requirements*.txt files
+# (spec section 2), so uv must not lock or sync this project on its own.
+[tool.uv]
+managed = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# spec holds the sample generator; .claude holds the hook script, which is not
+# part of the application and must not be reformatted by a tool.
+extend-exclude = ["spec", ".claude"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "postgres: needs TEST_POSTGRES_URL (CI service container); skipped when it is not set",
+]

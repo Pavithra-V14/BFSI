@@ -1,0 +1,8 @@
+# Evaluation packages (spec sections 2 and 15). Admin machine only, never on Render.
+# Install requirements.txt first, then this file.
+#
+# Note: deepeval 4.x does not resolve together with ragas 0.4.3 on Python 3.12;
+# the resolver falls back to deepeval 2.9.3, which is pinned here. Review this
+# choice in Phase 13 (for example separate environments for the two tools).
+ragas==0.4.3
+deepeval==2.9.3
