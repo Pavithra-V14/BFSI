@@ -46,19 +46,39 @@ def is_local_host(host: str) -> bool:
         return False
 
 
+def _authority_hosts(netloc: str) -> list[str]:
+    """Hosts in the authority part of a URL.
+
+    The part after the last "@" is split on commas first (libpq allows several
+    hosts, each with its own optional port), then each entry loses its port. An
+    entry that cannot be read is returned as a name that is never local.
+    """
+    hosts: list[str] = []
+    for entry in netloc.rpartition("@")[2].split(","):
+        entry = entry.strip()
+        if entry.startswith("["):
+            end = entry.find("]")
+            host = entry[1:end] if end > 0 else "invalid-host"
+        else:
+            host = entry.partition(":")[0]
+        if host:
+            hosts.append(host)
+    return hosts
+
+
 def url_hosts(value: str) -> list[str] | None:
     """Return the hosts a connection string would connect to, or None if unknown.
 
     A Unix socket directory is returned as a path that starts with "/". Both URLs
-    (postgresql://...) and libpq key=value strings are understood.
+    (postgresql://...) and libpq key=value strings are understood. A URL with
+    several hosts returns all of them.
     """
     text = value.strip()
     hosts: list[str] = []
     try:
         if "://" in text:
             parts = urlsplit(text)
-            if parts.hostname:
-                hosts.append(parts.hostname)
+            hosts.extend(_authority_hosts(parts.netloc))
             query = parse_qs(parts.query)
         else:
             query = {

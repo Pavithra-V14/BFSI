@@ -83,6 +83,8 @@ jobs:
       - name: Scan the repository history
         run: ./gitleaks git --redact --no-banner --verbose
 
+  # pip-audit covers requirements.txt and requirements-dev.txt only. The ingest and
+  # eval files (admin machine only) are not audited here.
   pip-audit:
     runs-on: ubuntu-latest
     steps:

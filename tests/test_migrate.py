@@ -180,6 +180,21 @@ def test_local_postgres_needs_no_tls():
     migrate.require_tls("postgresql://user:pw@localhost:5432/db")
 
 
+def test_multi_host_url_needs_tls_if_any_host_is_remote(folder):
+    write(folder, "0001_a.sql", CREATE_A)
+    for bad in (
+        "postgresql://user:pw@localhost:5432,remote.test:5432/db",
+        "postgresql://user:pw@remote.test:5432,localhost:5432/db",
+        "postgresql://user:pw@localhost,remote.test/db",
+        "postgresql://user:pw@remote.test,localhost/db",
+    ):
+        with pytest.raises(MigrationError, match="TLS") as caught:
+            run(bad, folder, log=quiet)
+        assert "remote.test" not in str(caught.value)
+    migrate.require_tls("postgresql://user:pw@localhost:5432,remote.test:5432/db?sslmode=require")
+    migrate.require_tls("postgresql://user:pw@localhost:5432,127.0.0.1:5433/db")
+
+
 def test_unsupported_url_is_refused_without_echoing_it(folder):
     with pytest.raises(MigrationError, match="unsupported database URL") as caught:
         run("mysql://user:pw@db.remote.test/db", folder, log=quiet)

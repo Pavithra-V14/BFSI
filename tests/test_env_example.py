@@ -10,6 +10,9 @@ WHERE = re.compile(r"^# Where: (Render and local|admin machine only)$")
 VARIABLE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 # Set by the CI service container only, so it is not part of the owner's template.
 CI_ONLY = {"TEST_POSTGRES_URL"}
+# The only names the spec itself gives: section 2 (as an example, [P]) and section 14.
+# GROQ_API_KEYS still carries a [P] note, but is not required to.
+SPEC_NAMED = {"GROQ_API_KEYS", "DEV_STAGE_TRACE"}
 
 
 def _lines():
@@ -40,6 +43,23 @@ def test_every_variable_has_a_comment_and_a_where_tag():
             cursor -= 1
         assert block, f"{match.group(1)} has no comment above it"
         assert any(WHERE.match(text) for text in block), f"{match.group(1)} has no Where tag"
+
+
+def test_every_name_the_spec_does_not_give_is_marked_proposed():
+    lines = _lines()
+    for index, line in enumerate(lines):
+        match = VARIABLE.match(line)
+        if not match or match.group(1) in SPEC_NAMED:
+            continue
+        block = []
+        cursor = index - 1
+        while cursor >= 0 and (VARIABLE.match(lines[cursor]) or lines[cursor].startswith("#")):
+            if not VARIABLE.match(lines[cursor]):
+                block.append(lines[cursor])
+            elif block:
+                break
+            cursor -= 1
+        assert any(text.startswith("# [P] ") for text in block), f"{match.group(1)} lacks [P]"
 
 
 def test_every_guarded_url_variable_is_documented():

@@ -15,6 +15,7 @@ from app.isolation import (
     is_local_url,
     remote_variables,
     require_local_environment,
+    url_hosts,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,8 @@ LOCAL = [
     pytest.param("http://localhost:6333", id="qdrant-local"),
     pytest.param("postgresql:///db?host=/var/run/postgresql", id="unix-socket"),
     pytest.param("host=localhost dbname=test", id="key-value-local"),
+    pytest.param("postgresql://u:pw@localhost:5432,127.0.0.1:5433/db", id="multi-host-all-local"),
+    pytest.param("postgresql://u:pw@[::1]:5432,localhost/db", id="multi-host-v6-and-name-local"),
 ]
 
 REMOTE = [
@@ -58,6 +61,15 @@ REMOTE = [
     pytest.param("postgresql://localhost/db?host=db.remote.test", id="host-in-query"),
     pytest.param("postgresql://localhost/db?hostaddr=10.1.2.3", id="hostaddr-in-query"),
     pytest.param("http://[::1", id="unparsable"),
+    pytest.param("postgresql://u:pw@localhost:5432,remote.test:5432/db", id="ports-local-first"),
+    pytest.param("postgresql://u:pw@remote.test:5432,localhost:5432/db", id="ports-remote-first"),
+    pytest.param("postgresql://u:pw@localhost,remote.test/db", id="no-ports-local-first"),
+    pytest.param("postgresql://u:pw@remote.test,localhost/db", id="no-ports-remote-first"),
+    pytest.param(
+        "postgresql://u:pw@localhost:5432,remote.test:5432,127.0.0.1:5432/db",
+        id="remote-in-second-position",
+    ),
+    pytest.param("postgresql://u:pw@[::1]:5432,remote.test:5432/db", id="v6-then-remote"),
 ]
 
 
@@ -75,6 +87,23 @@ def test_is_local_host():
     assert is_local_host("localhost")
     assert is_local_host("[::1]")
     assert not is_local_host(NEON_HOST)
+
+
+def test_url_hosts_lists_every_host_of_a_multi_host_url():
+    assert url_hosts("postgresql://u:pw@localhost:5432,remote.test:5433/db") == [
+        "localhost",
+        "remote.test",
+    ]
+    assert url_hosts("postgresql://u:pw@[::1]:5432,127.0.0.1/db") == ["::1", "127.0.0.1"]
+
+
+def test_remote_variables_names_a_multi_host_url_without_printing_it():
+    env = {"DATABASE_URL": "postgresql://u:pw@localhost:5432,remote.test:5432/db"}
+    assert remote_variables(env) == ["DATABASE_URL"]
+    with pytest.raises(ProductionUrlError) as caught:
+        require_local_environment(env)
+    assert "remote.test" not in str(caught.value)
+    assert "postgresql://" not in str(caught.value)
 
 
 def test_remote_variables_reports_names_only():

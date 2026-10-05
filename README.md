@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 1 (foundations) finished, waiting for owner approval
+Current phase: Phase 1 (foundations) complete, committed as b3e17df; next is Phase 2 (waiting for the owner's go)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -23,7 +23,7 @@ Current phase: Phase 1 (foundations) finished, waiting for owner approval
 ## How to work with Claude Code in this project
 1. Open this folder in VS Code.
 2. Start Claude Code. It reads `CLAUDE.md` automatically.
-3. Say "begin Phase 1" when you are ready.
+3. Say "begin Phase N" (or run `/build-phase N`) when you are ready.
 4. Claude Code follows the build order in `spec/build.md` section 21.
 5. It stops for your approval after each phase. It never starts the next
    phase on its own.

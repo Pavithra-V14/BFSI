@@ -81,7 +81,7 @@ Production (Render) serves queries only.
 - Where a rule can be code instead of a prompt instruction, it is code.
 
 ## Commands
-<!-- Filled in during Phase 1 (foundations). Items marked TBD are not
+<!-- Kept up to date as phases add commands. Items marked TBD are not
      decided yet; do not invent them. -->
 - Create environment (once, Phase 1, after owner approval): `uv venv`
   (creates `.venv` in the project root)
@@ -95,7 +95,7 @@ Production (Render) serves queries only.
 - Apply migrations: `uv run python -m app.db.migrate` (add `--dry-run` to list pending
   files). It reads the database URL from `DATABASE_URL` in your shell, never from a file or
   the command line. Use the provider's direct (non-pooled) URL with `sslmode=require`.
-- Tests refuse to run if a database or Qdrant URL points at a remote host (isolation guard).
+- Tests refuse to run if a database, Qdrant or cache URL points at a remote host (isolation guard).
 
 ## Definition of done for a phase (proposal, not in the spec)
 - Unit tests for the phase pass using the isolation guard (no production URLs).
