@@ -7,6 +7,9 @@ import os
 # asks the network for a model map.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 os.environ.setdefault("LITELLM_LOG", "ERROR")
+# LiteLLM's default mode reads the owner's `.env` file when it is imported and puts its contents
+# (real keys, database and cache addresses) into this process. Never during a test run.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
 
 import pytest  # noqa: E402
 
@@ -23,3 +26,35 @@ def pytest_sessionstart(session):
             "localhost (spec section 16). Unset or change the variable(s) and run again.",
             returncode=3,
         )
+
+
+# ---- fixtures for the API and account tests -----------------------------------------------------
+from tests.api_fixtures import Env  # noqa: E402
+
+
+@pytest.fixture
+def fast_hashing(monkeypatch):
+    """Cheap argon2 settings for tests that go through the API (the real settings are tested in
+    test_accounts_passwords). Not automatic: tests that need the real hasher do not ask for it."""
+    from argon2 import PasswordHasher
+
+    from app.accounts import passwords
+
+    monkeypatch.setattr(
+        passwords, "_HASHER", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+    )
+    passwords.dummy_hash.cache_clear()
+    yield
+    passwords.dummy_hash.cache_clear()
+
+
+@pytest.fixture
+def env(tmp_path, fast_hashing):
+    return Env(tmp_path)
+
+
+@pytest.fixture
+def db(env):
+    connection = env.db()
+    yield connection
+    connection.close()

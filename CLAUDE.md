@@ -93,7 +93,11 @@ Production (Render) serves queries only.
 - Test: `uv run pytest`
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format .`
-- Run API / Streamlit: TBD (until the app exists)
+- Run the API (the owner, in his own terminal; settings come from the shell, never a file):
+  `uv run uvicorn app.api.main:create_app_from_env --factory`. It refuses to start on a missing,
+  short or placeholder `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`. Streamlit: TBD (Phase 11).
+- Create or deactivate accounts (owner only, hidden password prompt, never by Claude):
+  `uv run python -m app.accounts.admin_cli create-admin --username NAME --email ADDRESS`.
 - Apply migrations: `uv run python -m app.db.migrate` (add `--dry-run` to list pending
   files). It reads the database URL from `DATABASE_URL` in your shell, never from a file or
   the command line. Use the provider's direct (non-pooled) URL with `sslmode=require`.

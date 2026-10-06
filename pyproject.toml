@@ -21,6 +21,10 @@ extend-exclude = ["spec", ".claude"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's way of asking for a dependency is a call in an argument default.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Path"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

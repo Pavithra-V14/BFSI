@@ -386,6 +386,18 @@ class CacheStore:
         value = self._run("incr_counter", work)
         return None if value is _FAILED else value
 
+    def read_counter(self, name: str) -> int | None:
+        """The current value of a counter (0 if it does not exist), or None if unavailable.
+        Reads only: it never starts a window or changes a count."""
+        raw = self._run("read_counter", lambda: self._client.get(f"{COUNTER_PREFIX}{name}"))
+        if raw is _FAILED:
+            return None
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            self._emit("cache_corrupt", operation="read_counter")
+            return None
+
     def check_rate_limit(
         self, scope: str, subject: str, *, limit: int, window_seconds: int
     ) -> RateDecision:

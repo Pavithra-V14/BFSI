@@ -15,3 +15,9 @@ httpx==0.28.1
 # tests); redis talks to Upstash over the Redis protocol (rediss://).
 qdrant-client==1.19.1
 redis==8.1.0
+# Phase 4: accounts, API shell and security. fastapi is the web framework (it brings starlette
+# and pydantic), uvicorn runs it, PyJWT signs and checks login tokens, argon2-cffi hashes passwords.
+fastapi==0.142.2
+uvicorn==0.54.0
+PyJWT==2.15.1
+argon2-cffi==25.1.0

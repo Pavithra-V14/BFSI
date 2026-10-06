@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 3 built, awaiting the owner's approval (next is Phase 4)
+Current phase: Phase 4 built, awaiting the owner's approval (next is Phase 5)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -17,6 +17,8 @@ Current phase: Phase 3 built, awaiting the owner's approval (next is Phase 4)
   Phase 2 adds the gateway in `app/gateway/`: every model, embedding and rerank call.
   Phase 3 adds the data layer: `app/vector/` (the Qdrant `documents` collection),
   `app/cache/` (the Upstash cache primitives) and `app/store_errors.py` ("temporarily unavailable").
+  Phase 4 adds accounts and the API: `app/accounts/` (passwords, login tokens, users, throttling,
+  budgets, audit rows, the owner's `admin_cli`) and `app/api/` (the FastAPI app and its security layer).
 - `scripts/` : helper scripts you run by hand, such as the gateway smoke test (it makes real
   provider calls, so it is off unless you add `--run`).
 - `tests/` : automated tests. They only use SQLite and local resources.

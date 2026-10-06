@@ -30,6 +30,7 @@ SPEC = {
         "password_hash": ("TEXT", True),
         "role": ("TEXT", True),
         "created_at": ("TIMESTAMPTZ", True),
+        "is_active": ("BOOLEAN", True),  # migration 0004 [P]
     },
     "revoked_tokens": {
         "jti": ("TEXT", True),
@@ -115,6 +116,7 @@ PRIMARY_KEYS = {
 DEFAULTS = {
     ("users", "role"): "'customer'",
     ("users", "created_at"): "CURRENT_TIMESTAMP",
+    ("users", "is_active"): "TRUE",
     ("revoked_tokens", "revoked_at"): "CURRENT_TIMESTAMP",
     ("sessions", "created_at"): "CURRENT_TIMESTAMP",
     ("sessions", "session_facts"): "'{}'",
@@ -200,7 +202,7 @@ def count(conn, table, where="1 = 1", args=()):
 # ---- the migrations themselves --------------------------------------------------------
 
 
-def test_the_three_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
+def test_the_four_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
     quiet = lambda line: None  # noqa: E731
     applied = run(url, MIGRATIONS, log=quiet)
@@ -208,19 +210,45 @@ def test_the_three_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
         "0001_accounts.sql",
         "0002_sessions_messages.sql",
         "0003_audit_allowlist_feedback_review.sql",
+        "0004_users_active.sql",
     ]
     assert run(url, MIGRATIONS, log=quiet) == []  # nothing left to apply
-    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3]
+    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4]
 
 
 def test_the_sql_stays_portable_between_postgres_and_sqlite():
-    forbidden = ("SERIAL", "JSONB", "IDENTITY", "NOW()", "UUID PRIMARY KEY", "TRIGGER", "ALTER ")
+    forbidden = ("SERIAL", "JSONB", "IDENTITY", "NOW()", "UUID PRIMARY KEY", "TRIGGER")
     for migration in load_migrations(MIGRATIONS):
         # Comments may talk about triggers; only the statements count.
         statements = "\n".join(line.split("--", 1)[0] for line in migration.sql.splitlines())
         text = statements.upper()
         for word in forbidden:
             assert word not in text, f"{migration.filename} uses {word}"
+        # ALTER is allowed only as ADD COLUMN with a constant default, which both databases accept.
+        for statement in (part.strip() for part in text.split(";")):
+            if "ALTER " in statement:
+                assert "ADD COLUMN" in statement and "DEFAULT" in statement, migration.filename
+
+
+def test_migration_0004_adds_the_active_flag_and_existing_users_stay_active(tmp_path):
+    path = tmp_path / "upgrade.db"
+    old = tmp_path / "old"
+    old.mkdir()
+    for migration in load_migrations(MIGRATIONS)[:3]:
+        (old / migration.filename).write_text(migration.sql, encoding="utf-8")
+    url = f"sqlite:///{path}"
+    run(url, old, log=lambda line: None)  # a database as it was before this phase
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO users (id, username, email, password_hash) "
+        "VALUES ('u', 'asha', 'a@e.test', 'h')"
+    )
+    conn.commit()
+    conn.close()
+    assert run(url, MIGRATIONS, log=lambda line: None) == ["0004_users_active.sql"]
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT is_active FROM users").fetchall() == [(1,)]
+    conn.close()
 
 
 @pytest.mark.parametrize("table", sorted(SPEC))

@@ -357,6 +357,25 @@ def test_a_garbled_version_is_reported_as_unavailable_not_as_a_number(store, cli
 # ---- counters and rate limits (12.4) ------------------------------------------------------------
 
 
+def test_read_counter_reads_without_counting_or_starting_a_window(store, client):
+    assert store.read_counter("tokens:u1") == 0  # a counter that does not exist yet
+    assert not client.exists("ctr:tokens:u1")  # reading made nothing
+    store.incr_counter("tokens:u1", 3_600, 120)
+    for _ in range(3):
+        assert store.read_counter("tokens:u1") == 120  # reading never adds
+    assert 0 < client.ttl("ctr:tokens:u1") <= 3_600  # and never touches the window
+
+
+def test_read_counter_on_a_dead_cache_is_unavailable(dead):
+    assert dead.read_counter("tokens:u1") is None
+
+
+def test_a_garbled_counter_reads_as_unavailable(store, client, events):
+    client.set("ctr:tokens:u1", "not-a-number")
+    assert store.read_counter("tokens:u1") is None
+    assert ("cache_corrupt", {"operation": "read_counter"}) in events
+
+
 def test_a_counter_adds_up_and_starts_its_window_on_the_first_increment(store, client):
     assert store.incr_counter("tokens:u1", 3_600, 120) == 120
     assert store.incr_counter("tokens:u1", 3_600, 30) == 150

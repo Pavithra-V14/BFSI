@@ -161,6 +161,7 @@ Every decision records: `decider` (jev, groq, gemini, rules), model, key fingerp
 - Input and output tokens are counted separately with a real tokenizer; output is reserved at `max_tokens` before a call and corrected afterwards.
 - Dashboard: p50, p95, p99 tokens per request, cost per answer, cost split input/output, tokens per stage.
 - **Per-user daily token budget:** customers start at 50,000 tokens; staff higher [T]; to be calibrated after the baseline. An over-budget request is refused with a clear message before reaching a model.
+- **[T]** The staff token budget is a placeholder of 200,000 tokens a day (admin the same). The day is the UTC day and resets at 00:00 UTC.
 - Capacity note: with Groq at 8,000 tokens per minute, one answer costs about 3,400 tokens, so one Groq key serves about 2 answers a minute; key pools multiply this.
 - LiteLLM caching is **not** used.
 
@@ -357,6 +358,7 @@ Refused answers, low-confidence answers, thumbs-down answers, two-unclear-turn s
 - `audit_log` (append-only): who, what, when, target, details. Every ingest, reindex, delete, role change, login, and evaluation run writes a row. **Retention 30 days for the pilot.**
 - `allowlist_entities`: id, doc_id, text, entity_type, status (pending, approved, rejected), approved_by, approved_at, access_role.
 - `feedback_entries`; `review_queue`.
+- **[P]** `users` also has `is_active` (default true): a deactivated account cannot sign in and loses access at once.
 - Migrations are **numbered SQL files** applied in order by a small runner; each migration is tested against a copy of the data.
 
 ### 12.2 Evaluation database (separate)
@@ -375,6 +377,11 @@ Exact-cache keys, reverse sets, rate-limit counters.
 - Customers self-register and always receive the customer role; **staff roles are assigned only by an admin**; registration can never set a role.
 - JWT login with expiry and token revocation; login throttling; a password rule [P].
 - Admin MFA: later.
+- **[P]** Password rule: 10 to 128 characters, counted after Unicode NFKC normalisation (which is also applied before hashing); no forced character classes; must not contain the username or the email name; must not be on a short built-in list of very common passwords. Passwords are hashed with argon2id (19 MiB memory, 2 passes).
+- **[P]** Login tokens last 8 hours and hold only the user id, a token id and the expiry; there are no refresh tokens. Every request checks the token against the revoked list and against the database: the account must exist and be active, and its role is read from the database, so a role change, a deactivation or a logout takes effect at once.
+- **[T]** Limits: 10 login attempts per username and 30 per client address in 15 minutes; 5 registrations per client address per hour; 20 requests a minute per signed-in user. The client address is the socket address; a proxy header is trusted only after the host's trusted proxy is configured. If Upstash is down, login and registration throttling continue in the process instead of switching off.
+- **[P]** Two separate secrets, `JWT_SECRET_KEY` (signs tokens) and `AUDIT_HASH_KEY` (keys the hashes of usernames in audit rows and throttle counters), each at least 32 random bytes and different from each other; the API refuses to start on an empty, short or placeholder value. Each login and each role change writes an audit row; a username that is not an account is stored only as a keyed hash.
+- **[P]** The first admin is created by an owner-run command, and the last active admin can never be demoted or deactivated.
 
 ### 13.2 OWASP LLM Top 10 mapping
 | Risk | Control |
@@ -392,6 +399,8 @@ Exact-cache keys, reverse sets, rate-limit counters.
 
 ### 13.3 Hardening
 CORS restricted to the frontend address; security headers; request size limit; secrets only in the host's secret store; a secret scanner (gitleaks) and `pip-audit` in CI; key rotation routine.
+- **[T]** Request size limit: 16 KiB.
+- **[P]** Every response carries the security headers (nosniff, no framing, no referrer, no store, a Content-Security-Policy of `default-src 'none'`, a permissions policy and HSTS). CORS allows nothing unless the one frontend origin is configured, and never with cookies. The interactive API docs and the API description are not published.
 
 ### 13.4 Data-flow map
 Maintain one page listing what each vendor sees: Groq, Gemini, OpenRouter and Jev (masked query, retrieved chunks), Cohere and Jina (retrieved chunks and the masked query), Langfuse (masked traces), Upstash (cached answers), the Postgres host, Neon or Supabase (masked transcripts), Qdrant (document vectors).

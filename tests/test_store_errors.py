@@ -184,6 +184,40 @@ def test_sqlite_only_counts_a_file_that_cannot_be_opened_as_unavailable():
         assert isinstance(passed, sqlite3.OperationalError)
 
 
+def test_classify_database_error_gives_the_same_answers_without_a_wrapper():
+    from app.store_errors import classify_database_error
+
+    refused = classify_database_error(
+        psycopg.OperationalError(libpq("FATAL:  Tenant or user not found"))
+    )
+    assert isinstance(refused, StoreRejected) and refused.reason == "settings"
+    down = classify_database_error(psycopg.OperationalError(libpq("timeout expired")))
+    assert isinstance(down, DatabaseUnavailable)
+    assert isinstance(
+        classify_database_error(psycopg.InterfaceError("connection is closed")), DatabaseUnavailable
+    )
+    assert isinstance(
+        classify_database_error(sqlite3.OperationalError("unable to open database file")),
+        DatabaseUnavailable,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("a bug"),
+        KeyError("x"),
+        sqlite3.OperationalError("no such table: users"),
+        sqlite3.IntegrityError("duplicate"),
+        Sqlstate("deadlock", "40P01"),
+    ],
+)
+def test_classify_database_error_leaves_everything_else_alone(error):
+    from app.store_errors import classify_database_error
+
+    assert classify_database_error(error) is None
+
+
 def test_a_call_that_succeeds_returns_its_value():
     assert call_database(lambda: 42) == 42
     assert call_vector(lambda: "ok") == "ok"

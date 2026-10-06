@@ -114,21 +114,32 @@ def call_database(work: Callable[[], T]) -> T:
     outcome: Exception | None = None
     try:
         return work()
-    except psycopg.OperationalError as error:
+    except (psycopg.OperationalError, psycopg.InterfaceError, sqlite3.OperationalError) as error:
+        outcome = classify_database_error(error)
+        if outcome is None:
+            raise
+    raise outcome  # outside the except block: no __context__, nothing of the original
+
+
+def classify_database_error(error: BaseException) -> Exception | None:
+    """The typed error for a database failure, or None if it must pass through unchanged.
+
+    The API's exception handlers use this too, so a failure that surfaces outside call_database
+    is classified by the same rules.
+    """
+    if isinstance(error, psycopg.OperationalError):
         rejection = _postgres_rejection(error)
         if rejection is not None:
-            outcome = StoreRejected("database", rejection)
-        elif _is_connection_problem(error):
-            outcome = DatabaseUnavailable(type(error).__name__)
-        else:
-            raise
-    except psycopg.InterfaceError as error:  # for example "the connection is closed"
-        outcome = DatabaseUnavailable(type(error).__name__)
-    except sqlite3.OperationalError as error:
-        if "unable to open database" not in str(error).lower():
-            raise
-        outcome = DatabaseUnavailable(type(error).__name__)
-    raise outcome  # outside the except block: no __context__, nothing of the original
+            return StoreRejected("database", rejection)
+        if _is_connection_problem(error):
+            return DatabaseUnavailable(type(error).__name__)
+        return None
+    if isinstance(error, psycopg.InterfaceError):  # for example "the connection is closed"
+        return DatabaseUnavailable(type(error).__name__)
+    if isinstance(error, sqlite3.OperationalError):
+        if "unable to open database" in str(error).lower():
+            return DatabaseUnavailable(type(error).__name__)
+    return None
 
 
 # ---- Qdrant -----------------------------------------------------------------------------

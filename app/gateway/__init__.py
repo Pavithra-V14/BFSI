@@ -8,6 +8,11 @@ import os
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 # LiteLLM's own log level: errors only (backend.py also switches its verbose output off).
 os.environ.setdefault("LITELLM_LOG", "ERROR")
+# In its default "DEV" mode LiteLLM reads a `.env` file from the working directory the moment it
+# is imported, and puts everything in it (keys, database and cache addresses) into the process
+# environment. This project reads settings only from the shell (CLAUDE.md), so "PRODUCTION" mode
+# is set: LiteLLM then never opens a `.env` file.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
 
 from app.gateway import questions  # noqa: E402
 from app.gateway.config import GatewayConfig  # noqa: E402
