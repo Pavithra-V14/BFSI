@@ -8,12 +8,18 @@ role-scoped versions and the pipeline's lookup and write (later phases).
 If Upstash cannot be reached, nothing raises. Every call reports "unavailable" (a None, False or
 an "unavailable" lookup) and an event is emitted, so the caller skips the cache and answers
 normally (spec 11.1). After a failure the store does not call Upstash again for
-UNAVAILABLE_SKIP_SECONDS [P], so a dead cache costs one timeout and not one per call. A rate-limit
-check lets the request through when the counter is down (fail open) and emits an alert event.
-Whether login throttling does the same is decided in Phase 4.
+UNAVAILABLE_SKIP_SECONDS [P], so a dead cache costs one timeout and not one per call. Reads and
+rate limits keep skipping. Writes that keep the cache honest (the corpus-version bump and the
+invalidations) never skip: they always try, and a failure emits "cache_staleness_write_failed".
+Their callers must tell "not done" (None) from "done": ingest and delete treat None as "ingest
+incomplete". A rate-limit check lets the request through when the counter is down (fail open)
+and emits an alert event. Whether login throttling does the same is decided in Phase 4.
 
-The corpus version starts from the current Unix time in seconds, never from 0: if the key is ever
-lost, the version restarts higher than any value used before, so old entries cannot come back.
+The corpus version starts from the current Unix time in milliseconds, never from 0, and each
+bump adds 1. After a lost key the version restarts from the clock, which is above every earlier
+value as long as bumps average fewer than 1,000 a second since the version was first created
+(the seed was in milliseconds, so the counter can only outrun the clock at that rate). Seeding
+and reading or incrementing run in one MULTI/EXEC transaction.
 
 Entries hold no raw query text: the key is a hash, and the caller passes already-masked content.
 Logs and events carry operation names and exception class names only, never a URL or a key.
@@ -197,35 +203,51 @@ class CacheStore:
             except Exception:  # an alert hook that fails must never break a request
                 log.error("cache event handler failed for %s", name)
 
-    def _run(self, operation: str, work: Callable[[], Any]) -> Any:
+    def _run(self, operation: str, work: Callable[[], Any], *, staleness: bool = False) -> Any:
         """Run one cache operation. A connection problem returns _FAILED and emits an event.
 
         After a failure Upstash is skipped for UNAVAILABLE_SKIP_SECONDS: calls return _FAILED at
         once, with no new event, and the first call after that window tries again.
+
+        A staleness write (`staleness=True`: the corpus-version bump and the invalidations) is
+        never skipped. It always tries, so a short blip cannot leave a changed document's answers
+        in the cache, and when it fails it emits a "cache_staleness_write_failed" alert event.
+        A staleness write that succeeds proves Upstash is back and ends the skip window.
         """
-        if self._clock() < self._skip_until:
+        if not staleness and self._clock() < self._skip_until:
             return _FAILED
         try:
-            return work()
+            value = work()
         except (redis.exceptions.RedisError, OSError) as error:
             self._skip_until = self._clock() + UNAVAILABLE_SKIP_SECONDS
             self._emit("cache_unavailable", operation=operation, error=type(error).__name__)
+            if staleness:
+                self._emit(
+                    "cache_staleness_write_failed",
+                    operation=operation,
+                    error=type(error).__name__,
+                )
             return _FAILED
+        if staleness:
+            self._skip_until = 0.0
+        return value
 
     # ---- corpus version (10.3 item 1) ----------------------------------------------
 
     def _version_pipeline(self):
-        """A pipeline that first sets the version to the current Unix time if (and only if) the
-        key is missing, so a lost key restarts above every value used before."""
-        pipe = self._client.pipeline(transaction=False)
-        pipe.set(CORPUS_VERSION_KEY, int(self._wall_clock()), nx=True)
+        """One MULTI/EXEC transaction that first seeds the version from the current Unix time in
+        milliseconds if (and only if) the key is missing. Seeding and the following read or
+        increment run as one atomic unit, so a key that vanishes cannot be re-created by the
+        increment at 1 in between."""
+        pipe = self._client.pipeline(transaction=True)
+        pipe.set(CORPUS_VERSION_KEY, int(self._wall_clock() * 1000), nx=True)
         return pipe
 
     def corpus_version(self) -> int | None:
-        """The current corpus version, or None if unavailable.
+        """The current corpus version, or None if unavailable (callers must skip the cache).
 
         If the key is missing (first use, or it was lost) it is created from the current Unix
-        time in seconds.
+        time in milliseconds.
         """
 
         def work() -> Any:
@@ -243,14 +265,19 @@ class CacheStore:
             return None
 
     def bump_corpus_version(self) -> int | None:
-        """Any ingest, edit or delete bumps the version. Returns the new value, or None."""
+        """Any ingest, edit or delete bumps the version. Returns the new value, or None.
+
+        None means NOT DONE: the bump did not happen (and an alert event was emitted). It is never
+        skipped because of the skip window. Ingest and delete must treat None as "ingest
+        incomplete" and must not report success.
+        """
 
         def work() -> Any:
             pipe = self._version_pipeline()
             pipe.incr(CORPUS_VERSION_KEY)
             return pipe.execute()[-1]
 
-        value = self._run("bump_corpus_version", work)
+        value = self._run("bump_corpus_version", work, staleness=True)
         return None if value is _FAILED else int(value)
 
     # ---- entries and reverse sets (10.3 item 2) -------------------------------------
@@ -279,7 +306,12 @@ class CacheStore:
     ) -> bool:
         """Store an entry with its TTL, and list it in the reverse set of every chunk and
         document it cited. The entry records each chunk's id and content hash plus the doc ids.
-        Returns False if the cache was unavailable (nothing is stored)."""
+        Returns False if the cache was unavailable.
+
+        The reverse sets are written first and the entry last. If the connection drops part way,
+        the worst case is a reverse set that names an entry that does not exist (harmless), never
+        an entry that no invalidation can find.
+        """
         entry = {
             "payload": dict(payload),
             "chunks": [
@@ -292,12 +324,13 @@ class CacheStore:
 
         def work() -> None:
             pipe = self._client.pipeline(transaction=False)
-            pipe.set(key, json.dumps(entry, ensure_ascii=False), ex=self.ttl_seconds)
-            for set_key in {chunk_set_key(c.chunk_id) for c in chunks} | {
-                doc_set_key(c.doc_id) for c in chunks
-            }:
+            for set_key in sorted(
+                {chunk_set_key(c.chunk_id) for c in chunks}
+                | {doc_set_key(c.doc_id) for c in chunks}
+            ):
                 pipe.sadd(set_key, key)
                 pipe.expire(set_key, reverse_ttl)
+            pipe.set(key, json.dumps(entry, ensure_ascii=False), ex=self.ttl_seconds)  # last
             pipe.execute()
 
         return self._run("put_entry", work) is not _FAILED
@@ -309,15 +342,20 @@ class CacheStore:
             self._client.delete(set_key)
             return removed
 
-        value = self._run(operation, work)
+        value = self._run(operation, work, staleness=True)
         return None if value is _FAILED else value
 
     def invalidate_chunk(self, chunk_id: str) -> int | None:
-        """Remove every entry that cited this chunk. Returns how many, or None if unavailable."""
+        """Remove every entry that cited this chunk. Returns how many entries were removed.
+
+        None means NOT DONE (an alert event was emitted). It is never skipped because of the skip
+        window. Ingest and delete must treat None as "ingest incomplete".
+        """
         return self._invalidate("invalidate_chunk", chunk_set_key(chunk_id))
 
     def invalidate_doc(self, doc_id: str) -> int | None:
-        """Remove every entry that cited any chunk of this document."""
+        """Remove every entry that cited any chunk of this document. None means NOT DONE, with
+        the same rule as invalidate_chunk."""
         return self._invalidate("invalidate_doc", doc_set_key(doc_id))
 
     # ---- counters (12.4) ---------------------------------------------------------------

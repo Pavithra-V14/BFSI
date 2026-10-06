@@ -24,7 +24,8 @@ from app.cache.store import (
     ttl_from_env,
 )
 
-NOW = 1_800_000_000  # a fixed "current Unix time" for the corpus version
+NOW = 1_800_000_000  # a fixed "current Unix time" in seconds
+NOW_MS = NOW * 1000  # the corpus version is seeded in milliseconds
 
 
 class FakeClock:
@@ -240,33 +241,77 @@ def test_a_corrupt_entry_is_a_miss_and_is_removed(store, client, events):
 # ---- the corpus version (10.3 item 1) -------------------------------------------------------
 
 
-def test_the_corpus_version_starts_from_the_unix_time_and_every_bump_adds_one(store):
-    assert store.corpus_version() == NOW  # never 0
-    assert store.bump_corpus_version() == NOW + 1
-    assert store.bump_corpus_version() == NOW + 2
-    assert store.corpus_version() == NOW + 2
+def test_the_corpus_version_starts_from_the_unix_time_in_milliseconds(store):
+    assert store.corpus_version() == NOW_MS  # never 0, and not seconds
+    assert store.bump_corpus_version() == NOW_MS + 1
+    assert store.bump_corpus_version() == NOW_MS + 2
+    assert store.corpus_version() == NOW_MS + 2
 
 
 def test_a_first_bump_on_an_empty_cache_also_starts_from_the_time(store):
-    assert store.bump_corpus_version() == NOW + 1
+    assert store.bump_corpus_version() == NOW_MS + 1
 
 
 def test_a_lost_version_restarts_above_every_earlier_value(client):
     clock = {"now": NOW}
     store = CacheStore(client, wall_clock=lambda: clock["now"])
     old_key = exact_key("q", "customer", store.corpus_version(), "p")
-    store.put_entry(old_key, {"a": 1}, [], corpus_version=NOW)
+    store.put_entry(old_key, {"a": 1}, [], corpus_version=NOW_MS)
     for _ in range(5):
         store.bump_corpus_version()
     before = store.corpus_version()
-    assert before == NOW + 5
+    assert before == NOW_MS + 5
     client.delete("corpus:version")  # evicted, or lost
     clock["now"] = NOW + 3_600  # an hour later
     restarted = store.corpus_version()
-    assert restarted == NOW + 3_600 > before  # higher than anything used before
+    assert restarted == (NOW + 3_600) * 1000 > before  # higher than anything used before
     # An entry stored under an older version cannot be reached again: the key differs.
     assert exact_key("q", "customer", restarted, "p") != old_key
     assert store.get_entry(exact_key("q", "customer", restarted, "p")).status == MISS
+
+
+def test_more_bumps_than_elapsed_seconds_followed_by_key_loss_still_restarts_higher(client):
+    """The failure of a seconds-based seed: 2,000 bumps in 10 minutes put the counter at
+    start + 2,000, above the clock's start + 600, so a restart from the clock went backwards.
+    Seeded in milliseconds, the clock is at start + 600,000 and stays ahead."""
+    clock = {"now": NOW}
+    store = CacheStore(client, wall_clock=lambda: clock["now"])
+    store.corpus_version()
+    last = None
+    for _ in range(2_000):
+        last = store.bump_corpus_version()
+    assert last == NOW_MS + 2_000
+    elapsed_seconds = 600
+    assert 2_000 > elapsed_seconds  # more bumps than seconds that passed
+    clock["now"] = NOW + elapsed_seconds
+    client.delete("corpus:version")
+    restarted = store.corpus_version()
+    assert restarted == (NOW + elapsed_seconds) * 1000
+    assert restarted > last  # a seconds-based seed would have given NOW + 600, far below `last`
+    # And a single bump after the restart goes on from there, never backwards.
+    assert store.bump_corpus_version() == restarted + 1
+
+
+def test_the_seed_and_the_increment_run_in_one_transaction(client, monkeypatch):
+    kinds = []
+    original = client.pipeline
+
+    def spy(*args, **kwargs):
+        kinds.append(kwargs.get("transaction", args[0] if args else True))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(client, "pipeline", spy)
+    store = CacheStore(client, wall_clock=lambda: NOW)
+    store.corpus_version()
+    store.bump_corpus_version()
+    assert kinds == [True, True]  # MULTI/EXEC: a vanished key cannot be re-created at 1 between
+
+
+def test_an_increment_can_never_create_the_key_at_one(client):
+    # The key is missing: a bare INCR would give 1. The bump seeds first, so it never does.
+    store = CacheStore(client, wall_clock=lambda: NOW)
+    assert not client.exists("corpus:version")
+    assert store.bump_corpus_version() > 1_000_000_000_000  # milliseconds, never 1
 
 
 def test_an_existing_version_is_never_overwritten_by_the_start_value(server, store):
@@ -274,13 +319,13 @@ def test_an_existing_version_is_never_overwritten_by_the_start_value(server, sto
     later = CacheStore(
         fakeredis.FakeRedis(server=server, decode_responses=True), wall_clock=lambda: NOW + 999
     )
-    assert later.corpus_version() == NOW + 1  # SET ... NX left it alone
+    assert later.corpus_version() == NOW_MS + 1  # SET ... NX left it alone
 
 
 def test_the_version_is_shared_between_clients_of_the_same_server(server, store):
     other = CacheStore(fakeredis.FakeRedis(server=server, decode_responses=True))
     store.bump_corpus_version()
-    assert other.corpus_version() == NOW + 1
+    assert other.corpus_version() == NOW_MS + 1
 
 
 def test_concurrent_bumps_are_never_lost(server):
@@ -300,7 +345,7 @@ def test_concurrent_bumps_are_never_lost(server):
         thread.start()
     for thread in threads:
         thread.join()
-    assert stores[0].corpus_version() == NOW + 200
+    assert stores[0].corpus_version() == NOW_MS + 200
 
 
 def test_a_garbled_version_is_reported_as_unavailable_not_as_a_number(store, client, events):
@@ -428,7 +473,183 @@ def test_a_lookup_on_a_dead_cache_says_unavailable_and_raises_nothing(dead, even
     assert ("cache_unavailable", {"operation": "get_entry", "error": "ConnectionError"}) in events
 
 
-def test_every_other_call_on_a_dead_cache_reports_unavailable(dead):
+DEAD_CALLS = {
+    "corpus_version": (lambda s: s.corpus_version(), None),
+    "bump_corpus_version": (lambda s: s.bump_corpus_version(), None),
+    "put_entry": (lambda s: s.put_entry("ans:k", {}, CHUNKS, corpus_version=1), False),
+    "invalidate_chunk": (lambda s: s.invalidate_chunk("chunk-a"), None),
+    "invalidate_doc": (lambda s: s.invalidate_doc("doc-1"), None),
+    "incr_counter": (lambda s: s.incr_counter("c", 60), None),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEAD_CALLS))
+def test_each_call_reports_unavailable_through_its_own_failure_path(name, events):
+    # A fresh store per call, so no skip window from an earlier failure can answer for it.
+    call, expected = DEAD_CALLS[name]
+    store = CacheStore(
+        FlakyRedis(),
+        on_event=lambda event, fields: events.append((event, fields)),
+        clock=FakeClock(),
+    )
+    assert call(store) == expected
+    assert events and events[0][0] == "cache_unavailable"  # it really tried and failed
+    assert events[0][1]["error"] == "ConnectionError"
+
+
+def test_a_dead_cache_looks_up_nothing_and_says_so_for_a_fresh_store(events):
+    store = CacheStore(FlakyRedis(), clock=FakeClock())
+    assert store.get_entry("ans:k").status == UNAVAILABLE
+
+
+# ---- staleness writes are never skipped (10.3: invalidation is immediate) ---------------------
+
+STALENESS = {
+    "bump_corpus_version": lambda s: s.bump_corpus_version(),
+    "invalidate_chunk": lambda s: s.invalidate_chunk("chunk-a"),
+    "invalidate_doc": lambda s: s.invalidate_doc("doc-1"),
+}
+SKIPPED_READS = {
+    "get_entry": lambda s: s.get_entry("ans:k"),
+    "corpus_version": lambda s: s.corpus_version(),
+    "incr_counter": lambda s: s.incr_counter("c", 60),
+    "put_entry": lambda s: s.put_entry("ans:k", {}, [], corpus_version=1),
+    "rate_limit": lambda s: s.check_rate_limit("chat", "user-1", limit=1, window_seconds=60),
+}
+
+
+@pytest.mark.parametrize("name", sorted(STALENESS))
+def test_a_staleness_write_inside_the_skip_window_still_tries_and_alerts(
+    name, dead, dead_client, events
+):
+    dead.get_entry("ans:k")  # a blip: the skip window is now open
+    tried = dead_client.calls
+    events.clear()
+    assert STALENESS[name](dead) is None  # not done, and the caller can tell
+    assert dead_client.calls > tried  # it tried anyway: the window did not skip it
+    names = [event for event, _ in events]
+    assert "cache_staleness_write_failed" in names
+    alert = next(fields for event, fields in events if event == "cache_staleness_write_failed")
+    assert alert == {"operation": name, "error": "ConnectionError"}  # names only
+
+
+@pytest.mark.parametrize("name", sorted(SKIPPED_READS))
+def test_reads_writes_of_entries_and_rate_limits_keep_skipping_inside_the_window(
+    name, dead, dead_client
+):
+    dead.get_entry("ans:k")
+    tried = dead_client.calls
+    SKIPPED_READS[name](dead)
+    assert dead_client.calls == tried  # not even tried: the window skipped it
+
+
+@pytest.mark.parametrize("name", sorted(STALENESS))
+def test_a_staleness_write_with_no_earlier_failure_also_alerts(name, dead, events):
+    assert STALENESS[name](dead) is None
+    assert [e for e, _ in events] == ["cache_unavailable", "cache_staleness_write_failed"]
+
+
+def test_a_staleness_write_that_succeeds_inside_the_window_ends_the_window(client, events, clock):
+    flaky = FlakyRedis(inner=client, down=True)
+    store = CacheStore(
+        flaky,
+        on_event=lambda e, f: events.append((e, f)),
+        clock=clock,
+        wall_clock=lambda: NOW,
+    )
+    assert store.get_entry("ans:k").status == UNAVAILABLE  # the window opens
+    flaky.down = False  # Upstash is back, but no time has passed
+    assert store.get_entry("ans:k").status == UNAVAILABLE  # reads still skip
+    assert store.bump_corpus_version() == NOW_MS + 1  # the bump tried, and worked
+    assert store.get_entry("ans:k").status == MISS  # which proves Upstash is up: window over
+
+
+def test_a_failed_invalidation_leaves_the_entry_in_place_so_a_retry_can_finish_it(
+    server, client, events, clock
+):
+    store = CacheStore(client, wall_clock=lambda: NOW)
+    key = exact_key("q", "customer", 1, "p")
+    store.put_entry(key, {"a": 1}, CHUNKS[:1], corpus_version=1)
+    flaky = FlakyRedis(inner=client, down=True)
+    broken = CacheStore(flaky, on_event=lambda e, f: events.append((e, f)), clock=clock)
+    assert broken.invalidate_doc("doc-1") is None  # not done
+    assert store.get_entry(key).status == HIT  # still there: nothing was half-removed
+    flaky.down = False
+    assert broken.invalidate_doc("doc-1") == 1  # tried again at once, and done
+    assert store.get_entry(key).status == MISS
+
+
+# ---- put_entry: the reverse sets first, the entry last -----------------------------------------
+
+
+class RecordingPipeline:
+    """Collects the commands, then applies them one by one and stops at command `fail_at`."""
+
+    def __init__(self, client, fail_at=None):
+        self.client = client
+        self.fail_at = fail_at
+        self.commands = []
+
+    def __getattr__(self, name):
+        def add(*args, **kwargs):
+            self.commands.append((name, args, kwargs))
+            return self
+
+        return add
+
+    def execute(self):
+        for index, (name, args, kwargs) in enumerate(self.commands):
+            if index == self.fail_at:
+                raise redis.exceptions.ConnectionError("connection dropped")
+            getattr(self.client, name)(*args, **kwargs)
+        return []
+
+
+class PipelineClient:
+    def __init__(self, client, fail_at=None):
+        self.client = client
+        self.fail_at = fail_at
+        self.last = None
+
+    def pipeline(self, *args, **kwargs):
+        self.last = RecordingPipeline(self.client, self.fail_at)
+        return self.last
+
+
+def test_put_entry_writes_every_reverse_set_before_the_entry(client):
+    wrapper = PipelineClient(client)
+    store = CacheStore(wrapper, wall_clock=lambda: NOW)
+    key = exact_key("q", "customer", 1, "p")
+    assert store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1) is True
+    names = [name for name, _, _ in wrapper.last.commands]
+    assert names[-1] == "set"  # the entry is written last
+    assert names.count("set") == 1 and set(names[:-1]) == {"sadd", "expire"}
+    assert names[:-1].count("sadd") == 5  # chunk-a, chunk-b, chunk-c, doc-1, doc-2
+
+
+@pytest.mark.parametrize("fail_at", range(0, 11))
+def test_a_drop_at_any_point_never_leaves_an_entry_that_no_invalidation_can_find(client, fail_at):
+    wrapper = PipelineClient(client, fail_at=fail_at)
+    store = CacheStore(wrapper, wall_clock=lambda: NOW, clock=FakeClock())
+    key = exact_key("q", "customer", 1, "p")
+    assert store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1) is False
+    assert not client.exists(key)  # the entry is written last, so it was never written
+    # Whatever reverse sets were written name a key with no entry: invalidating is a harmless 0.
+    healthy = CacheStore(client, wall_clock=lambda: NOW)
+    assert healthy.invalidate_doc("doc-1") == 0 and healthy.invalidate_doc("doc-2") == 0
+
+
+def test_a_drop_after_everything_but_the_last_command_is_the_worst_case_and_is_safe(client):
+    wrapper = PipelineClient(client, fail_at=10)  # the SET is command 10 (0-based)
+    store = CacheStore(wrapper, wall_clock=lambda: NOW, clock=FakeClock())
+    key = exact_key("q", "customer", 1, "p")
+    store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1)
+    assert client.smembers("chunk:chunk-a") == {key}  # the sets list it
+    assert client.get(key) is None  # but there is no entry to serve
+
+
+def test_every_dead_call_still_reports_unavailable_in_order(dead):
+    # Kept as a smoke test of the whole surface on one store.
     assert dead.corpus_version() is None
     assert dead.bump_corpus_version() is None
     assert dead.put_entry("ans:k", {}, CHUNKS, corpus_version=1) is False
@@ -482,7 +703,7 @@ def test_the_same_store_recovers_when_upstash_comes_back(client, events, clock):
     assert store.put_entry("ans:k", {"answer": "x"}, [], corpus_version=1) is True
     found = store.get_entry("ans:k")
     assert found.status == HIT and found.entry["payload"] == {"answer": "x"}
-    assert store.corpus_version() == NOW  # the version works again too
+    assert store.corpus_version() == NOW_MS  # the version works again too
 
 
 def test_the_rate_limit_fails_open_with_an_alert_event_every_time(dead, events):

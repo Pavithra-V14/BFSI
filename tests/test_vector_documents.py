@@ -1,5 +1,7 @@
 """The Qdrant `documents` collection, in Qdrant's in-memory mode (no network, no cluster)."""
 
+from datetime import UTC, datetime
+
 import pytest
 from qdrant_client import QdrantClient, models
 
@@ -13,11 +15,14 @@ from app.vector.documents import (
     PAYLOAD_INDEXES,
     SPARSE_VECTOR,
     CollectionMismatch,
+    InvalidEffectiveTo,
     VectorConfigError,
+    checked_payload,
     chunk_is_active,
     client_from_env,
     ensure_documents_collection,
     make_client,
+    validate_effective_to,
 )
 
 
@@ -235,8 +240,8 @@ EFFECTIVE_TO_CASES = {
     "null": ({"doc_id": "d-null", "effective_to": None}, True),
     "past date": ({"doc_id": "d-past", "effective_to": "2020-01-01T00:00:00Z"}, False),
     "today": ({"doc_id": "d-today", "effective_to": "2026-10-06T00:00:00Z"}, False),
+    # The validator refuses to store a future date; the filter still treats one as inactive.
     "future date": ({"doc_id": "d-future", "effective_to": "2999-01-01T00:00:00Z"}, False),
-    "empty string": ({"doc_id": "d-empty", "effective_to": ""}, False),
 }
 
 
@@ -288,6 +293,97 @@ def test_chunk_is_active_handles_a_missing_payload_and_an_empty_list():
 def test_the_rule_is_written_down_in_the_module():
     text = " ".join(documents.__doc__.split())  # the docstring wraps lines
     assert "empty" in text and "no future dates" in text and "inactive" in text
+
+
+# ---- what may be stored in effective_to is enforced in code -----------------------------------
+
+NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "2026-10-06T00:00:00Z",
+        "2026-10-06T12:00:00+00:00",  # exactly now is allowed
+        "2020-01-01T08:30:00+05:30",
+        "2026-10-06T10:00:00.123456Z",
+    ],
+)
+def test_null_or_a_complete_past_iso_moment_with_an_offset_may_be_stored(value):
+    assert validate_effective_to(value, now=NOW) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("", "empty string"),
+        ("   ", "empty string"),
+        ("2026-10-06", "needs a time"),  # a date without a time
+        ("2026-10-06T00:00:00", "UTC offset"),  # a time without an offset
+        ("yesterday", "valid ISO"),  # has a letter T in it, but is not a date
+        ("20261006T120000Z", "valid ISO"),  # only the extended form is stored
+        ("2026-13-45T00:00:00Z", "valid ISO"),
+        ("2026-10-06T12:00:01Z", "future"),  # one second after now
+        ("2999-01-01T00:00:00Z", "future"),
+        (0, "ISO 8601"),
+        (1_760_000_000, "ISO 8601"),
+        ([], "ISO 8601"),
+        (["2020-01-01T00:00:00Z"], "ISO 8601"),
+        (True, "ISO 8601"),
+    ],
+)
+def test_anything_else_is_refused_and_an_empty_string_is_never_stored(value, why):
+    with pytest.raises(InvalidEffectiveTo, match=why):
+        validate_effective_to(value, now=NOW)
+
+
+def test_the_current_moment_is_the_default_limit():
+    assert validate_effective_to("2020-01-01T00:00:00Z") == "2020-01-01T00:00:00Z"
+    with pytest.raises(InvalidEffectiveTo, match="future"):
+        validate_effective_to("2999-01-01T00:00:00Z")
+
+
+def test_a_checked_payload_writes_an_explicit_null_for_an_active_chunk():
+    assert checked_payload({"doc_id": "d"}, now=NOW) == {"doc_id": "d", "effective_to": None}
+    assert checked_payload({"doc_id": "d", "effective_to": None}, now=NOW)["effective_to"] is None
+    done = checked_payload({"effective_to": "2026-01-01T00:00:00Z"}, now=NOW)
+    assert done["effective_to"] == "2026-01-01T00:00:00Z"
+
+
+def test_a_checked_payload_refuses_an_empty_string_and_leaves_the_original_alone():
+    original = {"doc_id": "d", "effective_to": ""}
+    with pytest.raises(InvalidEffectiveTo):
+        checked_payload(original, now=NOW)
+    assert original == {"doc_id": "d", "effective_to": ""}  # not modified, not half-fixed
+
+
+def test_a_checked_payload_is_active_exactly_when_the_filter_says_so(client):
+    # What passes the check and is written to Qdrant is judged the same by both rules.
+    ensure_documents_collection(client)
+    stored = [
+        checked_payload({"doc_id": "a"}, now=NOW),
+        checked_payload({"doc_id": "b", "effective_to": None}, now=NOW),
+        checked_payload({"doc_id": "c", "effective_to": "2025-05-05T00:00:00Z"}, now=NOW),
+    ]
+    points = [
+        models.PointStruct(
+            id=number,
+            vector={
+                DENSE_VECTOR: [1.0] + [0.0] * (DIMENSIONS - 1),
+                SPARSE_VECTOR: models.SparseVector(indices=[number], values=[1.0]),
+            },
+            payload=payload,
+        )
+        for number, payload in enumerate(stored, start=1)
+    ]
+    client.upsert(COLLECTION, points=points)
+    found, _ = client.scroll(COLLECTION, scroll_filter=ACTIVE_ONLY, limit=10)
+    assert (
+        {p.payload["doc_id"] for p in found}
+        == {p["doc_id"] for p in stored if chunk_is_active(p)}
+        == {"a", "b"}
+    )
 
 
 # ---- Render rules, rejected credentials ------------------------------------------------------

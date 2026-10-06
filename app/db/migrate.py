@@ -139,6 +139,7 @@ class _Sqlite:
             raise MigrationError("a SQLite URL looks like sqlite:///path/to/file.db")
         # isolation_level=None: this class sends BEGIN and COMMIT itself.
         self.conn = sqlite3.connect(url[len("sqlite:///") :], isolation_level=None)
+        self.conn.execute("PRAGMA foreign_keys = ON")  # CLAUDE.md: every SQLite connection
 
     def read_applied(self) -> dict[int, tuple[str, str]]:
         table = self.conn.execute(

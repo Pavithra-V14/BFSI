@@ -10,9 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from app.db.chats import clear_review_details_for_session, delete_session
+from app.db.chats import (
+    ForeignKeysOff,
+    clear_review_details_for_session,
+    delete_session,
+    ensure_foreign_keys,
+)
 from app.db.identity import normalise_email, normalise_username
-from app.db.migrate import load_migrations, run
+from app.db.migrate import _Sqlite, load_migrations, run
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
@@ -620,3 +625,72 @@ def test_feedback_on_the_deleted_chat_goes_with_it(db):
     )
     delete_session(db, sid)
     assert count(db, "feedback_entries") == 0
+
+
+# ---- SQLite foreign keys are switched on by our code, not left to luck (CLAUDE.md) ---------------
+
+
+@pytest.fixture
+def plain_db(tmp_path):
+    """A connection that did NOT turn foreign keys on: SQLite's default, which ignores them."""
+    path = tmp_path / "plain.db"
+    run(f"sqlite:///{path}", MIGRATIONS, log=lambda line: None)
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA foreign_keys").fetchone() == (0,)
+    yield conn
+    conn.close()
+
+
+def _chat(conn):
+    user = add_user(conn)
+    sid = add_session(conn, user)
+    mid = add_message(conn, sid, 1, "assistant")
+    conn.execute(
+        "INSERT INTO feedback_entries (id, message_id, user_id, rating) VALUES (?, ?, ?, 'down')",
+        (new_id(), mid, user),
+    )
+    return sid
+
+
+def test_without_the_pragma_a_plain_delete_leaves_the_messages_behind(plain_db):
+    sid = _chat(plain_db)
+    plain_db.commit()
+    plain_db.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+    assert count(plain_db, "messages") == 1  # the cascade did not fire: the chat text survives
+
+
+def test_delete_session_switches_foreign_keys_on_so_the_cascade_fires(plain_db):
+    sid = _chat(plain_db)
+    plain_db.commit()  # no transaction is open: the pragma can take effect
+    assert delete_session(plain_db, sid) is True
+    assert count(plain_db, "messages") == 0 and count(plain_db, "feedback_entries") == 0
+    assert plain_db.execute("PRAGMA foreign_keys").fetchone() == (1,)
+
+
+def test_delete_session_refuses_rather_than_half_deleting_when_the_pragma_cannot_apply(plain_db):
+    sid = _chat(plain_db)  # the inserts left a transaction open: SQLite ignores the pragma now
+    assert plain_db.in_transaction
+    with pytest.raises(ForeignKeysOff, match="PRAGMA foreign_keys = ON"):
+        delete_session(plain_db, sid)
+    assert count(plain_db, "sessions") == 1 and count(plain_db, "messages") == 1  # nothing deleted
+
+
+def test_ensure_foreign_keys_leaves_a_connection_that_already_has_them_alone(db):
+    ensure_foreign_keys(db)
+    assert db.execute("PRAGMA foreign_keys").fetchone() == (1,)
+
+
+def test_ensure_foreign_keys_does_nothing_for_a_postgres_connection():
+    class FakePostgres:
+        def execute(self, *args):
+            raise AssertionError("no pragma may be sent to Postgres")
+
+    ensure_foreign_keys(FakePostgres())
+
+
+def test_the_migration_runner_opens_sqlite_with_foreign_keys_on(tmp_path):
+    runner = _Sqlite(f"sqlite:///{tmp_path / 'm.db'}")
+    try:
+        assert runner.conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        runner.close()

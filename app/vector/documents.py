@@ -15,22 +15,30 @@ is empty (missing or null), and inactive as soon as it holds any value. There ar
 dates: a chunk is never "active until a date", and ingestion sets `effective_to` at the moment
 a chunk is superseded or removed. `ACTIVE_ONLY` is the search filter that expresses the rule and
 `chunk_is_active` is the same rule for a payload fetched for the cache's read-time check.
+
+What may be stored is enforced in code: `validate_effective_to` accepts only None (or no field)
+or a complete ISO 8601 date and time with a UTC offset that is not in the future. An empty string,
+a date without a time, a time without an offset, an unreadable string or a future moment is
+refused. Ingestion must pass every payload through `checked_payload` before it writes to Qdrant.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 from qdrant_client import QdrantClient, models
 
 from app.gateway.embeddings import DIMENSIONS, running_on_render
 from app.isolation import is_local_url
-from app.store_errors import StoreRejected, StoreUnavailable, vector_errors
+from app.store_errors import StoreRejected, StoreUnavailable, call_vector
 
 COLLECTION = "documents"
 DENSE_VECTOR = "dense"
@@ -63,6 +71,51 @@ def chunk_is_active(payload: Mapping[str, object] | None) -> bool:
     included, means inactive."""
     value = (payload or {}).get("effective_to")
     return value is None or (isinstance(value, list) and not value)
+
+
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DATE_AND_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}")  # the extended ISO 8601 form
+
+
+class InvalidEffectiveTo(ValueError):
+    """A value that must never be stored in effective_to. The message names the problem only."""
+
+
+def validate_effective_to(value: object, *, now: datetime | None = None) -> str | None:
+    """Return the value to store: None, or a complete ISO 8601 date and time with an offset.
+
+    Refused (InvalidEffectiveTo): an empty or blank string, a date without a time, a time with no
+    offset, anything that does not parse, anything that is not a string, and any moment after
+    `now` (there are no future dates: a chunk is made inactive when it is superseded or removed).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidEffectiveTo("effective_to must be null or an ISO 8601 date and time")
+    text = value.strip()
+    if not text:
+        raise InvalidEffectiveTo("effective_to must not be an empty string (use null)")
+    if _DATE_ONLY.fullmatch(text):
+        raise InvalidEffectiveTo("effective_to needs a time as well as a date")
+    if not _DATE_AND_TIME.match(text):
+        raise InvalidEffectiveTo("effective_to is not a valid ISO 8601 date and time")
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        raise InvalidEffectiveTo("effective_to is not a valid ISO 8601 date and time") from None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise InvalidEffectiveTo("effective_to needs a UTC offset, for example Z or +00:00")
+    if moment > (now or datetime.now(UTC)):
+        raise InvalidEffectiveTo("effective_to must not be in the future")
+    return text
+
+
+def checked_payload(payload: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """A copy of a chunk payload that is safe to write: effective_to is validated, and an absent
+    field is written as an explicit null so that "active" is always visible in the data."""
+    checked = dict(payload)
+    checked["effective_to"] = validate_effective_to(payload.get("effective_to"), now=now)
+    return checked
 
 
 class VectorConfigError(Exception):
@@ -139,9 +192,11 @@ def ensure_documents_collection(client: QdrantClient) -> EnsureResult:
     """Create the collection and its payload indexes if missing; verify them if present.
 
     Safe to run again. A collection with a different shape is never touched: the function raises
-    CollectionMismatch. If Qdrant cannot be reached it raises VectorStoreUnavailable.
+    CollectionMismatch. If Qdrant cannot be reached it raises VectorStoreUnavailable, and if it
+    refuses the key or the certificate, StoreRejected.
     """
-    with vector_errors():
+
+    def work() -> EnsureResult:
         created = not client.collection_exists(COLLECTION)
         if created:
             client.create_collection(
@@ -172,7 +227,9 @@ def ensure_documents_collection(client: QdrantClient) -> EnsureResult:
                 warnings.filterwarnings("ignore", message="Payload indexes have no effect")
                 client.create_payload_index(COLLECTION, name, field_schema=schema)
             indexes_created.append(name)
-    return EnsureResult(created=created, indexes_created=indexes_created)
+        return EnsureResult(created=created, indexes_created=indexes_created)
+
+    return call_vector(work)
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:

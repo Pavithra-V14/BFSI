@@ -317,6 +317,7 @@ Prompts are **versioned files** in a `prompts/` folder with a fixed structure: r
 5. A request that began before an ingest must not write to the cache if the corpus version changed meanwhile.
 6. The sparse index is refreshed in the ingest and delete path.
 7. Role or permission changes bump the version for that role scope.
+- **[P]** The corpus version starts from the current Unix time in milliseconds (never from 0), so a counter that is lost restarts higher than any earlier value. The bump and the invalidations are never skipped when Upstash had a recent failure, and a failure of either is an alert, because ingest and delete are not complete without them.
 
 ## 11. Reliability
 
@@ -333,6 +334,8 @@ Prompts are **versioned files** in a `prompts/` folder with a fixed structure: r
 | Rerank | Next reranker, then lexical; the UI shows a degraded-mode notice |
 
 When any fallback is active (mock answer, skipped rerank), the UI says so instead of presenting the answer as normal.
+
+- **[P]** A store that answers but refuses us (a rejected key or password, an unknown role, database or tenant, a missing server access rule, a TLS certificate failure) is reported to the operator as a settings error, not as "temporarily unavailable"; only a store that cannot be reached counts as down.
 
 ### 11.2 Endpoints
 - Full **health endpoint: admin-only**.
