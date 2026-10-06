@@ -11,12 +11,12 @@ reason any earlier step was skipped. Keys never appear in results, logs or error
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import random
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -60,11 +60,13 @@ from app.gateway.errors import (
     ContextWindowExceeded,
     CreditExhausted,
     EmbeddingUnavailable,
+    EmptyOutput,
     GatewayError,
     InternalError,
     InvalidOutput,
     RateLimited,
     SchemaSurprise,
+    Truncated,
     classify,
 )
 from app.gateway.keys import KeyPool
@@ -80,6 +82,7 @@ from app.gateway.tokens import TokenCounter
 log = logging.getLogger("app.gateway")
 
 AUTH_COOLDOWN_SECONDS = 3_600.0
+EVENT_BUFFER = 1_000
 LITELLM_PREFIX = {"groq": "groq", "gemini": "gemini", "openrouter": "openrouter"}
 MOCK_TEXT = "[offline mock answer: no model could be reached]"
 
@@ -120,6 +123,7 @@ class CompletionResult:
     output_tokens: int = 0
     reasoning_tokens: int | None = None
     truncated: bool = False  # ran out of output tokens (reasoning can use the whole budget)
+    finish_reason: str | None = None
     cost_billed: float | None = None
     cost_source: str = "none"
     shadow_cost: float = 0.0
@@ -170,7 +174,8 @@ class Gateway:
         self._allow_dev_embedding = allow_dev_embedding
         self._env = env
         self._windows = ContextWindows(config.context_overrides)
-        self.events: list[tuple[str, dict[str, Any]]] = []
+        # The last EVENT_BUFFER events only, so a long-running service cannot grow without limit.
+        self.events: deque[tuple[str, dict[str, Any]]] = deque(maxlen=EVENT_BUFFER)
         self.stats = DeciderStats(self._clock)
         self._breakers: dict[tuple[str, str], CircuitBreaker] = {}
         self._pools = self._build_pools()
@@ -299,81 +304,95 @@ class Gateway:
         attempts = 0
         reason = "all_keys_limited"
         failed: set[str] = set()  # fingerprints of keys that failed during this call
-        while True:
-            if deadline is not None and self._clock.now() >= deadline:
-                breaker.record_neutral()
-                return StepOutcome(False, reason="deadline")
-            lease = pool.acquire(estimated_tokens)
-            if lease is None:
-                breaker.record_failure()
-                self._emit("all_keys_exhausted", provider=pool_name, tier=tier)
-                return StepOutcome(False, reason=reason)
-            try:
-                value, actual = await call(lease.key)
-            except asyncio.CancelledError:
-                # The caller gave up (for example its time budget ran out). Always leave a clean
-                # state: this call's tokens count as zero and a half-open probe is released.
-                pool.correct(lease, 0)
-                breaker.record_neutral()
-                raise
-            except Exception as exc:
-                error = classify(exc)
-                pool.correct(lease, error.used_tokens)  # a failed answer still used tokens
-                if isinstance(error, ContextWindowExceeded):
+        lease = None  # a reservation that is still open (not yet settled)
+        try:
+            while True:
+                if deadline is not None and self._clock.now() >= deadline:
                     breaker.record_neutral()
-                    raise error from None
-                if isinstance(error, InternalError):
-                    # A bug in our own code, not an outage: no retry, the breaker stays neutral,
-                    # and only the exception class name is logged (never its message).
-                    breaker.record_neutral()
-                    log.error(
-                        "gateway internal error: pool=%s exception=%s",
-                        pool_name,
-                        error.exception_name,
-                    )
-                    self._emit(
-                        "internal_error",
-                        provider=pool_name,
-                        tier=tier,
-                        exception=error.exception_name,
-                    )
-                    return StepOutcome(False, reason=error.reason, fingerprint=lease.fingerprint)
-                if isinstance(error, RateLimited):
-                    pool.cool_down(lease.fingerprint, error.retry_after)
-                    failed.add(lease.fingerprint)
-                    reason = "rate_limited"
-                    continue
-                if isinstance(error, (AuthFailed, CreditExhausted)):
-                    pool.cool_down(lease.fingerprint, AUTH_COOLDOWN_SECONDS)
-                    failed.add(lease.fingerprint)
-                    reason = error.reason
-                    continue
-                if isinstance(error, SchemaSurprise):
+                    return StepOutcome(False, reason="deadline")
+                lease = pool.acquire(estimated_tokens)
+                if lease is None:
                     breaker.record_failure()
-                    return StepOutcome(False, reason=error.reason, fingerprint=lease.fingerprint)
-                if isinstance(error, (BadRequest, InvalidOutput)):
-                    breaker.record_neutral()
-                    return StepOutcome(False, reason=error.reason, fingerprint=lease.fingerprint)
-                # A timeout or a 5xx: retry with backoff, possibly on the next key.
-                failed.add(lease.fingerprint)
-                reason = error.reason
-                if failure_cooldown is not None:
-                    pool.cool_down(lease.fingerprint, failure_cooldown)
-                attempts += 1
-                if attempts >= max_attempts:
-                    # Give up on this provider for this call. The breaker trips only if every
-                    # key of the pool is failing or cooling down; otherwise the provider is
-                    # merely skipped this time.
-                    if len(failed | pool.cooling_fingerprints()) >= pool.size:
-                        breaker.record_failure()
-                    else:
+                    self._emit("all_keys_exhausted", provider=pool_name, tier=tier)
+                    return StepOutcome(False, reason=reason)
+                fp = lease.fingerprint
+                try:
+                    value, actual = await call(lease.key)
+                except Exception as exc:
+                    error = classify(exc)
+                    pool.correct(lease, error.used_tokens)  # a failed answer still used tokens
+                    lease = None  # settled
+                    if isinstance(error, ContextWindowExceeded):
+                        raise error from None
+                    if isinstance(error, InternalError):
+                        # A bug in our own code, not an outage: no retry, the breaker stays
+                        # neutral, and only the exception class name is logged (never its text).
                         breaker.record_neutral()
-                    return StepOutcome(False, reason=reason, fingerprint=lease.fingerprint)
-                await self._clock.sleep(backoff_delay(attempts - 1, rng=self._rng))
-                continue
-            pool.correct(lease, actual)
-            breaker.record_success()
-            return StepOutcome(True, value, lease.fingerprint)
+                        log.error(
+                            "gateway internal error: pool=%s exception=%s",
+                            pool_name,
+                            error.exception_name,
+                        )
+                        self._emit(
+                            "internal_error",
+                            provider=pool_name,
+                            tier=tier,
+                            exception=error.exception_name,
+                        )
+                        return StepOutcome(False, reason=error.reason, fingerprint=fp)
+                    if isinstance(error, RateLimited):
+                        pool.cool_down(fp, error.retry_after)
+                        failed.add(fp)
+                        reason = "rate_limited"
+                        continue
+                    if isinstance(error, (AuthFailed, CreditExhausted)):
+                        pool.cool_down(fp, AUTH_COOLDOWN_SECONDS)
+                        failed.add(fp)
+                        reason = error.reason
+                        continue
+                    if isinstance(error, SchemaSurprise):
+                        breaker.record_failure()
+                        return StepOutcome(False, reason=error.reason, fingerprint=fp)
+                    if isinstance(error, (BadRequest, InvalidOutput)):
+                        breaker.record_neutral()
+                        return StepOutcome(False, reason=error.reason, fingerprint=fp)
+                    # A timeout or a 5xx: retry with backoff, possibly on the next key.
+                    failed.add(fp)
+                    reason = error.reason
+                    if failure_cooldown is not None:
+                        pool.cool_down(fp, failure_cooldown)  # failover: leave this key at once
+                    attempts += 1
+                    if attempts >= max_attempts:
+                        # Give up on this provider for this call. Every key that failed now
+                        # cools down, so the next call already knows. The breaker trips only if
+                        # every key of the pool is failing or cooling down; otherwise the
+                        # provider is merely skipped this time.
+                        for failed_fp in failed:
+                            pool.cool_down(failed_fp, cfg_module.KEY_FAILURE_COOLDOWN_SECONDS)
+                        if len(failed | pool.cooling_fingerprints()) >= pool.size:
+                            breaker.record_failure()
+                        else:
+                            breaker.record_neutral()
+                        return StepOutcome(False, reason=reason, fingerprint=fp)
+                    delay = backoff_delay(attempts - 1, rng=self._rng)
+                    if deadline is not None and self._clock.now() + delay >= deadline:
+                        breaker.record_neutral()  # no time left for another try
+                        return StepOutcome(False, reason="deadline", fingerprint=fp)
+                    await self._clock.sleep(delay)
+                    continue
+                pool.correct(lease, actual)
+                lease = None
+                breaker.record_success()
+                return StepOutcome(True, value, fp)
+        except BaseException:
+            # The single clean-up path. Whatever interrupts this step (a cancellation while a
+            # call or a backoff sleep is running, an error re-raised on purpose, anything else)
+            # leaves nothing behind: an open reservation counts zero tokens and a half-open
+            # probe is released.
+            if lease is not None:
+                pool.correct(lease, 0)
+            breaker.record_neutral()
+            raise
 
     # ---- chat completions -----------------------------------------------------------
 
@@ -401,27 +420,53 @@ class Gateway:
         validator: Callable[[str], Any] | None,
         per_call: float,
         deadline: float | None,
+        reasoning_effort: str | None = None,
     ) -> StepOutcome:
+        """`max_tokens` is the whole output reservation: the answer limit plus the reasoning
+        allowance. The same number is sent to the provider and reserved in the limiter."""
         model = step.litellm_model
         response_format = (
             {"type": "json_object"} if json_mode and self._supports_response_format(model) else None
         )
 
-        async def call(key: str) -> tuple[tuple[RawCompletion, Any], int]:
-            raw = await self._backend.complete(
+        async def ask(key: str, limit: int, effort: str | None) -> RawCompletion:
+            return await self._backend.complete(
                 model=model,
                 messages=messages,
                 api_key=key,
-                max_tokens=max_tokens,
+                max_tokens=limit,
                 timeout=self._remaining(per_call, deadline),
                 response_format=response_format,
+                reasoning_effort=effort,
             )
+
+        def used_by(raw: RawCompletion) -> tuple[int, int]:
             used_in = raw.prompt_tokens if raw.prompt_tokens is not None else prompt_tokens
             used_out = (
                 raw.completion_tokens
                 if raw.completion_tokens is not None
                 else self._counter.count_text(raw.text)
             )
+            return used_in, used_out
+
+        async def call(key: str) -> tuple[tuple[RawCompletion, Any], int]:
+            raw = await ask(key, max_tokens, reasoning_effort)
+            if _ran_out_of_output(raw):
+                # The model spent its whole output limit thinking and wrote no text. Try once
+                # more with more room and the lowest thinking level. Both calls' tokens count.
+                first = raw
+                raw = await ask(key, max_tokens * 2, "low")
+                raw = _combine(first, raw)
+                if _ran_out_of_output(raw):
+                    spent = sum(used_by(raw))
+                    error = Truncated()
+                    error.used_tokens = spent
+                    raise error
+            elif not raw.text.strip():
+                empty = EmptyOutput()  # an empty answer is never returned
+                empty.used_tokens = sum(used_by(raw))
+                raise empty
+            used_in, used_out = used_by(raw)
             try:
                 parsed = validator(raw.text) if validator else None
             except GatewayError as error:
@@ -482,6 +527,7 @@ class Gateway:
             output_tokens=tokens_out,
             reasoning_tokens=raw.reasoning_tokens,
             truncated=raw.finish_reason == "length",
+            finish_reason=raw.finish_reason,
             cost_billed=cost.billed,
             cost_source=cost.billed_source,
             shadow_cost=cost.shadow,
@@ -509,14 +555,22 @@ class Gateway:
         if tier not in ("answer", "decide"):
             raise ValueError("tier must be 'answer' or 'decide'")
         started = self._clock.now()
-        max_tokens = max_tokens or (
+        answer_limit = max_tokens or (
             cfg_module.MAX_OUTPUT_TOKENS_JSON if json_mode else cfg_module.MAX_OUTPUT_TOKENS_ANSWER
+        )
+        # Hidden thinking counts against the output limit, so reasoning models get an allowance on
+        # top. The same number is sent to the provider and reserved in the limiter.
+        reserved = answer_limit + self.config.reasoning_allowance
+        effort = (
+            self.config.reasoning_effort_answer
+            if tier == "answer"
+            else self.config.reasoning_effort_decide
         )
         steps = self.answer_steps() if tier == "answer" else self.decide_steps()
         if only_provider is not None:  # a diagnostic switch, used by the smoke test
             steps = [s for s in steps if s.provider == only_provider]
         prompt_tokens = self._counter.count_messages(messages)
-        self._windows.check(prompt_tokens, max_tokens, [s.litellm_model for s in steps])
+        self._windows.check(prompt_tokens, reserved, [s.litellm_model for s in steps])
         per_call, deadline = self._timing(timeout_s)
         validator = extract_json if json_mode else None
         skipped: list[tuple[str, str]] = []
@@ -526,11 +580,12 @@ class Gateway:
                 tier,
                 messages,
                 prompt_tokens=prompt_tokens,
-                max_tokens=max_tokens,
+                max_tokens=reserved,
                 json_mode=json_mode,
                 validator=validator,
                 per_call=per_call,
                 deadline=deadline,
+                reasoning_effort=effort,
             )
             if outcome.ok:
                 result = self._completion_result(step, outcome, skipped, started, prompt_tokens)
@@ -574,7 +629,10 @@ class Gateway:
         per_call, deadline = self._timing(timeout_s)
         skipped: list[tuple[str, str]] = []
 
-        result = await self._try_jev(questions, state, tier, per_call, deadline, started)
+        try:
+            result = await self._try_jev(questions, state, tier, per_call, deadline, started)
+        except ContextWindowExceeded as error:  # a fallback is always available: never abort
+            result = error.reason
         if isinstance(result, DecisionResult):
             return result
         skipped.append(("jev", result))
@@ -583,24 +641,29 @@ class Gateway:
         steps = self.decide_steps() if tier == "decide" else self.judge_steps()
         messages = build_fallback_messages(state, questions)
         prompt_tokens = self._counter.count_messages(messages)
-        max_tokens = cfg_module.MAX_OUTPUT_TOKENS_JSON
+        max_tokens = cfg_module.MAX_OUTPUT_TOKENS_JSON + self.config.reasoning_allowance
         try:
             self._windows.check(prompt_tokens, max_tokens, [s.litellm_model for s in steps])
         except ContextWindowExceeded as error:
             skipped.append(("all", error.reason))
             steps = []
         for step in steps:
-            outcome = await self._llm_step(
-                step,
-                tier,
-                messages,
-                prompt_tokens=prompt_tokens,
-                max_tokens=max_tokens,
-                json_mode=True,
-                validator=lambda text: parse_fallback_answers(text, questions),
-                per_call=per_call,
-                deadline=deadline,
-            )
+            try:
+                outcome = await self._llm_step(
+                    step,
+                    tier,
+                    messages,
+                    prompt_tokens=prompt_tokens,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                    validator=lambda text: parse_fallback_answers(text, questions),
+                    per_call=per_call,
+                    deadline=deadline,
+                    reasoning_effort=self.config.reasoning_effort_decide,
+                )
+            except ContextWindowExceeded as error:  # this model's window is too small: next one
+                skipped.append((step.provider, error.reason))
+                continue
             if outcome.ok:
                 completion = self._completion_result(step, outcome, skipped, started, prompt_tokens)
                 self.stats.record(tier, step.provider)
@@ -883,6 +946,42 @@ class Gateway:
                 state = pool.status()
             report[name] = {"keys": pool.size, "state": state, "tiers": tiers}
         return report
+
+
+def _ran_out_of_output(raw: RawCompletion) -> bool:
+    """True if there is no text because the output limit was used up (mostly by thinking)."""
+    if raw.text.strip():
+        return False
+    if raw.finish_reason == "length":
+        return True
+    return (
+        raw.reasoning_tokens is not None
+        and raw.completion_tokens is not None
+        and raw.reasoning_tokens >= raw.completion_tokens
+        and raw.reasoning_tokens > 0
+    )
+
+
+def _sum_optional(first: int | None, second: int | None) -> int | None:
+    if first is None and second is None:
+        return None
+    return (first or 0) + (second or 0)
+
+
+def _combine(first: RawCompletion, second: RawCompletion) -> RawCompletion:
+    """One result that stands for two calls: their tokens and cost added, the last outcome kept."""
+    cost = (
+        first.cost_usd + second.cost_usd
+        if first.cost_usd is not None and second.cost_usd is not None
+        else None
+    )
+    return replace(
+        second,
+        prompt_tokens=_sum_optional(first.prompt_tokens, second.prompt_tokens),
+        completion_tokens=_sum_optional(first.completion_tokens, second.completion_tokens),
+        reasoning_tokens=_sum_optional(first.reasoning_tokens, second.reasoning_tokens),
+        cost_usd=cost,
+    )
 
 
 def _reported_input_tokens(data: Any) -> int:

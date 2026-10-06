@@ -8,6 +8,7 @@ or of the request, so it is never copied.
 from __future__ import annotations
 
 import asyncio
+import math
 
 import httpx
 import litellm
@@ -92,6 +93,22 @@ class InvalidOutput(GatewayError):
     reason = "invalid_output"
 
 
+class Truncated(InvalidOutput):
+    """The answer is empty because the model used its whole output limit thinking.
+
+    Reasoning models count hidden thinking tokens against the limit; with too small a limit
+    they stop with no text. It is retried once with more room, never returned as an answer.
+    """
+
+    reason = "truncated"
+
+
+class EmptyOutput(InvalidOutput):
+    """The provider answered with no text and no sign of truncation."""
+
+    reason = "empty_output"
+
+
 class AllProvidersFailed(GatewayError):
     """Every step of a chain failed. The caller shows 'temporarily unavailable'."""
 
@@ -120,12 +137,21 @@ TRANSPORT_ERRORS = (
 )
 
 
+MAX_RETRY_AFTER_SECONDS = 3_600.0  # a provider asking for more than an hour is capped
+
+
 def retry_after_seconds(headers: object) -> float | None:
+    """The Retry-After header as seconds: finite, not negative and at most an hour."""
     try:
         value = headers.get("retry-after")  # type: ignore[attr-defined]
-        return float(value) if value is not None else None
+        if value is None:
+            return None
+        seconds = float(value)
     except (AttributeError, TypeError, ValueError):
         return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None  # the caller then uses its default cool-down
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
 def status_to_error(status: int, headers: object = None) -> GatewayError:

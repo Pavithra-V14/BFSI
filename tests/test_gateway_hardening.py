@@ -2,7 +2,6 @@
 failed answers, bad embeddings, the Jev pin, quiet LiteLLM, and the test guards."""
 
 import asyncio
-import json
 import logging
 import math
 
@@ -490,4 +489,4 @@ def test_a_gateway_made_for_tests_cannot_reach_the_real_jev_or_rerank_services()
 
 def test_the_default_limits_still_hold_after_the_changes():
     assert DEFAULT_LIMITS["GROQ"] == Limits(rpm=30, tpm=8_000, rpd=1_000, tpd=200_000)
-    assert json.dumps(sorted(GROQ_KEYS)) and len({fingerprint(k) for k in GROQ_KEYS}) == 4
+    assert len({fingerprint(k) for k in GROQ_KEYS}) == 4  # four keys, four distinct fingerprints

@@ -151,13 +151,21 @@ def test_context_window_error_from_a_provider_is_not_retried_or_fallen_back():
 
 def test_prompt_larger_than_the_smallest_window_is_refused_before_any_call():
     backend = FakeBackend()
-    config = make_config(context_overrides={GEMINI_MODEL: 50})
+    config = make_config(context_overrides={GEMINI_MODEL: 50}, reasoning_allowance=0)
     gateway = make_gateway(config, backend=backend)
     with pytest.raises(ContextWindowExceeded):
         run(gateway.complete([{"role": "user", "content": "word " * 100}]))
     assert backend.calls == []
     run(gateway.complete([{"role": "user", "content": "word " * 5}], max_tokens=20))
     assert len(backend.calls) == 1
+    # The reasoning allowance counts toward the window check too.
+    with_allowance = make_config(context_overrides={GEMINI_MODEL: 50}, reasoning_allowance=40)
+    with pytest.raises(ContextWindowExceeded):
+        run(
+            make_gateway(with_allowance, backend=backend).complete(
+                [{"role": "user", "content": "word " * 5}], max_tokens=20
+            )
+        )
 
 
 def test_auth_failure_cools_the_key_and_the_next_key_is_used():
@@ -206,10 +214,11 @@ def test_json_mode_parses_fenced_json_and_invalid_json_moves_to_the_next_provide
     assert result.fallback_reason == "groq: invalid_output"
 
 
-def test_a_truncated_answer_and_reasoning_tokens_are_reported():
-    raw = ok("", finish_reason="length", reasoning_tokens=400, completion=400)
+def test_a_cut_off_answer_with_text_is_flagged_and_reasoning_tokens_are_reported():
+    raw = ok("The waiting period is thirty", finish_reason="length", reasoning_tokens=300)
     result = run(make_gateway(backend=FakeBackend(lambda m, k, n: raw)).complete(MESSAGES))
-    assert result.truncated and result.reasoning_tokens == 400 and result.text == ""
+    assert result.truncated and result.finish_reason == "length"
+    assert result.reasoning_tokens == 300 and result.text.startswith("The waiting")
 
 
 def test_the_limiter_blocks_a_provider_whose_keys_are_used_up():

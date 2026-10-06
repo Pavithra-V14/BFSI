@@ -41,7 +41,13 @@ def test_the_backend_passes_the_expected_arguments_and_reads_the_response(mocked
     assert mocked_completion["num_retries"] == 0 and mocked_completion["drop_params"] is True
     assert mocked_completion["max_tokens"] == 20 and mocked_completion["timeout"] == 5
     assert "response_format" not in mocked_completion
-    assert raw.cost_source == "litellm" and raw.cost_usd is not None and raw.cost_usd > 0
+    assert raw.cost_source == "litellm"
+    prices = litellm.model_cost["groq/openai/gpt-oss-120b"]  # the bundled map, no network
+    expected = (
+        raw.prompt_tokens * prices["input_cost_per_token"]
+        + raw.completion_tokens * prices["output_cost_per_token"]
+    )
+    assert raw.cost_usd == pytest.approx(expected, rel=1e-9) and expected > 0
 
 
 def test_response_format_is_passed_through_when_given(mocked_completion):

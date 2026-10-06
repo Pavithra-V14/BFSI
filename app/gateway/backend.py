@@ -60,6 +60,7 @@ class Backend(Protocol):
         max_tokens: int,
         timeout: float,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> RawCompletion: ...
 
     async def embed(
@@ -86,6 +87,7 @@ class LiteLLMBackend:
         max_tokens: int,
         timeout: float,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> RawCompletion:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -98,6 +100,10 @@ class LiteLLMBackend:
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if reasoning_effort is not None:
+            # LiteLLM maps this to Gemini's thinking level and passes it to Groq's gpt-oss;
+            # a model that does not support it simply drops it (drop_params).
+            kwargs["reasoning_effort"] = reasoning_effort
         response = await litellm.acompletion(**kwargs)
         choice = response.choices[0]
         usage = getattr(response, "usage", None)

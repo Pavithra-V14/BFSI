@@ -66,14 +66,24 @@ class FakeBackend:
         self.handler = handler or (lambda model, key, n: ok())
         self.calls: list[tuple[str, str]] = []
         self.timeouts: list[float] = []
+        self.requests: list[dict] = []  # what each complete() call asked for
         self.embed_handler: Callable[[str, str, list[str], int], Any] | None = None
         self.embed_calls: list[tuple[str, str, list[str]]] = []
 
     async def complete(
-        self, *, model, messages, api_key, max_tokens, timeout, response_format=None
+        self,
+        *,
+        model,
+        messages,
+        api_key,
+        max_tokens,
+        timeout,
+        response_format=None,
+        reasoning_effort=None,
     ):
         self.calls.append((model, api_key))
         self.timeouts.append(timeout)
+        self.requests.append({"model": model, "max_tokens": max_tokens, "effort": reasoning_effort})
         result = self.handler(model, api_key, len(self.calls))
         if isinstance(result, BaseException):
             raise result

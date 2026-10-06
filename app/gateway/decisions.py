@@ -13,6 +13,7 @@ answers are marked calibrated=False.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -194,8 +195,8 @@ def parse_answers(raw_answers: Any, questions: list[Question]) -> dict[str, Answ
             if item.get("type") != "choice":
                 raise SchemaSurprise()
             option = item.get("choice")
-            if option not in question.options:
-                raise SchemaSurprise()
+            if not isinstance(option, str) or option not in question.options:
+                raise SchemaSurprise()  # a list or dict here must not reach a hash lookup
             probabilities = _probabilities(item.get("probabilities"), set(question.options))
             parsed[question.id] = ChoiceAnswer(
                 option, probabilities, _number(item.get("confidence"), 0.0, 1.0)
@@ -240,7 +241,7 @@ def extract_json(text: str) -> Any:
             if depth == 0:
                 try:
                     return json.loads(cleaned[start : index + 1])
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, RecursionError):  # bad or absurdly nested JSON
                     raise InvalidOutput() from None
     raise InvalidOutput()
 
@@ -250,21 +251,26 @@ def parse_fallback_answers(text: str, questions: list[Question]) -> dict[str, An
     data = extract_json(text)
     if not isinstance(data, dict):
         raise InvalidOutput()
-    prepared: dict[str, Any] = {}
-    for question in questions:
-        item = data.get(question.id)
-        if not isinstance(item, dict):
-            raise InvalidOutput()
-        item = dict(item)
-        item.setdefault("type", _type_name(question))
-        if "confidence" not in item and isinstance(item.get("probabilities"), dict):
-            values = [v for v in item["probabilities"].values() if isinstance(v, (int, float))]
-            if values:
-                item["confidence"] = max(values)
-        prepared[question.id] = item
     try:
+        prepared: dict[str, Any] = {}
+        for question in questions:
+            item = data.get(question.id)
+            if not isinstance(item, dict):
+                raise InvalidOutput()
+            item = dict(item)
+            item.setdefault("type", _type_name(question))
+            if "confidence" not in item and isinstance(item.get("probabilities"), dict):
+                values = [v for v in item["probabilities"].values() if isinstance(v, (int, float))]
+                if values:
+                    item["confidence"] = max(values)
+            prepared[question.id] = item
         return parse_answers(prepared, questions)
-    except SchemaSurprise:
+    except GatewayError as error:
+        if isinstance(error, InvalidOutput):
+            raise
+        raise InvalidOutput() from None
+    except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
+        # Whatever shape a chat model invented, it is a bad answer, not a bug of ours.
         raise InvalidOutput() from None
 
 
@@ -353,15 +359,24 @@ def read_jev_response(data: dict[str, Any], questions: list[Question]) -> dict[s
     try:
         answers = parse_answers(data.get("answers"), questions)
         usage = data.get("usage") or {}
+        if not isinstance(usage, dict):
+            raise SchemaSurprise()
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        cost = float(usage["cost"]) if usage.get("cost") is not None else None
+        if input_tokens < 0 or output_tokens < 0:
+            raise SchemaSurprise()
+        if cost is not None and (not math.isfinite(cost) or cost < 0):
+            raise SchemaSurprise()
         return {
             "answers": answers,
             "snapshot": str(data.get("model") or ""),
             "provider": str(data.get("provider") or ""),
-            "input_tokens": int(usage.get("input_tokens") or 0),
-            "output_tokens": int(usage.get("output_tokens") or 0),
-            "cost": float(usage["cost"]) if usage.get("cost") is not None else None,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
         }
     except GatewayError:
         raise
-    except (TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
         raise SchemaSurprise() from None

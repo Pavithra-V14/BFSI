@@ -148,6 +148,7 @@ A single module wraps every model call. No other code calls a provider directly.
 - Structured outputs through `response_format` where the model supports it; otherwise JSON mode with tolerant parsing.
 - Max output tokens: 400 for answers, 500 for JSON calls [P]. Check that hidden reasoning tokens of the open models do not truncate answers.
 - **[P] Additions beyond the text above:** a per-provider billing-plan setting (free or paid) that decides whether the billed cost is shown as $0 while the shadow cost stays the list price; optional per-key daily request and token caps; a default call timeout of 10 s (the caller's budget can only shorten it); and fixed cool-down and breaker times (60 s for a rate-limited key, 30 s for an open breaker).
+- **[P] Reasoning models:** an answer that comes back empty because the model spent its output budget thinking is never returned; it is retried once with more output room and reasoning effort low, then falls to the next provider. The reserved output is the answer limit plus a reasoning allowance (default 512 tokens), and the default reasoning effort is low for answers and decisions; all three are environment settings.
 
 ### 5.3 Decider visibility
 Every decision records: `decider` (jev, groq, gemini, rules), model, key fingerprint, fallback reason. The dashboard has a **"decider in use"** panel per step with the current health (healthy, cooling down, circuit open) and the share of decisions per decider over the last hour and day.

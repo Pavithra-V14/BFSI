@@ -1,11 +1,13 @@
 """Gateway smoke test with REAL provider calls. Off by default; the owner runs it by hand.
 
-It makes three tiny calls and prints names and status only, never a key, a prompt
+It makes a few tiny calls and prints names and status only, never a key, a prompt
 or a model's text:
   1. one Jev decision through the Decisions API (answers summary, served model
      snapshot, token usage and cost),
   2. one Gemini embedding (vector length and norm),
-  3. one Gemini text call (token counts, finish reason, whether it was truncated).
+  3. one text call each to Gemini, Groq and OpenRouter, when their keys are present. They use
+     the real answer limit and print whether the text is non-empty, the finish reason, and the
+     reasoning and output token counts. An empty answer is reported as EMPTY.
 
 Run it in your own terminal:
     uv run python scripts/gateway_smoke.py --run
@@ -100,31 +102,47 @@ async def smoke(gateway: Gateway) -> int:
             problems += 1
             line("gemini embedding", "FAILED", reason=error.reason)
 
-    if not config.gemini_keys:
-        line("gemini text call", "SKIPPED", reason="GEMINI_API_KEYS is not set")
-    else:
+    # Text calls use the real answer limit (no max_tokens), so what you see here is what a real
+    # answer gets. An empty answer counts as a problem even though the call itself worked.
+    for name, provider, keys, variable in TEXT_CALLS:
+        if not getattr(config, keys):
+            line(name, "SKIPPED", reason=f"{variable} is not set")
+            continue
         try:
             completion = await gateway.complete(
                 [{"role": "user", "content": "Reply with the single word: ok"}],
-                max_tokens=64,
-                only_provider="gemini",
-            )
-            line(
-                "gemini text call",
-                "OK",
-                model=completion.model,
-                input_tokens=completion.input_tokens,
-                output_tokens=completion.output_tokens,
-                reasoning_tokens=completion.reasoning_tokens,
-                text_length=len(completion.text),
-                truncated=completion.truncated,
-                cost=completion.cost_billed,
-                cost_source=completion.cost_source,
+                only_provider=provider,
             )
         except GatewayError as error:
             problems += 1
-            line("gemini text call", "FAILED", reason=error.reason)
+            skipped = getattr(error, "skipped", None) or []
+            why = ",".join(f"{provider}:{reason}" for provider, reason in skipped)
+            line(name, "FAILED", reason=error.reason, why=why or None)
+            continue
+        has_text = bool(completion.text.strip())
+        problems += 0 if has_text else 1
+        line(
+            name,
+            "OK" if has_text else "EMPTY",
+            model=completion.model,
+            text_non_empty=has_text,
+            finish_reason=completion.finish_reason,
+            reasoning_tokens=completion.reasoning_tokens,
+            output_tokens=completion.output_tokens,
+            input_tokens=completion.input_tokens,
+            truncated=completion.truncated,
+            cost=completion.cost_billed,
+            cost_source=completion.cost_source,
+        )
     return problems
+
+
+# (label, provider name in the gateway, config field holding its keys, variable to set)
+TEXT_CALLS = [
+    ("gemini text call", "gemini", "gemini_keys", "GEMINI_API_KEYS"),
+    ("groq text call", "groq", "groq_keys", "GROQ_API_KEYS"),
+    ("openrouter text call", "openrouter", "openrouter_keys", "OPENROUTER_API_KEYS"),
+]
 
 
 def main(
@@ -137,7 +155,7 @@ def main(
 ) -> int:
     if "--run" not in argv:
         print(__doc__)
-        print("Nothing was called and no file was read. Add --run to make the three real calls.")
+        print("Nothing was called and no file was read. Add --run to make the real calls.")
         return 0
     environ = os.environ if environ is None else environ
     print(load_owner_env(environ, env_path, example_path))
