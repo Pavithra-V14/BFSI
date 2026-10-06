@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 2 complete; next is Phase 3 (waiting for the owner's go)
+Current phase: Phase 3 built, awaiting the owner's approval (next is Phase 4)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -15,10 +15,12 @@ Current phase: Phase 2 complete; next is Phase 3 (waiting for the owner's go)
   agents.
 - `app/` : application code. Phase 1 holds the isolation guard and the migration runner.
   Phase 2 adds the gateway in `app/gateway/`: every model, embedding and rerank call.
+  Phase 3 adds the data layer: `app/vector/` (the Qdrant `documents` collection),
+  `app/cache/` (the Upstash cache primitives) and `app/store_errors.py` ("temporarily unavailable").
 - `scripts/` : helper scripts you run by hand, such as the gateway smoke test (it makes real
   provider calls, so it is off unless you add `--run`).
 - `tests/` : automated tests. They only use SQLite and local resources.
-- `migrations/` : numbered SQL files for the database (the schema arrives in Phase 3).
+- `migrations/` : numbered SQL files for the database (Phase 3 holds the full schema).
 - `.github/workflows/ci.yml` : the checks that run on GitHub.
 - `requirements*.txt` : the four dependency files. `.env.example` : the settings template.
 - More folders are added phase by phase.

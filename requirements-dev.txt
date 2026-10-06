@@ -4,6 +4,8 @@ pytest==9.1.1
 pytest-mock==3.16.0
 pytest-cov==7.1.0
 vcrpy==8.3.0
+# An in-process fake Redis, so cache tests never touch Upstash (spec section 16 isolation guard).
+fakeredis==2.39.0
 locust==2.46.7
 # Linter and formatter used by CI and by `uv run ruff` (owner's choice, not named in the spec).
 ruff==0.16.10

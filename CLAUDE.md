@@ -96,6 +96,9 @@ Production (Render) serves queries only.
   files). It reads the database URL from `DATABASE_URL` in your shell, never from a file or
   the command line. Use the provider's direct (non-pooled) URL with `sslmode=require`.
 - Tests refuse to run if a database, Qdrant or cache URL points at a remote host (isolation guard).
+- Create the Qdrant `documents` collection (REAL Qdrant, run only by the owner in his own
+  terminal, never by Claude): `uv run python -m app.vector.documents --ensure`. It reads
+  `QDRANT_URL` and `QDRANT_API_KEY` from the shell and prints names only.
 - Gateway smoke test (REAL provider calls, run only by the owner in his own terminal, never by
   Claude): `uv run python scripts/gateway_smoke.py --run`. It does nothing without `--run`.
 

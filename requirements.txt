@@ -11,3 +11,7 @@ psycopg[binary]==3.3.6
 litellm==1.104.0
 tiktoken==0.14.0
 httpx==0.28.1
+# Phase 3: the data layer. qdrant-client talks to Qdrant (vector store, and its in-memory mode for
+# tests); redis talks to Upstash over the Redis protocol (rediss://).
+qdrant-client==1.19.1
+redis==8.1.0
