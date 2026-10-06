@@ -83,11 +83,12 @@ def test_a_429_cools_the_key_for_retry_after_with_a_five_second_floor(header, co
     assert pool.cooling_fingerprints() == set()
 
 
-def test_every_429_counts_toward_the_three_attempts():
+def test_every_429_counts_as_an_attempt_up_to_the_size_of_the_pool():
     backend = groq_429("0")
     gateway = make_gateway(make_config(groq_keys=KEYS), backend=backend)  # four keys
     result = run(gateway.complete(MESSAGES))
-    assert groq_calls(backend) == 3 and result.decider == "gemini"
+    assert groq_calls(backend) == 4 and result.decider == "gemini"  # each key tried once, no more
+    assert len({c[1] for c in backend.calls if provider_of(c[0]) == "groq"}) == 4
     assert result.fallback_reason == "groq: rate_limited"
     assert gateway._clock.slept == []  # the next key is tried at once; nobody hammers one key
 

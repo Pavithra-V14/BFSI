@@ -42,6 +42,12 @@ LOCAL = [
     pytest.param("host=localhost dbname=test", id="key-value-local"),
     pytest.param("postgresql://u:pw@localhost:5432,127.0.0.1:5433/db", id="multi-host-all-local"),
     pytest.param("postgresql://u:pw@[::1]:5432,localhost/db", id="multi-host-v6-and-name-local"),
+    pytest.param("localhost:6333", id="no-scheme-localhost-port"),
+    pytest.param("localhost", id="no-scheme-localhost"),
+    pytest.param("127.0.0.1:6333", id="no-scheme-loopback-v4-port"),
+    pytest.param("[::1]:6333", id="no-scheme-loopback-v6-port"),
+    pytest.param("LocalHost:6333", id="no-scheme-mixed-case"),
+    pytest.param("localhost:6333,127.0.0.1:6334", id="no-scheme-all-local"),
 ]
 
 REMOTE = [
@@ -70,6 +76,16 @@ REMOTE = [
         id="remote-in-second-position",
     ),
     pytest.param("postgresql://u:pw@[::1]:5432,remote.test:5432/db", id="v6-then-remote"),
+    pytest.param("qdrant.example.test:6333", id="no-scheme-remote-port"),
+    pytest.param(f"{QDRANT_CLOUD}:6333", id="no-scheme-qdrant-cloud"),
+    pytest.param("10.0.0.5:6333", id="no-scheme-private-address"),
+    pytest.param("localhost:6333,qdrant.example.test:6333", id="no-scheme-local-then-remote"),
+    pytest.param("qdrant.example.test:6333,localhost:6333", id="no-scheme-remote-then-local"),
+    pytest.param("localhost@evil.test:6333", id="no-scheme-user-info-trick"),
+    pytest.param("localhost.evil.test:6333", id="no-scheme-lookalike"),
+    pytest.param("[::1:6333", id="no-scheme-unparsable"),
+    pytest.param("/var/data/qdrant", id="local-path-stays-strict"),
+    pytest.param("garbage value", id="two-words-unknown"),
 ]
 
 
@@ -95,6 +111,19 @@ def test_url_hosts_lists_every_host_of_a_multi_host_url():
         "remote.test",
     ]
     assert url_hosts("postgresql://u:pw@[::1]:5432,127.0.0.1/db") == ["::1", "127.0.0.1"]
+
+
+def test_a_store_address_without_a_scheme_is_parsed_for_host_and_port():
+    assert url_hosts("localhost:6333") == ["localhost"]
+    assert url_hosts("[::1]:6333") == ["::1"]
+    assert url_hosts("user@qdrant.example.test:6333") == ["qdrant.example.test"]
+    assert url_hosts("localhost:6333,qdrant.example.test:6334") == [
+        "localhost",
+        "qdrant.example.test",
+    ]
+    assert remote_variables({"QDRANT_URL": "localhost:6333"}) == []
+    assert remote_variables({"QDRANT_URL": "qdrant.example.test:6333"}) == ["QDRANT_URL"]
+    require_local_environment({"QDRANT_URL": "localhost:6333"})  # starts normally
 
 
 def test_remote_variables_names_a_multi_host_url_without_printing_it():

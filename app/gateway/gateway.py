@@ -82,6 +82,7 @@ from app.gateway.tokens import TokenCounter
 log = logging.getLogger("app.gateway")
 
 AUTH_COOLDOWN_SECONDS = 3_600.0
+MIN_RETRY_BUDGET_SECONDS = 2.0  # less of the caller's time than this: no reasoning retry
 EVENT_BUFFER = 1_000
 LITELLM_PREFIX = {"groq": "groq", "gemini": "gemini", "openrouter": "openrouter"}
 MOCK_TEXT = "[offline mock answer: no model could be reached]"
@@ -393,7 +394,14 @@ class Gateway:
                         if failure_cooldown is not None:
                             pool.cool_down(fp, failure_cooldown)  # failover: leave this key now
                     attempts += 1
-                    if attempts >= max_attempts:
+                    # A 429 only cools that key, so every key of the pool is tried before the
+                    # provider is given up on; other errors keep the plain attempt cap.
+                    cap = (
+                        max(max_attempts, pool.size)
+                        if isinstance(error, RateLimited)
+                        else max_attempts
+                    )
+                    if attempts >= cap:
                         # Give up on this provider for this call. Every key that failed now
                         # cools down, so the next call already knows. The breaker trips only if
                         # every key of the pool is failing or cooling down; otherwise the
@@ -496,6 +504,11 @@ class Gateway:
             # The first call's tokens are known now: settle its lease before the new one counts.
             if lease_box:
                 pool.correct(lease_box["lease"], first_used)
+            if deadline is not None and deadline - self._clock.now() < MIN_RETRY_BUDGET_SECONDS:
+                error = Truncated()  # too little of the caller's time left: skip, fall through
+                error.used_tokens = first_used
+                self._emit("retry_skipped_no_time", provider=step.pool_name)
+                raise error
             extra = pool.acquire_for(fingerprint(key), prompt_tokens + retry_limit)
             if extra is None:
                 error = Truncated()  # no room on this key for the retry: skip it, fall through
@@ -503,7 +516,8 @@ class Gateway:
                 self._emit("retry_skipped_no_capacity", provider=step.pool_name)
                 raise error
             try:
-                second = await ask(key, retry_limit, "low")
+                # "off" means no reasoning setting is sent, on the retry as well.
+                second = await ask(key, retry_limit, "low" if reasoning_effort else None)
             except BaseException as exc:
                 # The first call's tokens still count, whatever happens to the retry. A normal
                 # error hands them to the first lease; a cancellation puts them on this one,
@@ -511,6 +525,10 @@ class Gateway:
                 pool.correct(extra, 0 if isinstance(exc, Exception) else first_used)
                 if isinstance(exc, Exception):
                     failure = classify(exc)
+                    if isinstance(failure, ContextWindowExceeded):
+                        # The doubled limit does not fit this model: same as "no room".
+                        failure = Truncated()
+                        self._emit("retry_skipped_window", provider=step.pool_name)
                     failure.used_tokens = first_used
                     raise failure from None
                 raise
@@ -925,6 +943,8 @@ class Gateway:
             else:
                 billed += raw.cost_usd
             source = raw.cost_source
+        if billed is None:
+            source = "unknown"  # some batch had no price: the label must not be the last one's
         cost = self._with_plan(
             "EMBEDDING",
             build_cost(model, tokens_in, 0, self._pricing, billed=billed, billed_source=source),
@@ -1069,13 +1089,12 @@ def _sum_optional(first: int | None, second: int | None) -> int | None:
 
 def _combine(first: RawCompletion, second: RawCompletion) -> RawCompletion:
     """One result that stands for two calls: their tokens and cost added, the last outcome kept."""
-    cost = (
-        first.cost_usd + second.cost_usd
-        if first.cost_usd is not None and second.cost_usd is not None
-        else None
-    )
+    priced = first.cost_usd is not None and second.cost_usd is not None
+    cost = first.cost_usd + second.cost_usd if priced else None  # type: ignore[operator]
     return replace(
         second,
+        # If either call had no price the total has none, and the label says so.
+        cost_source=second.cost_source if priced else "unknown",
         prompt_tokens=_sum_optional(first.prompt_tokens, second.prompt_tokens),
         completion_tokens=_sum_optional(first.completion_tokens, second.completion_tokens),
         reasoning_tokens=_sum_optional(first.reasoning_tokens, second.reasoning_tokens),

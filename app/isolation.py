@@ -29,6 +29,8 @@ URL_VARIABLES = (
 # libpq reads these when a connection string names no host.
 HOST_VARIABLES = ("PGHOST", "PGHOSTADDR")
 
+# host, host:port or [ipv6]:port (optionally user@ and comma-separated): no scheme, path or spaces
+_BARE_AUTHORITY = re.compile(r"[^\s/=?#]+")
 _KEY_VALUE = re.compile(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)")
 
 
@@ -90,6 +92,9 @@ def url_hosts(value: str) -> list[str] | None:
     for key in ("host", "hostaddr"):
         for entry in query.get(key, []):
             hosts.extend(host for host in entry.split(",") if host)
+    if not hosts and not query and _BARE_AUTHORITY.fullmatch(text):
+        # A store address with no scheme, such as "localhost:6333" (Qdrant clients accept it).
+        hosts.extend(_authority_hosts(text))
     return hosts or None
 
 
