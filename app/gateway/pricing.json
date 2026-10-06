@@ -1,0 +1,21 @@
+{
+  "note": "Reference prices in USD per 1M tokens for the shadow cost (spec 5.4 [P]). PLACEHOLDERS to verify against each provider's price page. A model not listed here uses LiteLLM's price for that model; a model with a zero price (free) uses default_reference.",
+  "default_reference": {
+    "model": "groq/openai/gpt-oss-120b",
+    "input_per_m": 0.15,
+    "output_per_m": 0.6,
+    "status": "placeholder: copied from LiteLLM's model map; Groq's own price page could not be read"
+  },
+  "models": {
+    "gemini/gemini-3.8-flash": {
+      "input_per_m": 0.75,
+      "output_per_m": 3.75,
+      "status": "from Google's price page, valid through 2026-12-31 (1.50 and 7.50 from 2027-01-01)"
+    },
+    "typesafe/jev-1.13": {
+      "input_per_m": 0.042,
+      "output_per_m": 0.0,
+      "status": "placeholder: from the owner's note (about $0.042 per million input tokens, output free)"
+    }
+  }
+}

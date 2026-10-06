@@ -96,6 +96,8 @@ Production (Render) serves queries only.
   files). It reads the database URL from `DATABASE_URL` in your shell, never from a file or
   the command line. Use the provider's direct (non-pooled) URL with `sslmode=require`.
 - Tests refuse to run if a database, Qdrant or cache URL points at a remote host (isolation guard).
+- Gateway smoke test (REAL provider calls, run only by the owner in his own terminal, never by
+  Claude): `uv run python scripts/gateway_smoke.py --run`. It does nothing without `--run`.
 
 ## Definition of done for a phase (proposal, not in the spec)
 - Unit tests for the phase pass using the isolation guard (no production URLs).
@@ -105,7 +107,7 @@ Production (Render) serves queries only.
 
 ## Where to look
 - Pipeline stages and early exits: spec section 4, `spec/query_workflow.png`.
-- Gateway: section 5. Ingestion: section 6. Retrieval: section 7.
+- Gateway: section 5, code in `app/gateway/`. Ingestion: section 6. Retrieval: section 7.
 - Memory: section 8. Guardrails: section 9. Cache: section 10.
 - Security: section 13. Evaluation: section 15. Testing: section 16.
 - Test corpus: section 20 and `spec/samples/`.

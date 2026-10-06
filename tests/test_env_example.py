@@ -67,6 +67,13 @@ def test_every_guarded_url_variable_is_documented():
     assert set(URL_VARIABLES) - CI_ONLY <= names
 
 
+def test_every_gateway_variable_is_documented():
+    from app.gateway.config import ENV_NAMES
+
+    names = {m.group(1) for m in map(VARIABLE.match, _lines()) if m}
+    assert set(ENV_NAMES) <= names, sorted(set(ENV_NAMES) - names)
+
+
 def test_names_are_unique():
     names = [m.group(1) for m in map(VARIABLE.match, _lines()) if m]
     assert len(names) == len(set(names))

@@ -43,9 +43,9 @@ This document is a complete, self-contained specification. A team (or an AI codi
 | Frontend | Streamlit (separate process/service from the API) |
 | Orchestration | LangGraph |
 | LLM access | LiteLLM used as a library inside a custom gateway (no LiteLLM Router) |
-| Answer models | Groq `gpt-oss-120b` → Gemini 2.5 Flash → OpenRouter `google/gemma-4-31b-it:free` (mixed models are acceptable for the pilot) |
-| Decision models ("decide tier") | **Jev** (`typesafe/jev-1.13`, through the OpenRouter API, own dedicated key) → Groq `gpt-oss-20b` → Gemini → rules |
-| Embeddings | Google Gemini `gemini-embedding-001`, 768 dimensions, two API keys from different accounts with failover |
+| Answer models | Groq `gpt-oss-120b` → Gemini `gemini-3.8-flash` → OpenRouter `google/gemma-4-31b-it:free` (mixed models are acceptable for the pilot) |
+| Decision models ("decide tier") | **Jev** (`typesafe/jev-1.13`, through the OpenRouter API, own dedicated key) → Groq `gpt-oss-20b` → Gemini `gemini-3.8-flash` → rules (full chain in 5.1) |
+| Embeddings | Google Gemini `gemini-embedding-2`, 768 dimensions, two API keys from different accounts with failover |
 | Reranking | Cohere → Jina → lexical fallback |
 | Vector store | Qdrant cloud (dense + sparse vectors in one collection) |
 | Relational database | Cloud-hosted Postgres (Neon or Supabase), reached through a plain standard connection URL with TLS required; no provider-specific features. Migrations use the provider's direct (non-pooled) URL. No Postgres runs on the admin machine. Holds users, sessions, messages, audit, allow-list, feedback |
@@ -102,7 +102,7 @@ One shared state object travels through the graph (query, masked query, role, se
    2. Greeting check (4.2).
    3. Injection patterns (regex).
    4. PII masking of the query copy that goes to any LLM (section 9.2).
-3. **Jev triage — one combined call** on the masked query. Returns, each with a confidence: domain relevance, `product_line`, `clause_type`, needs-history, vague/borderline flag, injection score. Fallback chain: Jev → Groq `gpt-oss-20b` → Gemini → rules and keywords with no LLM.
+3. **Jev triage — one combined call** on the masked query. Returns, each with a confidence: domain relevance, `product_line`, `clause_type`, needs-history, vague/borderline flag, injection score. Fallback chain: Jev → Groq `gpt-oss-20b` → Gemini → rules and keywords with no LLM (full chain in 5.1).
 4. **Injection decision [P]:** regex plus the Jev score. Any strong detector blocks; mixed signals ask the user to reword. The detector that fired is logged.
 5. **Rewrite** (answer-tier LLM) runs only if (a) needs-history is true, or (b) it is a vague first message of a session (rewrite-then-clarify, 4.3). Otherwise the original query is kept.
 6. **Domain gate:** out-of-domain queries are refused.
@@ -134,7 +134,7 @@ A single module wraps every model call. No other code calls a provider directly.
 
 ### 5.1 Tiers and fallback
 - **Answer tier:** Groq → Gemini → OpenRouter.
-- **Decide tier:** Jev → Groq `gpt-oss-20b` → Gemini → OpenRouter → answer-tier models → rules. **Every Jev use has a fallback.**
+- **Decide tier:** Jev → Groq `gpt-oss-20b` → Gemini → OpenRouter → answer-tier models → rules. **Every Jev use has a fallback.** Jev is called through OpenRouter's Decisions API (alpha), POST /api/alpha/decisions, with a state object and typed questions (noul, choice, score); it returns probabilities, not text. The fallback deciders answer the same typed questions with JSON of the same shape.
 - Evaluation verdicts: Jev → OpenRouter judge model (eval keys) → "not scored".
 - Offline mock generation exists only as a last-resort fallback and is always labelled as such.
 
@@ -147,6 +147,7 @@ A single module wraps every model call. No other code calls a provider directly.
 - Oversized prompts are not retried.
 - Structured outputs through `response_format` where the model supports it; otherwise JSON mode with tolerant parsing.
 - Max output tokens: 400 for answers, 500 for JSON calls [P]. Check that hidden reasoning tokens of the open models do not truncate answers.
+- **[P] Additions beyond the text above:** a per-provider billing-plan setting (free or paid) that decides whether the billed cost is shown as $0 while the shadow cost stays the list price; optional per-key daily request and token caps; a default call timeout of 10 s (the caller's budget can only shorten it); and fixed cool-down and breaker times (60 s for a rate-limited key, 30 s for an open breaker).
 
 ### 5.3 Decider visibility
 Every decision records: `decider` (jev, groq, gemini, rules), model, key fingerprint, fallback reason. The dashboard has a **"decider in use"** panel per step with the current health (healthy, cooling down, circuit open) and the share of decisions per decider over the last hour and day.
@@ -194,6 +195,7 @@ Read each model's window from LiteLLM's model map at startup, with a configurati
 
 ### 6.5 Embeddings
 - Gemini embedding with two keys from different accounts; key B is used when key A fails (same model, same 768 dimensions, so vectors are interchangeable).
+- **[P]** The Gemini Embedding 2 query and document text prefixes (`task: search result | query: ...` and `title: ... | text: ...`) come from Google's documentation. Using `title: none` for untitled documents is an assumption to confirm in the ingestion phase, before any document is indexed.
 - If both fail: queries get "temporarily unavailable"; ingestion stops and flags the document. **A hash-based fallback embedding is for development only** and must never index or retrieve in production.
 
 ### 6.6 Sparse vectors
@@ -577,6 +579,7 @@ Each phase depends only on earlier phases. The sections each phase covers are in
 - Which admin tabs run on the admin machine and which in production (section 24).
 - How scheduled and background work runs on the free host: 90-day chat deletion, 30-day audit deletion, the 5% evaluation queue and its judge, the weekly drift report, alert checks.
 - Where the original PDFs and the Qdrant snapshots are stored (section 11.3).
+- The Decisions API is alpha; free-tier limits of Gemini 3.8 Flash and Gemini Embedding 2 are unpublished.
 
 ## 24. Streamlit frontend
 

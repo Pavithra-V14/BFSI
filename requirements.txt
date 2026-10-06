@@ -6,3 +6,8 @@
 # use here (spec section 13.2: no unused packages). The small spaCy model
 # (en_core_web_sm) is added when query masking is built.
 psycopg[binary]==3.3.6
+# Phase 2: the gateway (LLM, embedding and rerank calls). tiktoken counts tokens;
+# httpx calls the Jev Decisions API and the rerank services directly.
+litellm==1.104.0
+tiktoken==0.14.0
+httpx==0.28.1
