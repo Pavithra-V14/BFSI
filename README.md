@@ -57,6 +57,50 @@ machine only. The hosted service answers queries only.
 - Never commit `.env`. Never paste a key into a chat, a ticket or a log.
 - Evaluation keys stay on the admin machine and are never put on the host.
 
+## First run on the real services (owner only, in your own PowerShell)
+Claude never runs these. Settings are read from the shell, never from a file, so each
+`$env:NAME = ...` below lasts only for that terminal window. Use one window for all steps.
+Keep real values in a password manager; never paste one into a chat, a file or a ticket.
+
+**1. Make the two keys.** They must be different, random and at least 32 characters. These
+commands put each key straight into the shell without printing it:
+
+    $env:JWT_SECRET_KEY = (uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+    $env:AUDIT_HASH_KEY = (uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+Copy them into your password manager before closing the window (type `$env:JWT_SECRET_KEY` to
+show one on your own screen). Render later needs the same two values. If you change
+`AUDIT_HASH_KEY`, old audit rows can no longer be matched to usernames, so keep it.
+Needs: nothing else.
+
+**2. Apply migration 0004** (adds `users.is_active`). Use the database's direct (non-pooled) URL
+with `sslmode=require`:
+
+    $env:DATABASE_URL = "<direct URL from Neon, ends with ?sslmode=require>"
+    uv run python -m app.db.migrate --dry-run   # lists the pending files, changes nothing
+    uv run python -m app.db.migrate             # applies them
+    uv run python -m app.db.migrate --dry-run   # again: it should list nothing pending
+
+Needs: `DATABASE_URL` only. It is safe to run twice; applied files are skipped.
+
+**3. Create the first admin.** It asks for the password with a hidden prompt:
+
+    uv run python -m app.accounts.admin_cli create-admin --username NAME --email ADDRESS
+
+Needs: `DATABASE_URL` only (same window as step 2). Only this command can make an admin; the
+API cannot. `set-active --username NAME --active no` turns an account off.
+
+**4. Run the API locally:**
+
+    $env:UPSTASH_REDIS_URL = "<rediss:// URL from Upstash>"
+    uv run uvicorn app.api.main:create_app_from_env --factory
+
+Needs: `DATABASE_URL`, `UPSTASH_REDIS_URL`, `JWT_SECRET_KEY`, `AUDIT_HASH_KEY`. It refuses to
+start if any is missing, short or a placeholder. Optional, with defaults: `JWT_EXPIRE_MINUTES`,
+`TOKEN_BUDGET_CUSTOMER`, `TOKEN_BUDGET_STAFF`, `PASSWORD_HASH_CONCURRENCY` (2),
+`CORS_ALLOWED_ORIGIN` (none). It serves on http://127.0.0.1:8000; check `/live`. Stop with Ctrl+C.
+Do not trust `X-Forwarded-For` or deploy behind a proxy until Phase 15 sets the proxy options.
+
 ## Rules in plain words
 - Tests and evaluations never touch production data.
 - Ask the owner before any load test or evaluation that uses real provider
