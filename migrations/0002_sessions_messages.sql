@@ -2,7 +2,7 @@
 -- Field details are [P]. Message text is always masked text (spec invariant).
 
 CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     title TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -23,7 +23,7 @@ CREATE INDEX sessions_user_last_active ON sessions (user_id, last_active_at);
 CREATE INDEX sessions_last_active ON sessions (last_active_at);
 
 CREATE TABLE messages (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     -- Deleting a session (a user deleting their own chat, or retention) removes its messages.
     session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
     -- [P] Position of the message inside its session. Order never depends on how ids are made.

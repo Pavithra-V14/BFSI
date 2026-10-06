@@ -659,5 +659,6 @@ def test_a_real_http_call_never_puts_the_key_in_any_log_or_output(caplog, capfd,
     # Even with every logger forced to DEBUG the key never appears. LiteLLM's own DEBUG curl
     # line shows a masked header ("Be****u4"), which is why "Authorization" itself is allowed
     # here; the gateway keeps these loggers at ERROR, where nothing is printed at all.
-    for forbidden in (key, "z9y8x7w6v5u4", "sk-leak", "Bearer sk", f"Bearer {key[:6]}"):
+    fragment = key[-12:]  # a piece of the key, taken from the variable, never typed again
+    for forbidden in (key, fragment, key[:8], f"Bearer {key[:6]}"):
         assert forbidden not in everything

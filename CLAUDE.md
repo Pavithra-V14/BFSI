@@ -78,6 +78,8 @@ Production (Render) serves queries only.
 - The hash-based fallback embedding is for development only and must never
   index or retrieve in production.
 - Eval keys are never installed on Render. Jev has its own dedicated key.
+- Any code that opens a SQLite connection must run `PRAGMA foreign_keys = ON`, because SQLite
+  ignores foreign keys (and so every cascade) unless it is asked on each connection.
 - Where a rule can be code instead of a prompt instruction, it is code.
 
 ## Commands

@@ -1,0 +1,5 @@
+# Two findings in the history that are made-up test strings, not secrets. They sit in leak
+# tests that check a fake key never appears in any log. The lines have since been rewritten
+# so that the fake fragment is cut from a variable and is no longer typed out.
+60c09165f2cc1ed67cc403dbad6de32b51e2e0a2:tests/test_gateway_round2.py:generic-api-key:661
+bb18ef1ecdaa9282dde6e798d444d8cb6890c2ca:tests/test_gateway_round3.py:generic-api-key:513

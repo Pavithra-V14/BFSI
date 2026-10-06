@@ -12,6 +12,7 @@ from app.cache.store import (
     HIT,
     MISS,
     UNAVAILABLE,
+    UNAVAILABLE_SKIP_SECONDS,
     CacheConfigError,
     CacheStore,
     ChunkRef,
@@ -22,6 +23,21 @@ from app.cache.store import (
     store_from_env,
     ttl_from_env,
 )
+
+NOW = 1_800_000_000  # a fixed "current Unix time" for the corpus version
+
+
+class FakeClock:
+    """A clock the tests move by hand."""
+
+    def __init__(self, start=1_000.0):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
 
 
 @pytest.fixture
@@ -41,22 +57,33 @@ def events():
 
 @pytest.fixture
 def store(client, events):
-    return CacheStore(client, on_event=lambda name, fields: events.append((name, fields)))
+    return CacheStore(
+        client, on_event=lambda name, fields: events.append((name, fields)), wall_clock=lambda: NOW
+    )
 
 
-class DeadRedis:
-    """Every call fails like a cache that cannot be reached."""
+class FlakyRedis:
+    """A Redis that fails like a cache that cannot be reached, until `down` is set to False.
+    Every attempted call is counted, so a test can see whether Upstash was even tried."""
+
+    def __init__(self, inner=None, down=True):
+        self.inner = inner
+        self.down = down
+        self.calls = 0
 
     def __getattr__(self, name):
-        def fail(*args, **kwargs):
-            raise redis.exceptions.ConnectionError(
-                "Error 111 connecting to secret-host.example:6379"
-            )
+        if name in ("inner", "down", "calls"):  # not set yet: avoid recursion
+            raise AttributeError(name)
+        self.calls += 1
+        if self.down or self.inner is None:
 
-        return fail
+            def fail(*args, **kwargs):
+                raise redis.exceptions.ConnectionError(
+                    "Error 111 connecting to secret-host.example:6379"
+                )
 
-    def pipeline(self, *args, **kwargs):
-        return self
+            return fail
+        return getattr(self.inner, name)
 
 
 CHUNKS = [
@@ -96,7 +123,27 @@ def test_the_query_is_normalised_before_hashing():
     base = exact_key("What is the waiting period", "customer", 1, "p1")
     assert exact_key("  what   IS the\twaiting period ", "customer", 1, "p1") == base
     assert exact_key("What is the waiting period?", "customer", 1, "p1") != base  # punctuation kept
-    assert normalise_query("ＡＢＣ  Ⅻ") == "abc xii"  # compatibility forms are folded
+
+
+def test_two_spellings_of_the_same_character_are_one_question_nfc():
+    composed, decomposed = "caf\u00e9 cover", "cafe\u0301 cover"  # one character, or two
+    assert composed != decomposed
+    assert normalise_query(composed) == normalise_query(decomposed)
+    assert exact_key(composed, "customer", 1, "p") == exact_key(decomposed, "customer", 1, "p")
+
+
+@pytest.mark.parametrize(
+    ("one", "other"),
+    [
+        ("limit of 10\u00b2", "limit of 102"),  # "10 squared" is not "102"
+        ("plan \u2460", "plan 1"),  # a circled digit is not a plain digit
+        ("\uff21\uff22\uff23 cover", "abc cover"),  # full-width letters are not folded
+        ("rs\u2169", "rsx"),
+    ],
+)
+def test_look_alike_forms_stay_different_questions(one, other):
+    assert normalise_query(one) != normalise_query(other)
+    assert exact_key(one, "customer", 1, "p") != exact_key(other, "customer", 1, "p")
 
 
 def test_parts_cannot_be_shifted_between_fields():
@@ -193,22 +240,55 @@ def test_a_corrupt_entry_is_a_miss_and_is_removed(store, client, events):
 # ---- the corpus version (10.3 item 1) -------------------------------------------------------
 
 
-def test_the_corpus_version_starts_at_zero_and_every_bump_adds_one(store):
-    assert store.corpus_version() == 0
-    assert store.bump_corpus_version() == 1
-    assert store.bump_corpus_version() == 2
-    assert store.corpus_version() == 2
+def test_the_corpus_version_starts_from_the_unix_time_and_every_bump_adds_one(store):
+    assert store.corpus_version() == NOW  # never 0
+    assert store.bump_corpus_version() == NOW + 1
+    assert store.bump_corpus_version() == NOW + 2
+    assert store.corpus_version() == NOW + 2
+
+
+def test_a_first_bump_on_an_empty_cache_also_starts_from_the_time(store):
+    assert store.bump_corpus_version() == NOW + 1
+
+
+def test_a_lost_version_restarts_above_every_earlier_value(client):
+    clock = {"now": NOW}
+    store = CacheStore(client, wall_clock=lambda: clock["now"])
+    old_key = exact_key("q", "customer", store.corpus_version(), "p")
+    store.put_entry(old_key, {"a": 1}, [], corpus_version=NOW)
+    for _ in range(5):
+        store.bump_corpus_version()
+    before = store.corpus_version()
+    assert before == NOW + 5
+    client.delete("corpus:version")  # evicted, or lost
+    clock["now"] = NOW + 3_600  # an hour later
+    restarted = store.corpus_version()
+    assert restarted == NOW + 3_600 > before  # higher than anything used before
+    # An entry stored under an older version cannot be reached again: the key differs.
+    assert exact_key("q", "customer", restarted, "p") != old_key
+    assert store.get_entry(exact_key("q", "customer", restarted, "p")).status == MISS
+
+
+def test_an_existing_version_is_never_overwritten_by_the_start_value(server, store):
+    store.bump_corpus_version()
+    later = CacheStore(
+        fakeredis.FakeRedis(server=server, decode_responses=True), wall_clock=lambda: NOW + 999
+    )
+    assert later.corpus_version() == NOW + 1  # SET ... NX left it alone
 
 
 def test_the_version_is_shared_between_clients_of_the_same_server(server, store):
     other = CacheStore(fakeredis.FakeRedis(server=server, decode_responses=True))
     store.bump_corpus_version()
-    assert other.corpus_version() == 1
+    assert other.corpus_version() == NOW + 1
 
 
 def test_concurrent_bumps_are_never_lost(server):
     stores = [
-        CacheStore(fakeredis.FakeRedis(server=server, decode_responses=True)) for _ in range(8)
+        CacheStore(
+            fakeredis.FakeRedis(server=server, decode_responses=True), wall_clock=lambda: NOW
+        )
+        for _ in range(8)
     ]
 
     def work(one):
@@ -220,10 +300,10 @@ def test_concurrent_bumps_are_never_lost(server):
         thread.start()
     for thread in threads:
         thread.join()
-    assert stores[0].corpus_version() == 200
+    assert stores[0].corpus_version() == NOW + 200
 
 
-def test_a_garbled_version_is_reported_as_unavailable_not_as_zero(store, client, events):
+def test_a_garbled_version_is_reported_as_unavailable_not_as_a_number(store, client, events):
     client.set("corpus:version", "not-a-number")
     assert store.corpus_version() is None
     assert ("cache_corrupt", {"operation": "corpus_version"}) in events
@@ -258,6 +338,54 @@ def test_a_counter_that_lost_its_expiry_gets_one_again(store, client):
     assert client.ttl("ctr:c") > 0
 
 
+@pytest.mark.parametrize("window", [0, -1, 1.5, "60", None, True])
+def test_a_bad_window_is_refused_not_silently_ignored(store, window):
+    with pytest.raises(ValueError, match="window_seconds"):
+        store.incr_counter("c", window)
+    with pytest.raises(ValueError, match="window_seconds"):
+        store.check_rate_limit("chat", "user-1", limit=1, window_seconds=window)
+
+
+@pytest.mark.parametrize("amount", [0, -5, 2.5, "3", None, True])
+def test_a_bad_amount_is_refused(store, amount):
+    with pytest.raises(ValueError, match="amount"):
+        store.incr_counter("c", 60, amount)
+
+
+@pytest.mark.parametrize("limit", [0, -1, 1.5, "5", None, True])
+def test_a_bad_limit_is_refused(store, limit):
+    with pytest.raises(ValueError, match="limit"):
+        store.check_rate_limit("chat", "user-1", limit=limit, window_seconds=60)
+
+
+def test_a_window_of_zero_cannot_switch_a_limit_off(store, client):
+    with pytest.raises(ValueError):
+        store.incr_counter("c", 0)
+    assert not client.exists("ctr:c")  # nothing was counted or expired
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["asha@example.test", "Asha Rao", "", "a/b", "name\n", "x" * 129, "\u00fcn\u00efcode"],
+)
+def test_a_rate_limit_subject_must_be_an_id_or_a_hash_not_a_name_or_an_address(store, subject):
+    with pytest.raises(ValueError, match="ids or hashes"):
+        store.check_rate_limit("chat", subject, limit=1, window_seconds=60)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["user-1", "3f2b8c1e-5d4a-4c3b-9a8e-1f2e3d4c5b6a", "9d8f" * 16, "ip:203.0.113.7", "u_1.2"],
+)
+def test_ids_and_hashes_are_accepted_as_subjects(store, subject):
+    assert store.check_rate_limit("chat", subject, limit=1, window_seconds=60).allowed
+
+
+def test_the_scope_is_checked_like_the_subject(store):
+    with pytest.raises(ValueError):
+        store.check_rate_limit("chat room", "user-1", limit=1, window_seconds=60)
+
+
 def test_the_rate_limit_allows_up_to_the_limit_then_blocks_with_a_retry_time(store):
     decisions = [
         store.check_rate_limit("chat", "user-1", limit=3, window_seconds=60) for _ in range(5)
@@ -279,8 +407,20 @@ def test_rate_limits_are_kept_apart_per_scope_and_per_subject(store):
 
 
 @pytest.fixture
-def dead(events):
-    return CacheStore(DeadRedis(), on_event=lambda name, fields: events.append((name, fields)))
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture
+def dead_client():
+    return FlakyRedis()
+
+
+@pytest.fixture
+def dead(dead_client, events, clock):
+    return CacheStore(
+        dead_client, on_event=lambda name, fields: events.append((name, fields)), clock=clock
+    )
 
 
 def test_a_lookup_on_a_dead_cache_says_unavailable_and_raises_nothing(dead, events):
@@ -297,10 +437,60 @@ def test_every_other_call_on_a_dead_cache_reports_unavailable(dead):
     assert dead.incr_counter("c", 60) is None
 
 
-def test_the_rate_limit_fails_open_with_an_alert_event(dead, events):
-    decision = dead.check_rate_limit("chat", "user-1", limit=1, window_seconds=60)
-    assert decision.allowed and not decision.available and decision.count is None
-    assert ("rate_limit_unavailable", {"scope": "chat"}) in events
+def test_after_a_failure_upstash_is_not_called_again_for_30_seconds(dead, dead_client, clock):
+    assert UNAVAILABLE_SKIP_SECONDS == 30.0
+    dead.get_entry("ans:k")
+    tried = dead_client.calls
+    assert tried >= 1
+    for _ in range(20):  # a burst of requests during the outage
+        assert dead.get_entry("ans:k").status == UNAVAILABLE
+        assert dead.corpus_version() is None
+        decision = dead.check_rate_limit("chat", "user-1", limit=1, window_seconds=60)
+        assert decision.available is False
+    assert dead_client.calls == tried  # not one more call: no timeout was paid again
+    clock.advance(29.9)
+    dead.get_entry("ans:k")
+    assert dead_client.calls == tried  # still inside the window
+
+
+def test_the_first_call_after_the_window_tries_again_and_a_failure_starts_a_new_window(
+    dead, dead_client, clock, events
+):
+    dead.get_entry("ans:k")
+    tried = dead_client.calls
+    clock.advance(30.1)
+    dead.get_entry("ans:k")
+    assert dead_client.calls > tried  # it tried again
+    assert len([e for e in events if e[0] == "cache_unavailable"]) == 2  # one event per failure
+    tried = dead_client.calls
+    dead.get_entry("ans:k")
+    assert dead_client.calls == tried  # and the new window skips again
+
+
+def test_the_same_store_recovers_when_upstash_comes_back(client, events, clock):
+    flaky = FlakyRedis(inner=client, down=True)
+    store = CacheStore(
+        flaky,
+        on_event=lambda name, fields: events.append((name, fields)),
+        clock=clock,
+        wall_clock=lambda: NOW,
+    )
+    assert store.put_entry("ans:k", {"answer": "x"}, [], corpus_version=1) is False
+    flaky.down = False  # Upstash is back, but the store keeps away until the window ends
+    assert store.get_entry("ans:k").status == UNAVAILABLE
+    clock.advance(31)
+    assert store.put_entry("ans:k", {"answer": "x"}, [], corpus_version=1) is True
+    found = store.get_entry("ans:k")
+    assert found.status == HIT and found.entry["payload"] == {"answer": "x"}
+    assert store.corpus_version() == NOW  # the version works again too
+
+
+def test_the_rate_limit_fails_open_with_an_alert_event_every_time(dead, events):
+    for _ in range(3):
+        decision = dead.check_rate_limit("chat", "user-1", limit=1, window_seconds=60)
+        assert decision.allowed and not decision.available and decision.count is None
+    alerts = [e for e in events if e == ("rate_limit_unavailable", {"scope": "chat"})]
+    assert len(alerts) == 3  # the skip window never hides the alert for a request let through
 
 
 def test_events_and_logs_carry_no_address_or_error_text(dead, events, caplog):
@@ -311,11 +501,14 @@ def test_events_and_logs_carry_no_address_or_error_text(dead, events, caplog):
     assert "secret-host" not in everything and "111" not in everything
 
 
-def test_a_cache_that_comes_back_works_again(server, events):
-    store = CacheStore(DeadRedis())
-    assert store.get_entry("ans:k").status == UNAVAILABLE
-    healthy = CacheStore(fakeredis.FakeRedis(server=server, decode_responses=True))
-    assert healthy.get_entry("ans:k").status == MISS
+def test_an_alert_handler_that_raises_cannot_break_a_request(dead_client, clock, caplog):
+    def broken(name, fields):
+        raise RuntimeError("the alert webhook is down")
+
+    store = CacheStore(dead_client, on_event=broken, clock=clock)
+    assert store.get_entry("ans:k").status == UNAVAILABLE  # no exception reaches the caller
+    assert store.check_rate_limit("chat", "user-1", limit=1, window_seconds=60).allowed
+    assert "webhook" not in caplog.text  # the handler's own message is not copied into the log
 
 
 # ---- the client factory ----------------------------------------------------------------------
@@ -360,11 +553,18 @@ def test_a_store_is_built_from_the_environment_without_connecting():
         store_from_env({"CACHE_TTL_SECONDS": "900"})  # no URL
 
 
-def test_the_ttl_variable_is_documented_in_the_env_template():
+def test_the_ttl_variable_is_documented_with_its_default_and_a_proposal_tag():
     from pathlib import Path
 
-    template = (Path(__file__).resolve().parents[1] / ".env.example").read_text("utf-8")
-    assert "\nCACHE_TTL_SECONDS=\n" in template and "[P]" in template
+    lines = (Path(__file__).resolve().parents[1] / ".env.example").read_text("utf-8").splitlines()
+    at = lines.index("CACHE_TTL_SECONDS=")  # the name is present and its value is empty
+    block = []
+    for line in reversed(lines[:at]):  # the comment block directly above the variable
+        if not line.startswith("#"):
+            break
+        block.append(line)
+    comment = " ".join(block)
+    assert "86400" in comment and "[P]" in comment and "Where: Render and local" in comment
 
 
 def test_a_local_cache_is_refused_on_render():

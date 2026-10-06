@@ -10,61 +10,134 @@ from pathlib import Path
 
 import pytest
 
+from app.db.chats import clear_review_details_for_session, delete_session
+from app.db.identity import normalise_email, normalise_username
 from app.db.migrate import load_migrations, run
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 
-TABLES = {
-    "users": {"id", "username", "email", "password_hash", "role", "created_at"},
-    "revoked_tokens": {"jti", "user_id", "revoked_at", "expires_at"},
+# table -> column -> (declared type, NOT NULL). Every column the planned schema has, nothing else.
+SPEC = {
+    "users": {
+        "id": ("TEXT", True),
+        "username": ("TEXT", True),
+        "email": ("TEXT", True),
+        "password_hash": ("TEXT", True),
+        "role": ("TEXT", True),
+        "created_at": ("TIMESTAMPTZ", True),
+    },
+    "revoked_tokens": {
+        "jti": ("TEXT", True),
+        "user_id": ("TEXT", True),
+        "revoked_at": ("TIMESTAMPTZ", True),
+        "expires_at": ("TIMESTAMPTZ", True),
+    },
     "sessions": {
-        "id",
-        "user_id",
-        "title",
-        "created_at",
-        "summary_text",
-        "summary_upto_message_id",
-        "session_facts",
-        "last_active_at",
-        "status",
+        "id": ("TEXT", True),
+        "user_id": ("TEXT", True),
+        "title": ("TEXT", False),
+        "created_at": ("TIMESTAMPTZ", True),
+        "summary_text": ("TEXT", False),
+        "summary_upto_message_id": ("TEXT", False),
+        "session_facts": ("TEXT", True),
+        "last_active_at": ("TIMESTAMPTZ", True),
+        "status": ("TEXT", True),
     },
     "messages": {
-        "id",
-        "session_id",
-        "seq",
-        "role",
-        "content",
-        "citations",
-        "grounded",
-        "source_removed",
-        "created_at",
+        "id": ("TEXT", True),
+        "session_id": ("TEXT", True),
+        "seq": ("INTEGER", True),
+        "role": ("TEXT", True),
+        "content": ("TEXT", True),
+        "citations": ("TEXT", True),
+        "grounded": ("BOOLEAN", False),
+        "source_removed": ("BOOLEAN", True),
+        "created_at": ("TIMESTAMPTZ", True),
     },
-    "audit_log": {"id", "actor", "action", "target", "details", "created_at"},
+    "audit_log": {
+        "id": ("TEXT", True),
+        "actor": ("TEXT", True),
+        "action": ("TEXT", True),
+        "target": ("TEXT", False),
+        "details": ("TEXT", True),
+        "created_at": ("TIMESTAMPTZ", True),
+    },
     # Exactly the columns spec 12.1 lists.
     "allowlist_entities": {
-        "id",
-        "doc_id",
-        "text",
-        "entity_type",
-        "status",
-        "approved_by",
-        "approved_at",
-        "access_role",
+        "id": ("TEXT", True),
+        "doc_id": ("TEXT", True),
+        "text": ("TEXT", True),
+        "entity_type": ("TEXT", True),
+        "status": ("TEXT", True),
+        "approved_by": ("TEXT", False),
+        "approved_at": ("TIMESTAMPTZ", False),
+        "access_role": ("TEXT", True),
     },
-    "feedback_entries": {"id", "message_id", "user_id", "rating", "created_at"},
+    "feedback_entries": {
+        "id": ("TEXT", True),
+        "message_id": ("TEXT", True),
+        "user_id": ("TEXT", True),
+        "rating": ("TEXT", True),
+        "created_at": ("TIMESTAMPTZ", True),
+    },
     "review_queue": {
-        "id",
-        "kind",
-        "status",
-        "session_id",
-        "message_id",
-        "doc_id",
-        "details",
-        "label",
-        "labelled_by",
-        "labelled_at",
-        "created_at",
+        "id": ("TEXT", True),
+        "kind": ("TEXT", True),
+        "status": ("TEXT", True),
+        "session_id": ("TEXT", False),
+        "message_id": ("TEXT", False),
+        "doc_id": ("TEXT", False),
+        "details": ("TEXT", True),
+        "label": ("TEXT", False),
+        "labelled_by": ("TEXT", False),
+        "labelled_at": ("TIMESTAMPTZ", False),
+        "created_at": ("TIMESTAMPTZ", True),
     },
+}
+
+PRIMARY_KEYS = {
+    "users": "id",
+    "revoked_tokens": "jti",
+    "sessions": "id",
+    "messages": "id",
+    "audit_log": "id",
+    "allowlist_entities": "id",
+    "feedback_entries": "id",
+    "review_queue": "id",
+}
+
+# Every default the schema sets. A column not listed here has no default.
+DEFAULTS = {
+    ("users", "role"): "'customer'",
+    ("users", "created_at"): "CURRENT_TIMESTAMP",
+    ("revoked_tokens", "revoked_at"): "CURRENT_TIMESTAMP",
+    ("sessions", "created_at"): "CURRENT_TIMESTAMP",
+    ("sessions", "session_facts"): "'{}'",
+    ("sessions", "last_active_at"): "CURRENT_TIMESTAMP",
+    ("sessions", "status"): "'active'",
+    ("messages", "citations"): "'[]'",
+    ("messages", "source_removed"): "FALSE",
+    ("messages", "created_at"): "CURRENT_TIMESTAMP",
+    ("audit_log", "details"): "'{}'",
+    ("audit_log", "created_at"): "CURRENT_TIMESTAMP",
+    ("allowlist_entities", "status"): "'pending'",
+    ("feedback_entries", "created_at"): "CURRENT_TIMESTAMP",
+    ("review_queue", "status"): "'open'",
+    ("review_queue", "details"): "'{}'",
+    ("review_queue", "created_at"): "CURRENT_TIMESTAMP",
+}
+
+# (table, column) -> (parent table, what happens when the parent row is deleted)
+FOREIGN_KEYS = {
+    ("revoked_tokens", "user_id"): ("users", "CASCADE"),
+    ("sessions", "user_id"): ("users", "CASCADE"),
+    ("messages", "session_id"): ("sessions", "CASCADE"),
+    ("allowlist_entities", "approved_by"): ("users", "SET NULL"),
+    ("feedback_entries", "message_id"): ("messages", "CASCADE"),
+    ("feedback_entries", "user_id"): ("users", "CASCADE"),
+    ("review_queue", "session_id"): ("sessions", "SET NULL"),
+    ("review_queue", "message_id"): ("messages", "SET NULL"),
+    ("review_queue", "labelled_by"): ("users", "SET NULL"),
 }
 
 
@@ -80,10 +153,6 @@ def db(tmp_path):
     conn.execute("PRAGMA foreign_keys = ON")
     yield conn
     conn.close()
-
-
-def columns(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def add_user(conn, name="asha", role=None):
@@ -149,9 +218,46 @@ def test_the_sql_stays_portable_between_postgres_and_sqlite():
             assert word not in text, f"{migration.filename} uses {word}"
 
 
-@pytest.mark.parametrize("table", sorted(TABLES))
-def test_every_table_has_exactly_the_planned_columns(db, table):
-    assert columns(db, table) == TABLES[table]
+@pytest.mark.parametrize("table", sorted(SPEC))
+def test_every_column_has_the_planned_type_and_null_rule(db, table):
+    found = {
+        row[1]: (row[2].upper(), bool(row[3])) for row in db.execute(f"PRAGMA table_info({table})")
+    }
+    assert found == SPEC[table]  # exactly these columns, with these types and NOT NULL flags
+
+
+@pytest.mark.parametrize("table", sorted(SPEC))
+def test_every_default_is_the_planned_one_and_nothing_else_has_a_default(db, table):
+    found = {row[1]: row[4] for row in db.execute(f"PRAGMA table_info({table})")}
+    expected = {name: DEFAULTS.get((table, name)) for name in SPEC[table]}
+    assert found == expected
+
+
+@pytest.mark.parametrize("table", sorted(SPEC))
+def test_each_table_has_the_planned_single_column_primary_key(db, table):
+    keys = [row[1] for row in db.execute(f"PRAGMA table_info({table})") if row[5]]
+    assert keys == [PRIMARY_KEYS[table]]
+
+
+def test_the_foreign_keys_and_their_delete_rules_are_exactly_the_planned_ones(db):
+    found = {}
+    for table in SPEC:
+        for row in db.execute(f"PRAGMA foreign_key_list({table})"):
+            found[(table, row[3])] = (row[2], row[6])  # parent table, ON DELETE rule
+    assert found == FOREIGN_KEYS
+    # No foreign key on purpose: the audit log keeps history, the summary pointer cannot block.
+    assert ("audit_log", "actor") not in found
+    assert ("sessions", "summary_upto_message_id") not in found
+
+
+def test_uniqueness_rules_are_exactly_the_planned_ones(db):
+    unique = {}
+    for table in SPEC:
+        for index in db.execute(f"PRAGMA index_list({table})"):
+            if index[2] and index[3] == "u":  # unique, created by a UNIQUE constraint
+                columns_ = tuple(row[2] for row in db.execute(f"PRAGMA index_info({index[1]})"))
+                unique.setdefault(table, set()).add(columns_)
+    assert unique == {"users": {("username",), ("email",)}, "messages": {("session_id", "seq")}}
 
 
 def test_foreign_keys_are_really_enforced_in_these_tests(db):
@@ -178,7 +284,7 @@ def test_any_other_role_is_rejected(db, role):
         add_user(db, "x", role)
 
 
-def test_username_and_email_are_unique_and_stored_lower_case(db):
+def test_username_and_email_are_unique(db):
     add_user(db, "asha")
     with pytest.raises(sqlite3.IntegrityError):
         add_user(db, "asha")  # same username
@@ -188,18 +294,31 @@ def test_username_and_email_are_unique_and_stored_lower_case(db):
             "'asha@example.test', 'h')",
             (new_id(),),
         )  # same email
-    with pytest.raises(sqlite3.IntegrityError):
+
+
+def test_the_database_does_not_fold_case_the_application_does(db):
+    # No CHECK on case: lower() differs between Postgres and SQLite. The database stores what it
+    # is given, so the application must normalise first (app/db/identity.py).
+    add_user(db, "asha")
+    add_user(db, "Asha")  # accepted as a different value, which is why normalising is required
+    assert count(db, "users") == 2
+
+
+def test_normalising_before_storing_makes_case_and_spacing_variants_collide(db):
+    def register(name, email):
         db.execute(
-            "INSERT INTO users (id, username, email, password_hash) VALUES (?, 'Mixed', "
-            "'mixed@example.test', 'h')",
-            (new_id(),),
+            "INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, 'h')",
+            (new_id(), normalise_username(name), normalise_email(email)),
         )
+
+    register("  Asha ", "Asha@Example.test")
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute(
-            "INSERT INTO users (id, username, email, password_hash) VALUES (?, 'mixed', "
-            "'Mixed@Example.test', 'h')",
-            (new_id(),),
-        )
+        register("ASHA", "other@example.test")  # the same username after the rule
+    with pytest.raises(sqlite3.IntegrityError):
+        register("ravi", " ASHA@EXAMPLE.TEST ")  # the same email after the rule
+    assert db.execute("SELECT username, email FROM users").fetchall() == [
+        ("asha", "asha@example.test")
+    ]
 
 
 # ---- sessions and messages ---------------------------------------------------------
@@ -413,3 +532,91 @@ def test_the_audit_log_takes_inserts_and_the_expected_indexes_exist(db):
         "review_queue_status_created",
         "feedback_entries_message_id",
     } <= names
+
+
+# ---- deleting a chat clears the review items' text (spec 8.4, 13.6) --------------------------
+
+
+def add_review(db, session_id=None, message_id=None, details='{"snippet": "masked text"}', **extra):
+    rid = new_id()
+    db.execute(
+        "INSERT INTO review_queue (id, kind, session_id, message_id, details, label) "
+        "VALUES (?, 'low_confidence', ?, ?, ?, ?)",
+        (rid, session_id, message_id, details, extra.get("label")),
+    )
+    return rid
+
+
+def details_of(db, rid):
+    return db.execute("SELECT details FROM review_queue WHERE id = ?", (rid,)).fetchone()[0]
+
+
+def test_deleting_a_chat_clears_the_details_of_every_linked_review_item_but_keeps_the_rows(db):
+    user = add_user(db)
+    sid = add_session(db, user)
+    mid = add_message(db, sid, 1, "assistant")
+    by_session = add_review(db, session_id=sid, label="wrong clause")
+    by_message = add_review(db, message_id=mid)
+    by_both = add_review(db, session_id=sid, message_id=mid)
+    assert delete_session(db, sid) is True
+    assert count(db, "sessions") == 0 and count(db, "messages") == 0
+    assert count(db, "review_queue") == 3  # the rows stay
+    for rid in (by_session, by_message, by_both):
+        assert details_of(db, rid) == "{}"  # the text is gone
+    row = db.execute(
+        "SELECT session_id, message_id, kind, status, label FROM review_queue WHERE id = ?",
+        (by_session,),
+    ).fetchone()
+    assert row == (None, None, "low_confidence", "open", "wrong clause")  # links cleared, rest kept
+
+
+def test_other_chats_and_unlinked_review_items_keep_their_details(db):
+    user = add_user(db)
+    gone, kept = add_session(db, user), add_session(db, user)
+    gone_message = add_message(db, gone, 1)
+    kept_message = add_message(db, kept, 1)
+    other_chat = add_review(db, session_id=kept)
+    other_message = add_review(db, message_id=kept_message)
+    unlinked = add_review(db)  # for example a failed ingest page: no chat at all
+    linked = add_review(db, message_id=gone_message)
+    delete_session(db, gone)
+    assert details_of(db, linked) == "{}"
+    for rid in (other_chat, other_message, unlinked):
+        assert details_of(db, rid) == '{"snippet": "masked text"}'
+    assert count(db, "sessions") == 1 and count(db, "messages") == 1
+
+
+def test_clearing_reports_how_many_items_it_cleared(db):
+    sid = add_session(db, add_user(db))
+    add_review(db, session_id=sid)
+    add_review(db, session_id=sid)
+    add_review(db)
+    assert clear_review_details_for_session(db, sid) == 2
+    assert clear_review_details_for_session(db, "no-such-session") == 0
+
+
+def test_deleting_a_session_that_does_not_exist_changes_nothing(db):
+    kept = add_review(db)
+    assert delete_session(db, "no-such-session") is False
+    assert details_of(db, kept) == '{"snippet": "masked text"}'
+
+
+def test_the_clearing_and_the_delete_roll_back_together(db):
+    sid = add_session(db, add_user(db))
+    rid = add_review(db, session_id=sid)
+    db.commit()
+    delete_session(db, sid)
+    db.rollback()  # the caller owns the transaction: nothing was committed
+    assert count(db, "sessions") == 1 and details_of(db, rid) == '{"snippet": "masked text"}'
+
+
+def test_feedback_on_the_deleted_chat_goes_with_it(db):
+    user = add_user(db)
+    sid = add_session(db, user)
+    mid = add_message(db, sid, 1, "assistant")
+    db.execute(
+        "INSERT INTO feedback_entries (id, message_id, user_id, rating) VALUES (?, ?, ?, 'down')",
+        (new_id(), mid, user),
+    )
+    delete_session(db, sid)
+    assert count(db, "feedback_entries") == 0

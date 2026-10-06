@@ -511,5 +511,6 @@ def test_a_real_failure_response_never_leaks_the_key_it_echoes(
             seen_output.err,
         ]
     )
-    for forbidden in (key, "q1w2e3r4t5y6", "sk-failure"):
+    fragment = key[-12:]  # a piece of the key, taken from the variable, never typed again
+    for forbidden in (key, fragment, key[:10]):
         assert forbidden not in everything

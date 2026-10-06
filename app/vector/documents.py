@@ -9,6 +9,12 @@ already there. It runs when the owner asks for it, on the admin machine:
 
 It reads QDRANT_URL and QDRANT_API_KEY from the shell, prints names and status only, and is
 never run by the application itself or by the tests against a real cluster.
+
+The `effective_to` rule (owner decision, spec 6.4 and 7): a chunk is active when `effective_to`
+is empty (missing or null), and inactive as soon as it holds any value. There are no future
+dates: a chunk is never "active until a date", and ingestion sets `effective_to` at the moment
+a chunk is superseded or removed. `ACTIVE_ONLY` is the search filter that expresses the rule and
+`chunk_is_active` is the same rule for a payload fetched for the cache's read-time check.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from qdrant_client import QdrantClient, models
 
 from app.gateway.embeddings import DIMENSIONS, running_on_render
 from app.isolation import is_local_url
-from app.store_errors import StoreUnavailable, vector_errors
+from app.store_errors import StoreRejected, StoreUnavailable, vector_errors
 
 COLLECTION = "documents"
 DENSE_VECTOR = "dense"
@@ -42,6 +48,21 @@ PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
     ("chunk_id", models.PayloadSchemaType.KEYWORD),
     ("content_type", models.PayloadSchemaType.KEYWORD),
 )
+
+
+# "Only active chunks" (spec 7): effective_to is empty. IsEmpty matches a missing field, a null
+# and an empty list, and nothing that holds a value, however far in the future.
+ACTIVE_ONLY = models.Filter(
+    must=[models.IsEmptyCondition(is_empty=models.PayloadField(key="effective_to"))]
+)
+
+
+def chunk_is_active(payload: Mapping[str, object] | None) -> bool:
+    """The same rule for one payload: active only if effective_to is empty (absent, null or an
+    empty list, exactly what the ACTIVE_ONLY filter matches). Any value at all, an empty string
+    included, means inactive."""
+    value = (payload or {}).get("effective_to")
+    return value is None or (isinstance(value, list) and not value)
 
 
 class VectorConfigError(Exception):
@@ -76,6 +97,8 @@ def make_client(
         return QdrantClient(":memory:")
     if not is_local_url(address) and not address.lower().startswith("https://"):
         raise VectorConfigError("QDRANT_URL must start with https:// for a remote host")
+    if running_on_render(env) and is_local_url(address):
+        raise VectorConfigError("QDRANT_URL must not point at this machine on Render")
     # check_compatibility=False: building the client must not make a network call of its own, so
     # an unreachable Qdrant surfaces as VectorStoreUnavailable on the first real call.
     return QdrantClient(
@@ -172,6 +195,12 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         return 1
     except StoreUnavailable as error:
         print(f"error: Qdrant could not be reached ({error.cause})", file=sys.stderr)
+        return 1
+    except StoreRejected as error:
+        print(
+            f"error: Qdrant rejected the request ({error.reason}); check QDRANT_API_KEY",
+            file=sys.stderr,
+        )
         return 1
     print(f"collection '{COLLECTION}': {'created' if result.created else 'already exists'}")
     print(f"payload indexes created: {', '.join(result.indexes_created) or 'none'}")

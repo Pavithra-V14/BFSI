@@ -7,12 +7,14 @@ from app.gateway.embeddings import DIMENSIONS
 from app.store_errors import VectorStoreUnavailable
 from app.vector import documents
 from app.vector.documents import (
+    ACTIVE_ONLY,
     COLLECTION,
     DENSE_VECTOR,
     PAYLOAD_INDEXES,
     SPARSE_VECTOR,
     CollectionMismatch,
     VectorConfigError,
+    chunk_is_active,
     client_from_env,
     ensure_documents_collection,
     make_client,
@@ -223,3 +225,103 @@ def test_the_command_says_qdrant_could_not_be_reached_without_the_address(capsys
     assert documents.main(["--ensure"], env={}) == 1
     err = capsys.readouterr().err
     assert "could not be reached" in err and "127.0.0.1" not in err
+
+
+# ---- the effective_to rule: empty means active, any value means inactive (spec 6.4, 7) ----------
+
+# payload -> active? Any value at all, past or future, means inactive at once.
+EFFECTIVE_TO_CASES = {
+    "absent": ({"doc_id": "d-absent"}, True),
+    "null": ({"doc_id": "d-null", "effective_to": None}, True),
+    "past date": ({"doc_id": "d-past", "effective_to": "2020-01-01T00:00:00Z"}, False),
+    "today": ({"doc_id": "d-today", "effective_to": "2026-10-06T00:00:00Z"}, False),
+    "future date": ({"doc_id": "d-future", "effective_to": "2999-01-01T00:00:00Z"}, False),
+    "empty string": ({"doc_id": "d-empty", "effective_to": ""}, False),
+}
+
+
+def _fill(client):
+    ensure_documents_collection(client)
+    points = [
+        models.PointStruct(
+            id=number,
+            vector={
+                DENSE_VECTOR: [1.0] + [0.0] * (DIMENSIONS - 1),
+                SPARSE_VECTOR: models.SparseVector(indices=[number], values=[1.0]),
+            },
+            payload=payload,
+        )
+        for number, (payload, _) in enumerate(EFFECTIVE_TO_CASES.values(), start=1)
+    ]
+    client.upsert(COLLECTION, points=points)
+
+
+def test_the_active_filter_keeps_only_chunks_whose_effective_to_is_empty(client):
+    _fill(client)
+    found, _ = client.scroll(COLLECTION, scroll_filter=ACTIVE_ONLY, limit=50)
+    assert sorted(point.payload["doc_id"] for point in found) == ["d-absent", "d-null"]
+
+
+def test_a_future_date_is_inactive_at_once_there_is_no_scheduled_end(client):
+    _fill(client)
+    found, _ = client.scroll(COLLECTION, scroll_filter=ACTIVE_ONLY, limit=50)
+    ids = {point.payload["doc_id"] for point in found}
+    assert "d-future" not in ids and "d-today" not in ids and "d-past" not in ids
+
+
+@pytest.mark.parametrize("name", sorted(EFFECTIVE_TO_CASES))
+def test_the_payload_check_agrees_with_the_search_filter(client, name):
+    payload, active = EFFECTIVE_TO_CASES[name]
+    assert chunk_is_active(payload) is active
+    _fill(client)
+    found, _ = client.scroll(COLLECTION, scroll_filter=ACTIVE_ONLY, limit=50)
+    assert (payload["doc_id"] in {p.payload["doc_id"] for p in found}) is active
+
+
+def test_chunk_is_active_handles_a_missing_payload_and_an_empty_list():
+    assert chunk_is_active(None) is True
+    assert chunk_is_active({}) is True
+    assert chunk_is_active({"effective_to": []}) is True
+    assert chunk_is_active({"effective_to": ["2020-01-01"]}) is False
+
+
+def test_the_rule_is_written_down_in_the_module():
+    text = " ".join(documents.__doc__.split())  # the docstring wraps lines
+    assert "empty" in text and "no future dates" in text and "inactive" in text
+
+
+# ---- Render rules, rejected credentials ------------------------------------------------------
+
+
+def test_a_local_qdrant_address_is_refused_on_render_like_the_cache_one():
+    for address in ("http://localhost:6333", "localhost:6333", "http://127.0.0.1:6333"):
+        with pytest.raises(VectorConfigError, match="Render"):
+            make_client(address, env={"RENDER": "true"})
+    # Off Render the same addresses are fine, and a remote https address is fine on Render.
+    assert make_client("http://localhost:6333", env={}) is not None
+    assert make_client("https://abc.cloud.qdrant.example.test:6333", env={"RENDER": "1"})
+
+
+def test_the_command_reports_rejected_credentials_without_the_address(capsys, monkeypatch):
+    from qdrant_client.http import exceptions as qdrant_exceptions
+
+    class Rejecting:
+        def collection_exists(self, name):
+            raise qdrant_exceptions.UnexpectedResponse(401, "Unauthorized", b"", None)
+
+    monkeypatch.setattr(documents, "client_from_env", lambda env=None: Rejecting())
+    assert documents.main(["--ensure"], env={}) == 1
+    err = capsys.readouterr().err
+    assert "rejected the request (HTTP 401)" in err and "QDRANT_API_KEY" in err
+    assert "could not be reached" not in err  # a bad key is not an outage
+
+
+def test_a_name_clash_on_create_is_not_reported_as_an_outage(client, monkeypatch):
+    from qdrant_client.http import exceptions as qdrant_exceptions
+
+    def clash(*args, **kwargs):
+        raise qdrant_exceptions.UnexpectedResponse(409, "Conflict", b"", None)
+
+    monkeypatch.setattr(client, "create_collection", clash)
+    with pytest.raises(qdrant_exceptions.UnexpectedResponse):
+        ensure_documents_collection(client)

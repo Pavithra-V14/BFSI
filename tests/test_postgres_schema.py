@@ -110,3 +110,41 @@ def test_checks_uniqueness_and_cascades_hold_on_postgres(conn):
     conn.execute("DELETE FROM users WHERE id = %s", (user,))
     assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+
+
+def test_deleting_a_chat_clears_review_details_on_postgres_and_keeps_the_row(conn):
+    from app.db.chats import delete_session
+
+    user, sid, mid, rid = new_id(), new_id(), new_id(), new_id()
+    conn.execute(
+        "INSERT INTO users (id, username, email, password_hash) VALUES (%s, 'asha', "
+        "'asha@example.test', 'hash')",
+        (user,),
+    )
+    conn.execute("INSERT INTO sessions (id, user_id) VALUES (%s, %s)", (sid, user))
+    conn.execute(
+        "INSERT INTO messages (id, session_id, seq, role, content) "
+        "VALUES (%s, %s, 1, 'assistant', 'masked')",
+        (mid, sid),
+    )
+    conn.execute(
+        "INSERT INTO review_queue (id, kind, message_id, details) "
+        "VALUES (%s, 'low_confidence', %s, '{\"snippet\": \"masked\"}')",
+        (rid, mid),
+    )
+    assert delete_session(conn, sid) is True
+    row = conn.execute(
+        "SELECT details, message_id, kind FROM review_queue WHERE id = %s", (rid,)
+    ).fetchone()
+    assert row == ("{}", None, "low_confidence")
+    assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+
+def test_a_text_primary_key_cannot_be_null_on_postgres_either(conn):
+    import psycopg
+
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        conn.execute(
+            "INSERT INTO users (id, username, email, password_hash) "
+            "VALUES (NULL, 'x', 'x@example.test', 'h')"
+        )

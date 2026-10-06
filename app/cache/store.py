@@ -7,8 +7,13 @@ role-scoped versions and the pipeline's lookup and write (later phases).
 
 If Upstash cannot be reached, nothing raises. Every call reports "unavailable" (a None, False or
 an "unavailable" lookup) and an event is emitted, so the caller skips the cache and answers
-normally (spec 11.1). A rate-limit check lets the request through when the counter is down (fail
-open) and emits an alert event. Whether login throttling does the same is decided in Phase 4.
+normally (spec 11.1). After a failure the store does not call Upstash again for
+UNAVAILABLE_SKIP_SECONDS [P], so a dead cache costs one timeout and not one per call. A rate-limit
+check lets the request through when the counter is down (fail open) and emits an alert event.
+Whether login throttling does the same is decided in Phase 4.
+
+The corpus version starts from the current Unix time in seconds, never from 0: if the key is ever
+lost, the version restarts higher than any value used before, so old entries cannot come back.
 
 Entries hold no raw query text: the key is a hash, and the caller passes already-masked content.
 Logs and events carry operation names and exception class names only, never a URL or a key.
@@ -20,6 +25,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -36,6 +43,9 @@ DEFAULT_TTL_SECONDS = 86_400  # [P] 24 hours; TTL is only a backstop (spec 10.2)
 REVERSE_SET_MARGIN_SECONDS = (
     3_600  # reverse sets outlive their entries, so they can still find them
 )
+UNAVAILABLE_SKIP_SECONDS = 30.0  # [P] how long Upstash is left alone after a failure
+# A rate-limit subject is an id or a hash, never a name or an email address (spec 10.2: no PII).
+SUBJECT_PATTERN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 CORPUS_VERSION_KEY = "corpus:version"
 ANSWER_PREFIX = "ans:"
 COUNTER_PREFIX = "ctr:"
@@ -122,12 +132,14 @@ def store_from_env(
 
 
 def normalise_query(masked_query: str) -> str:
-    """The normal form of a masked query: Unicode-compatible, case-folded, spaces collapsed.
+    """The normal form of a masked query: Unicode NFC, case-folded, spaces collapsed.
 
-    [P] The spec says "normalised" without defining it. Punctuation is kept on purpose, because
-    figures and symbols can change an answer.
+    [P] The spec says "normalised" without defining it. NFC only joins different spellings of the
+    same character (an accent typed as one character or as two). It does not fold look-alikes, so
+    "10²" and "102" stay different questions. Punctuation is kept on purpose, because figures and
+    symbols can change an answer.
     """
-    return " ".join(unicodedata.normalize("NFKC", masked_query).casefold().split())
+    return " ".join(unicodedata.normalize("NFC", masked_query).casefold().split())
 
 
 def exact_key(masked_query: str, role: str, corpus_version: int, prompt_version: str) -> str:
@@ -151,6 +163,11 @@ def doc_set_key(doc_id: str) -> str:
 _FAILED = object()
 
 
+def _positive_int(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive whole number")
+
+
 class CacheStore:
     def __init__(
         self,
@@ -158,44 +175,82 @@ class CacheStore:
         *,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise CacheConfigError("CACHE_TTL_SECONDS must be a positive whole number")
         self._client = client
         self.ttl_seconds = ttl_seconds
         self._on_event = on_event
+        self._clock = clock
+        self._wall_clock = wall_clock
+        self._skip_until = 0.0  # while the clock is before this, Upstash is not called
 
     # ---- plumbing -------------------------------------------------------------------
 
     def _emit(self, name: str, **fields: Any) -> None:
         log.warning("cache event %s %s", name, fields)
         if self._on_event:
-            self._on_event(name, fields)
+            try:
+                self._on_event(name, fields)
+            except Exception:  # an alert hook that fails must never break a request
+                log.error("cache event handler failed for %s", name)
 
     def _run(self, operation: str, work: Callable[[], Any]) -> Any:
-        """Run one cache operation. A connection problem returns _FAILED and emits an event."""
+        """Run one cache operation. A connection problem returns _FAILED and emits an event.
+
+        After a failure Upstash is skipped for UNAVAILABLE_SKIP_SECONDS: calls return _FAILED at
+        once, with no new event, and the first call after that window tries again.
+        """
+        if self._clock() < self._skip_until:
+            return _FAILED
         try:
             return work()
         except (redis.exceptions.RedisError, OSError) as error:
+            self._skip_until = self._clock() + UNAVAILABLE_SKIP_SECONDS
             self._emit("cache_unavailable", operation=operation, error=type(error).__name__)
             return _FAILED
 
     # ---- corpus version (10.3 item 1) ----------------------------------------------
 
+    def _version_pipeline(self):
+        """A pipeline that first sets the version to the current Unix time if (and only if) the
+        key is missing, so a lost key restarts above every value used before."""
+        pipe = self._client.pipeline(transaction=False)
+        pipe.set(CORPUS_VERSION_KEY, int(self._wall_clock()), nx=True)
+        return pipe
+
     def corpus_version(self) -> int | None:
-        """The current corpus version (0 before the first bump), or None if unavailable."""
-        value = self._run("corpus_version", lambda: self._client.get(CORPUS_VERSION_KEY))
+        """The current corpus version, or None if unavailable.
+
+        If the key is missing (first use, or it was lost) it is created from the current Unix
+        time in seconds.
+        """
+
+        def work() -> Any:
+            pipe = self._version_pipeline()
+            pipe.get(CORPUS_VERSION_KEY)
+            return pipe.execute()[-1]
+
+        value = self._run("corpus_version", work)
         if value is _FAILED:
             return None
         try:
-            return int(value) if value is not None else 0
+            return int(value)
         except (TypeError, ValueError):
             self._emit("cache_corrupt", operation="corpus_version")
             return None
 
     def bump_corpus_version(self) -> int | None:
         """Any ingest, edit or delete bumps the version. Returns the new value, or None."""
-        value = self._run("bump_corpus_version", lambda: self._client.incr(CORPUS_VERSION_KEY))
+
+        def work() -> Any:
+            pipe = self._version_pipeline()
+            pipe.incr(CORPUS_VERSION_KEY)
+            return pipe.execute()[-1]
+
+        value = self._run("bump_corpus_version", work)
         return None if value is _FAILED else int(value)
 
     # ---- entries and reverse sets (10.3 item 2) -------------------------------------
@@ -272,7 +327,11 @@ class CacheStore:
 
         The window starts at the first increment and the counter vanishes when it ends. Used for
         rate limits and for the daily token budget (the callers decide what to do on None).
+        A window or an amount that is not a positive whole number is a bug in the caller and
+        raises ValueError, because a window of zero would make the limit silently never apply.
         """
+        _positive_int(window_seconds, "window_seconds")
+        _positive_int(amount, "amount")
         key = f"{COUNTER_PREFIX}{name}"
 
         def work() -> int:
@@ -293,7 +352,15 @@ class CacheStore:
         self, scope: str, subject: str, *, limit: int, window_seconds: int
     ) -> RateDecision:
         """Count one request against `limit` per window. If the counter is unavailable the
-        request is allowed (fail open) and a "rate_limit_unavailable" event is emitted."""
+        request is allowed (fail open) and a "rate_limit_unavailable" event is emitted.
+
+        `subject` must be an id or a hash (letters, digits and _ . : - only): a name or an email
+        address would put personal data into a key name, so it is refused (ValueError).
+        """
+        _positive_int(limit, "limit")
+        _positive_int(window_seconds, "window_seconds")
+        if not SUBJECT_PATTERN.fullmatch(subject) or not SUBJECT_PATTERN.fullmatch(scope):
+            raise ValueError("scope and subject must be ids or hashes, not names or addresses")
         key = f"{RATE_PREFIX}{scope}:{subject}"
         count = self.incr_counter(key, window_seconds)
         if count is None:

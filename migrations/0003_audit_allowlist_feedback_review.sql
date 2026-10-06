@@ -5,7 +5,7 @@
 -- That rule is enforced in code, not by a database trigger, because a trigger cannot be written
 -- once for both Postgres and SQLite. No document text goes into details (spec 6.7).
 CREATE TABLE audit_log (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     actor TEXT NOT NULL,  -- who: a user id, or 'system'
     action TEXT NOT NULL,  -- what
     target TEXT,  -- for example a document id or a user id
@@ -18,7 +18,7 @@ CREATE INDEX audit_log_created_at ON audit_log (created_at);
 -- Entity allow-list (spec 6.8): terms that must not be masked. Tied to a document id, which
 -- lives in the vector store, so it is plain text here.
 CREATE TABLE allowlist_entities (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     doc_id TEXT NOT NULL,
     text TEXT NOT NULL,
     entity_type TEXT NOT NULL,
@@ -34,7 +34,7 @@ CREATE INDEX allowlist_entities_status ON allowlist_entities (status);
 
 -- Thumbs on an answer (spec 11.4). [P]
 CREATE TABLE feedback_entries (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     message_id TEXT NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     rating TEXT NOT NULL,
@@ -47,7 +47,7 @@ CREATE INDEX feedback_entries_message_id ON feedback_entries (message_id);
 -- The admin review queue (spec 11.4). [P] The overdue limit is [T] and is worked out from
 -- created_at, so there is no column for it. Details hold masked text only.
 CREATE TABLE review_queue (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     kind TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
     session_id TEXT REFERENCES sessions (id) ON DELETE SET NULL,

@@ -307,6 +307,7 @@ Prompts are **versioned files** in a `prompts/` folder with a fixed structure: r
 - Cache entries store no raw query text and no PII.
 - Cache is scoped by role.
 - TTL is only a backstop.
+- **[P]** After an Upstash failure the cache is skipped for 30 s, so a dead cache costs one timeout and not one per call.
 
 ### 10.3 Staleness (immediate, independent of TTL)
 1. A **corpus version** counter is part of every key; any ingest, edit or delete bumps it.
