@@ -417,7 +417,8 @@ def test_empty_text_with_reasoning_at_the_limit_is_retried_with_more_room():
     assert first["max_tokens"] == 400 + 512 and first["effort"] == "low"
     assert second["max_tokens"] == 2 * (400 + 512) and second["effort"] == "low"
     assert (result.input_tokens, result.output_tokens) == (20, 450)  # both calls are counted
-    assert [e.tokens for e in groq_events(gateway)] == [470]
+    # Two leases on the same key: the first call (10 + 400) and the retry (10 + 50), each its own.
+    assert [e.tokens for e in groq_events(gateway)] == [410, 60]
     assert result.fallback_reason is None
 
 
@@ -448,7 +449,7 @@ def test_still_empty_after_the_retry_falls_to_the_next_provider_and_is_never_ret
     result = run(gateway.complete(MESSAGES))
     assert result.decider == "gemini" and result.text == "a fine answer"
     assert result.fallback_reason == "groq: truncated"
-    assert [e.tokens for e in groq_events(gateway)] == [820]  # both attempts used tokens
+    assert [e.tokens for e in groq_events(gateway)] == [410, 410]  # both attempts counted
     assert gateway._breaker("groq", "answer").state == CLOSED  # not a provider outage
 
 

@@ -98,6 +98,33 @@ class KeyPool:
             return Lease(state.key, state.fingerprint, reservation)
         return None
 
+    def acquire_for(self, fp: str, estimated_tokens: int) -> Lease | None:
+        """Reserve capacity on one particular key (the reasoning retry stays on its key)."""
+        now = self._clock.now()
+        for state in self._states:
+            if state.fingerprint != fp:
+                continue
+            if state.cooldown_until > now:
+                return None
+            reservation = state.limiter.try_reserve(estimated_tokens)
+            if reservation is None:
+                return None
+            return Lease(state.key, state.fingerprint, reservation)
+        return None
+
+    def all_cooling(self) -> bool:
+        """True if every key is cooling down (after a failure or a 429), not merely full."""
+        return self.size > 0 and len(self.cooling_fingerprints()) >= self.size
+
+    def wait_time(self, estimated_tokens: int) -> float:
+        """Seconds until some key could take a call of this size (0 if one could now)."""
+        now = self._clock.now()
+        waits = [
+            max(max(0.0, s.cooldown_until - now), s.limiter.retry_in(estimated_tokens))
+            for s in self._states
+        ]
+        return min(waits) if waits else 0.0
+
     def correct(self, lease: Lease, actual_tokens: int) -> None:
         for state in self._states:
             if state.fingerprint == lease.fingerprint:

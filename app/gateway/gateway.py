@@ -26,7 +26,7 @@ from app.gateway.backend import Backend, LiteLLMBackend, RawCompletion
 from app.gateway.backoff import MAX_ATTEMPTS, backoff_delay
 from app.gateway.breaker import HALF_OPEN, OPEN, CircuitBreaker
 from app.gateway.clock import Clock, SystemClock
-from app.gateway.config import GatewayConfig
+from app.gateway.config import GatewayConfig, check_render_rules
 from app.gateway.context import ContextWindows
 from app.gateway.cost import Cost, build_cost, load_pricing
 from app.gateway.decisions import (
@@ -46,10 +46,10 @@ from app.gateway.embeddings import (
     DIMENSIONS,
     MAX_INPUT_TOKENS,
     HashEmbedder,
+    dev_embedder_blockers,
     format_document,
     format_query,
     normalise,
-    running_on_render,
     vectors_ok,
 )
 from app.gateway.errors import (
@@ -69,7 +69,7 @@ from app.gateway.errors import (
     Truncated,
     classify,
 )
-from app.gateway.keys import KeyPool
+from app.gateway.keys import KeyPool, Lease, fingerprint
 from app.gateway.rerank import (
     RerankResult,
     http_rerank,
@@ -137,7 +137,8 @@ class CompletionResult:
 class EmbeddingResult:
     vectors: list[list[float]]
     model: str
-    key_fingerprint: str | None = None
+    key_fingerprint: str | None = None  # comma-separated if more than one key answered
+    key_fingerprints: list[str] = field(default_factory=list)  # all keys, over all batches
     fallback_reason: str | None = None
     input_tokens: int = 0
     cost_billed: float | None = None
@@ -162,6 +163,7 @@ class Gateway:
         allow_dev_embedding: bool = False,
         env: dict[str, str] | None = None,
     ) -> None:
+        check_render_rules(config, env)  # eval keys and the mock switch never run on Render
         self.config = config
         self._backend = backend or LiteLLMBackend()
         self._decisions = decision_client or OpenRouterDecisionsClient()
@@ -283,12 +285,17 @@ class Gateway:
         max_attempts: int = MAX_ATTEMPTS,
         failure_cooldown: float | None = None,
         deadline: float | None = None,
+        max_wait_s: float = 0.0,
+        lease_box: dict[str, Lease] | None = None,
     ) -> StepOutcome:
         """Run one provider step: rotate keys, limit, retry, and trip the breaker.
 
         `call(key)` returns (value, actual_tokens). A 429 cools down only that key and the
-        call moves to the next key. Timeouts and 5xx errors are retried with backoff, up to
-        `max_attempts`. The breaker trips only when the whole pool is limited or failing.
+        call moves to the next key; every 429 counts as an attempt. Timeouts and 5xx errors
+        are retried with backoff, up to `max_attempts`. The breaker trips only when the whole
+        pool is cooling down after failures. A pool that is merely full on our own limiter
+        skips the step without tripping it, or waits up to `max_wait_s` seconds for room.
+        `lease_box` (optional) receives the open lease so `call` can settle it early.
         """
         pool = self._pools.get(pool_name)
         if pool is None or pool.size == 0:
@@ -299,22 +306,37 @@ class Gateway:
         if breaker.state == HALF_OPEN and pool.status(estimated_tokens) != "healthy":
             # The open period is over, but no key could take the probe yet: keep waiting.
             return StepOutcome(False, reason="circuit_open")
-        if not breaker.allow():
+        permit = breaker.acquire()
+        if permit is None:
             return StepOutcome(False, reason="circuit_open")
         attempts = 0
+        waited = 0.0
         reason = "all_keys_limited"
         failed: set[str] = set()  # fingerprints of keys that failed during this call
         lease = None  # a reservation that is still open (not yet settled)
         try:
             while True:
                 if deadline is not None and self._clock.now() >= deadline:
-                    breaker.record_neutral()
+                    breaker.record_neutral(permit)
                     return StepOutcome(False, reason="deadline")
                 lease = pool.acquire(estimated_tokens)
                 if lease is None:
-                    breaker.record_failure()
-                    self._emit("all_keys_exhausted", provider=pool_name, tier=tier)
-                    return StepOutcome(False, reason=reason)
+                    if pool.all_cooling():
+                        breaker.record_failure()
+                        self._emit("all_keys_exhausted", provider=pool_name, tier=tier)
+                        return StepOutcome(False, reason=reason)
+                    # Not a failure: our own limiter has no room. Wait if the caller allows it.
+                    wait = pool.wait_time(estimated_tokens)
+                    in_time = deadline is None or self._clock.now() + wait < deadline
+                    if 0 < wait and waited + wait <= max_wait_s and in_time:
+                        await self._clock.sleep(wait)
+                        waited += wait
+                        continue
+                    breaker.record_neutral(permit)
+                    self._emit("limiter_full", provider=pool_name, tier=tier)
+                    return StepOutcome(False, reason="limiter_full")
+                if lease_box is not None:
+                    lease_box["lease"] = lease
                 fp = lease.fingerprint
                 try:
                     value, actual = await call(lease.key)
@@ -327,7 +349,7 @@ class Gateway:
                     if isinstance(error, InternalError):
                         # A bug in our own code, not an outage: no retry, the breaker stays
                         # neutral, and only the exception class name is logged (never its text).
-                        breaker.record_neutral()
+                        breaker.record_neutral(permit)
                         log.error(
                             "gateway internal error: pool=%s exception=%s",
                             pool_name,
@@ -340,27 +362,36 @@ class Gateway:
                             exception=error.exception_name,
                         )
                         return StepOutcome(False, reason=error.reason, fingerprint=fp)
+                    backoff = True
                     if isinstance(error, RateLimited):
-                        pool.cool_down(fp, error.retry_after)
+                        # Honour Retry-After with a floor, so a "0" or "1" cannot cause an
+                        # instant re-call; without the header the default (60 s) applies.
+                        wait_for = (
+                            None
+                            if error.retry_after is None
+                            else max(error.retry_after, cfg_module.RATE_LIMIT_FLOOR_SECONDS)
+                        )
+                        pool.cool_down(fp, wait_for)
                         failed.add(fp)
                         reason = "rate_limited"
-                        continue
-                    if isinstance(error, (AuthFailed, CreditExhausted)):
+                        backoff = False  # the next key is tried at once; this one is cooling
+                    elif isinstance(error, (AuthFailed, CreditExhausted)):
                         pool.cool_down(fp, AUTH_COOLDOWN_SECONDS)
                         failed.add(fp)
                         reason = error.reason
                         continue
-                    if isinstance(error, SchemaSurprise):
+                    elif isinstance(error, SchemaSurprise):
                         breaker.record_failure()
                         return StepOutcome(False, reason=error.reason, fingerprint=fp)
-                    if isinstance(error, (BadRequest, InvalidOutput)):
-                        breaker.record_neutral()
+                    elif isinstance(error, (BadRequest, InvalidOutput)):
+                        breaker.record_neutral(permit)
                         return StepOutcome(False, reason=error.reason, fingerprint=fp)
-                    # A timeout or a 5xx: retry with backoff, possibly on the next key.
-                    failed.add(fp)
-                    reason = error.reason
-                    if failure_cooldown is not None:
-                        pool.cool_down(fp, failure_cooldown)  # failover: leave this key at once
+                    else:
+                        # A timeout or a 5xx: retry with backoff, possibly on the next key.
+                        failed.add(fp)
+                        reason = error.reason
+                        if failure_cooldown is not None:
+                            pool.cool_down(fp, failure_cooldown)  # failover: leave this key now
                     attempts += 1
                     if attempts >= max_attempts:
                         # Give up on this provider for this call. Every key that failed now
@@ -372,11 +403,13 @@ class Gateway:
                         if len(failed | pool.cooling_fingerprints()) >= pool.size:
                             breaker.record_failure()
                         else:
-                            breaker.record_neutral()
+                            breaker.record_neutral(permit)
                         return StepOutcome(False, reason=reason, fingerprint=fp)
+                    if not backoff:
+                        continue
                     delay = backoff_delay(attempts - 1, rng=self._rng)
                     if deadline is not None and self._clock.now() + delay >= deadline:
-                        breaker.record_neutral()  # no time left for another try
+                        breaker.record_neutral(permit)  # no time left for another try
                         return StepOutcome(False, reason="deadline", fingerprint=fp)
                     await self._clock.sleep(delay)
                     continue
@@ -386,12 +419,12 @@ class Gateway:
                 return StepOutcome(True, value, fp)
         except BaseException:
             # The single clean-up path. Whatever interrupts this step (a cancellation while a
-            # call or a backoff sleep is running, an error re-raised on purpose, anything else)
-            # leaves nothing behind: an open reservation counts zero tokens and a half-open
-            # probe is released.
+            # call, a backoff sleep or a wait for capacity is running, an error re-raised on
+            # purpose, anything else) leaves nothing behind: an open reservation counts zero
+            # tokens and a half-open probe held by this call is released.
             if lease is not None:
                 pool.correct(lease, 0)
-            breaker.record_neutral()
+            breaker.record_neutral(permit)
             raise
 
     # ---- chat completions -----------------------------------------------------------
@@ -421,6 +454,7 @@ class Gateway:
         per_call: float,
         deadline: float | None,
         reasoning_effort: str | None = None,
+        max_wait_s: float = 0.0,
     ) -> StepOutcome:
         """`max_tokens` is the whole output reservation: the answer limit plus the reasoning
         allowance. The same number is sent to the provider and reserved in the limiter."""
@@ -449,37 +483,77 @@ class Gateway:
             )
             return used_in, used_out
 
+        pool = self._pools.get(step.pool_name)
+        lease_box: dict[str, Lease] = {}
+
+        async def retry_with_room(key: str, first: RawCompletion) -> RawCompletion:
+            """The model spent its whole output limit thinking and wrote no text. Try once more
+            with twice the room and the lowest thinking level, on the same key, under a limiter
+            lease of its own. No room on that key means no retry: the step falls through."""
+            first_used = sum(used_by(first))
+            retry_limit = max_tokens * 2
+            assert pool is not None  # _run_step only calls us for a pool that exists
+            # The first call's tokens are known now: settle its lease before the new one counts.
+            if lease_box:
+                pool.correct(lease_box["lease"], first_used)
+            extra = pool.acquire_for(fingerprint(key), prompt_tokens + retry_limit)
+            if extra is None:
+                error = Truncated()  # no room on this key for the retry: skip it, fall through
+                error.used_tokens = first_used
+                self._emit("retry_skipped_no_capacity", provider=step.pool_name)
+                raise error
+            try:
+                second = await ask(key, retry_limit, "low")
+            except BaseException as exc:
+                # The first call's tokens still count, whatever happens to the retry. A normal
+                # error hands them to the first lease; a cancellation puts them on this one,
+                # because the step runner settles the first lease at zero.
+                pool.correct(extra, 0 if isinstance(exc, Exception) else first_used)
+                if isinstance(exc, Exception):
+                    failure = classify(exc)
+                    failure.used_tokens = first_used
+                    raise failure from None
+                raise
+            pool.correct(extra, sum(used_by(second)))
+            return _combine(first, second)
+
         async def call(key: str) -> tuple[tuple[RawCompletion, Any], int]:
             raw = await ask(key, max_tokens, reasoning_effort)
+            first_used = sum(used_by(raw))
+            own_used = None  # tokens that belong on this call's own lease
             if _ran_out_of_output(raw):
-                # The model spent its whole output limit thinking and wrote no text. Try once
-                # more with more room and the lowest thinking level. Both calls' tokens count.
-                first = raw
-                raw = await ask(key, max_tokens * 2, "low")
-                raw = _combine(first, raw)
+                own_used = first_used  # the retry's tokens sit on the lease it acquired
+                raw = await retry_with_room(key, raw)
                 if _ran_out_of_output(raw):
-                    spent = sum(used_by(raw))
                     error = Truncated()
-                    error.used_tokens = spent
+                    error.used_tokens = first_used  # the retry's tokens sit on its own lease
                     raise error
             elif not raw.text.strip():
                 empty = EmptyOutput()  # an empty answer is never returned
                 empty.used_tokens = sum(used_by(raw))
                 raise empty
             used_in, used_out = used_by(raw)
+            if own_used is None:
+                own_used = used_in + used_out
             try:
                 parsed = validator(raw.text) if validator else None
             except GatewayError as error:
-                error.used_tokens = used_in + used_out  # the provider counted these tokens
+                error.used_tokens = own_used  # the provider counted these tokens
                 raise
             except Exception as exc:  # a bug in a validator: internal, never retried
                 internal = InternalError(type(exc).__name__)
-                internal.used_tokens = used_in + used_out
+                internal.used_tokens = own_used
                 raise internal from None
-            return (raw, parsed), used_in + used_out
+            return (raw, parsed), own_used
 
         return await self._run_step(
-            step.pool_name, tier, prompt_tokens + max_tokens, call, deadline=deadline
+            step.pool_name,
+            tier,
+            prompt_tokens + max_tokens,
+            call,
+            deadline=deadline,
+            max_wait_s=max_wait_s,
+            lease_box=lease_box,
         )
 
     def _with_plan(self, plan_key: str, cost: Cost) -> Cost:
@@ -545,8 +619,12 @@ class Gateway:
         json_mode: bool = False,
         timeout_s: float | None = None,
         only_provider: str | None = None,
+        max_wait_s: float = 0.0,
     ) -> CompletionResult:
         """A chat completion on the answer or decide tier (decide skips Jev: no prose from Jev).
+
+        `max_wait_s` is how long each step may wait for room in our own rate limiter before
+        it is skipped: 0 (the default) for interactive calls, longer for ingestion and evaluation.
 
         The prompt is built once by the caller and reused on every fallback. A prompt that
         does not fit the smallest planned window raises ContextWindowExceeded and is never
@@ -586,6 +664,7 @@ class Gateway:
                 per_call=per_call,
                 deadline=deadline,
                 reasoning_effort=effort,
+                max_wait_s=max_wait_s,
             )
             if outcome.ok:
                 result = self._completion_result(step, outcome, skipped, started, prompt_tokens)
@@ -616,6 +695,7 @@ class Gateway:
         *,
         tier: str = "decide",
         timeout_s: float | None = None,
+        max_wait_s: float = 0.0,
     ) -> DecisionResult:
         """Answer typed questions: Jev first, then chat models, then rules ('not scored' for eval).
 
@@ -630,7 +710,9 @@ class Gateway:
         skipped: list[tuple[str, str]] = []
 
         try:
-            result = await self._try_jev(questions, state, tier, per_call, deadline, started)
+            result = await self._try_jev(
+                questions, state, tier, per_call, deadline, started, max_wait_s
+            )
         except ContextWindowExceeded as error:  # a fallback is always available: never abort
             result = error.reason
         if isinstance(result, DecisionResult):
@@ -660,6 +742,7 @@ class Gateway:
                     per_call=per_call,
                     deadline=deadline,
                     reasoning_effort=self.config.reasoning_effort_decide,
+                    max_wait_s=max_wait_s,
                 )
             except ContextWindowExceeded as error:  # this model's window is too small: next one
                 skipped.append((step.provider, error.reason))
@@ -703,6 +786,7 @@ class Gateway:
         per_call: float,
         deadline: float | None,
         started: float,
+        max_wait_s: float = 0.0,
     ) -> DecisionResult | str:
         """Return a DecisionResult, or the reason Jev was not used."""
         payload = questions_payload(questions)
@@ -728,7 +812,9 @@ class Gateway:
                 raise
             return parsed, parsed["input_tokens"] or tokens
 
-        outcome = await self._run_step("jev", tier, tokens, call, max_attempts=1, deadline=deadline)
+        outcome = await self._run_step(
+            "jev", tier, tokens, call, max_attempts=1, deadline=deadline, max_wait_s=max_wait_s
+        )
         if not outcome.ok:
             return outcome.reason
         parsed = outcome.value
@@ -769,11 +855,14 @@ class Gateway:
         task: str = "document",
         titles: Sequence[str | None] | None = None,
         timeout_s: float | None = None,
+        max_wait_s: float = 0.0,
     ) -> EmbeddingResult:
         """Embed texts with gemini-embedding-2 at 768 dimensions: key A, then key B.
 
         If both keys fail, EmbeddingUnavailable is raised ("temporarily unavailable"),
-        unless the development-only hash embedder was explicitly allowed.
+        unless the development-only hash embedder was explicitly allowed (and it is refused
+        whenever Render or a remote store is configured). `max_wait_s` is how long each batch
+        may wait for limiter capacity: 0 for interactive calls, longer for ingestion.
         """
         if task not in ("query", "document"):
             raise ValueError("task must be 'query' or 'document'")
@@ -793,7 +882,7 @@ class Gateway:
         tokens_in = 0
         billed: float | None = 0.0
         source = "none"
-        fingerprint: str | None = None
+        fingerprints: list[str] = []  # every key that answered any batch, in order of first use
         first_fp = self._first_embedding_fingerprint()
         for start in range(0, len(inputs), BATCH_SIZE):
             batch = inputs[start : start + BATCH_SIZE]
@@ -821,6 +910,7 @@ class Gateway:
                 max_attempts=2,
                 failure_cooldown=cfg_module.EMBEDDING_FAILOVER_COOLDOWN_SECONDS,
                 deadline=deadline,
+                max_wait_s=max_wait_s,
             )
             if not outcome.ok:
                 self._emit("embedding_unavailable", reason=outcome.reason)
@@ -828,7 +918,8 @@ class Gateway:
             raw = outcome.value
             vectors.extend(normalise(v) for v in raw.vectors)
             tokens_in += raw.prompt_tokens or estimate
-            fingerprint = outcome.fingerprint
+            if outcome.fingerprint and outcome.fingerprint not in fingerprints:
+                fingerprints.append(outcome.fingerprint)
             if raw.cost_usd is None or billed is None:
                 billed = None
             else:
@@ -842,8 +933,10 @@ class Gateway:
         return EmbeddingResult(
             vectors=vectors,
             model=model,
-            key_fingerprint=fingerprint,
-            fallback_reason="primary key failed" if fingerprint != first_fp else None,
+            key_fingerprint=",".join(fingerprints) or None,
+            key_fingerprints=fingerprints,
+            # Judged over all batches: key B answering any one of them is a failover.
+            fallback_reason="primary key failed" if set(fingerprints) != {first_fp} else None,
             input_tokens=tokens_in,
             cost_billed=cost.billed,
             cost_source=cost.billed_source,
@@ -851,13 +944,16 @@ class Gateway:
         )
 
     def _first_embedding_fingerprint(self) -> str | None:
-        from app.gateway.keys import fingerprint
-
         keys = self.config.embedding_keys
         return fingerprint(keys[0]) if keys else None
 
     def _dev_or_raise(self, texts: Sequence[str], reason: str, model: str) -> EmbeddingResult:
-        if self._allow_dev_embedding and not running_on_render(self._env):
+        blockers = dev_embedder_blockers(self._env)
+        if self._allow_dev_embedding and blockers:
+            # Refused in code: a remote store (or Render) is configured, so fake vectors could
+            # reach a real index. Variable names only, never values.
+            self._emit("dev_embedding_refused", variables=blockers)
+        if self._allow_dev_embedding and not blockers:
             embedder = HashEmbedder(self._env)
             self.stats.record("embed", "hash_dev")
             return EmbeddingResult(
@@ -877,6 +973,7 @@ class Gateway:
         *,
         top_n: int | None = None,
         timeout_s: float | None = None,
+        max_wait_s: float = 0.0,
     ) -> RerankResult:
         """Cohere, then Jina, then lexical. `degraded` is True when lexical was used."""
         if not documents:
@@ -905,7 +1002,9 @@ class Gateway:
                 )
                 return items, estimate
 
-            outcome = await self._run_step(provider, "rerank", estimate, call, deadline=deadline)
+            outcome = await self._run_step(
+                provider, "rerank", estimate, call, deadline=deadline, max_wait_s=max_wait_s
+            )
             if outcome.ok:
                 self.stats.record("rerank", provider)
                 return RerankResult(

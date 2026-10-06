@@ -19,6 +19,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from app.gateway.embeddings import running_on_render
 from app.gateway.keys import MAX_KEYS_PER_PROVIDER, ConfigError, parse_keys
 from app.gateway.limiter import Limits
 
@@ -111,6 +112,7 @@ EMBEDDING_DIMENSIONS = 768
 JEV_CONTEXT_TOKENS = 32_000
 DEFAULT_TIMEOUT_SECONDS = 10.0
 KEY_COOLDOWN_SECONDS = 60.0
+RATE_LIMIT_FLOOR_SECONDS = 5.0  # a Retry-After shorter than this is raised to it
 KEY_FAILURE_COOLDOWN_SECONDS = 30.0  # a key that timed out or returned 5xx until the call ended
 BREAKER_OPEN_SECONDS = 30.0
 EMBEDDING_FAILOVER_COOLDOWN_SECONDS = 30.0
@@ -205,6 +207,32 @@ def validate_jev_model(value: str) -> None:
 
 def _truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Evaluation keys and the offline mock answer are for the admin machine only (spec section 2,
+# .env.example). Code enforces it: on Render the gateway refuses to start with any of them.
+ADMIN_ONLY_KEY_VARIABLES = (
+    "EVAL_GROQ_API_KEYS",
+    "EVAL_GEMINI_API_KEYS",
+    "EVAL_OPENROUTER_API_KEYS",
+)
+
+
+def check_render_rules(config: GatewayConfig, env: Mapping[str, str] | None = None) -> None:
+    """Refuse eval keys and the mock switch when running on Render. Names only, never values."""
+    env = os.environ if env is None else env
+    if not running_on_render(env):
+        return
+    names = [name for name in ADMIN_ONLY_KEY_VARIABLES if (env.get(name) or "").strip()]
+    if config.eval_openrouter_keys and "EVAL_OPENROUTER_API_KEYS" not in names:
+        names.append("EVAL_OPENROUTER_API_KEYS")
+    if config.enable_mock:
+        names.append("GATEWAY_ENABLE_MOCK")
+    if names:
+        raise ConfigError(
+            "refusing to start on Render: " + ", ".join(names) + " must only be set on the "
+            "admin machine"
+        )
 
 
 @dataclass(frozen=True)
@@ -316,7 +344,7 @@ class GatewayConfig:
             allowance = int(allowance_raw) if allowance_raw else DEFAULT_REASONING_ALLOWANCE
         except ValueError:
             raise ConfigError("GATEWAY_REASONING_ALLOWANCE_TOKENS must be a whole number") from None
-        return cls(
+        config = cls(
             groq_keys=parse_keys(env.get("GROQ_API_KEYS"), name="GROQ_API_KEYS"),
             gemini_keys=parse_keys(env.get("GEMINI_API_KEYS"), name="GEMINI_API_KEYS"),
             openrouter_keys=parse_keys(env.get("OPENROUTER_API_KEYS"), name="OPENROUTER_API_KEYS"),
@@ -346,3 +374,5 @@ class GatewayConfig:
                 env.get("GATEWAY_REASONING_EFFORT_DECIDE"), "GATEWAY_REASONING_EFFORT_DECIDE"
             ),
         )
+        check_render_rules(config, env)
+        return config

@@ -146,7 +146,10 @@ def test_the_hash_fallback_is_off_by_default_labelled_when_on_and_never_on_rende
     result = run(allowed.embed(["x"]))
     assert result.is_dev_fallback and result.model == "hash-dev"
     assert result.fallback_reason == "provider_unavailable"
-    on_render = make_gateway(backend=failing, allow_dev_embedding=True, env={"RENDER": "true"})
+    no_eval_keys = make_config(eval_openrouter_keys=[])  # eval keys are refused on Render
+    on_render = make_gateway(
+        no_eval_keys, backend=failing, allow_dev_embedding=True, env={"RENDER": "true"}
+    )
     with pytest.raises(EmbeddingUnavailable):
         run(on_render.embed(["x"]))
 

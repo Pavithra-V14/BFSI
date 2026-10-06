@@ -4,8 +4,8 @@ gemini-embedding-2 takes no task_type field: query and document are signalled by
 text prefix (Google's documentation). Vectors from different embedding models are
 not comparable, so nothing from gemini-embedding-001 may be mixed in.
 
-The hash-based embedder is for development only. It refuses to run on Render and
-must never index or retrieve in production.
+The hash-based embedder is for development only. It refuses to run on Render, or when
+any database, Qdrant or cache URL is remote, and must never index or retrieve in production.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import math
 import os
 import struct
 from collections.abc import Mapping
+
+from app.isolation import remote_variables
 
 DIMENSIONS = 768
 MAX_INPUT_TOKENS = 8_192
@@ -72,14 +74,29 @@ def running_on_render(env: Mapping[str, str] | None = None) -> bool:
     return (env.get("RENDER") or "").strip().lower() in ("1", "true", "yes")
 
 
+def dev_embedder_blockers(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of the reasons the hash embedder must not run here.
+
+    It is refused on Render and whenever any database, Qdrant or cache URL points at a remote
+    host: on the admin machine a real index may be one URL away, and fake vectors must never
+    reach it. The check is code, not a comment.
+    """
+    names = ["RENDER"] if running_on_render(env) else []
+    return names + remote_variables(env)
+
+
 class HashEmbedder:
     """Deterministic fake vectors from a hash. Development only."""
 
     model = "hash-dev"
 
     def __init__(self, env: Mapping[str, str] | None = None, dimensions: int = DIMENSIONS):
-        if running_on_render(env):
-            raise DevEmbedderForbidden("the hash embedder must never run in production")
+        blockers = dev_embedder_blockers(env)
+        if blockers:
+            raise DevEmbedderForbidden(
+                "the hash embedder must never run in production or next to a remote store: "
+                + ", ".join(blockers)
+            )
         self._dimensions = dimensions
 
     def embed(self, text: str) -> list[float]:

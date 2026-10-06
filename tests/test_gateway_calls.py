@@ -227,8 +227,11 @@ def test_the_limiter_blocks_a_provider_whose_keys_are_used_up():
     assert run(gateway.complete(MESSAGES)).decider == "groq"
     assert run(gateway.complete(MESSAGES)).decider == "groq"  # second key
     result = run(gateway.complete(MESSAGES))
-    assert result.decider == "gemini" and result.fallback_reason == "groq: all_keys_limited"
-    assert any(name == "all_keys_exhausted" for name, _ in gateway.events)
+    # Our own limiter being full is not a failure: the step is skipped, the breaker stays closed.
+    assert result.decider == "gemini" and result.fallback_reason == "groq: limiter_full"
+    assert any(name == "limiter_full" for name, _ in gateway.events)
+    assert not any(name == "all_keys_exhausted" for name, _ in gateway.events)
+    assert gateway.health()["groq"]["tiers"]["answer"] == "closed"
 
 
 def test_a_request_that_can_never_fit_a_key_skips_that_provider():
