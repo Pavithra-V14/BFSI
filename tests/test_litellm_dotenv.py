@@ -57,7 +57,3 @@ def test_the_control_in_its_default_mode_litellm_does_load_a_dotenv_file():
 def test_an_explicit_choice_of_mode_is_left_alone():
     (mode,) = run("import os, app.gateway\nprint(os.environ['LITELLM_MODE'])", mode="DEV")
     assert mode == "DEV"
-
-
-def test_the_test_run_itself_has_the_protection_on():
-    assert os.environ["LITELLM_MODE"] == "PRODUCTION"

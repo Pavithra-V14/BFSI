@@ -137,6 +137,82 @@ def test_a_chunked_body_with_no_content_length_cannot_get_past_the_limit(env):
     assert env.rows("SELECT COUNT(*) FROM audit_log") == [(0,)]  # nothing was processed
 
 
+def run_asgi(inner, chunks, headers=None):
+    """Drive SecurityMiddleware directly as raw ASGI. Returns everything it sent."""
+    import asyncio
+
+    from app.api.security import SecurityMiddleware
+
+    sent = []
+    queue = list(chunks)
+
+    async def receive():
+        if queue:
+            body = queue.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(queue)}
+        await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/x",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+    }
+    asyncio.run(SecurityMiddleware(inner)(scope, receive, send))
+    return sent
+
+
+async def reading_then_answering_app(scope, receive, send):
+    """An app that reads its whole body and then answers 200, as a route would."""
+    while True:
+        message = await receive()
+        if message["type"] != "http.request" or not message.get("more_body"):
+            break
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"the app's own answer"})
+
+
+def test_after_the_413_the_apps_own_answer_is_dropped_so_only_one_response_is_sent():
+    chunks = [b"x" * (MAX_BODY_BYTES // 2 + 1)] * 3  # 24 KiB streamed with no Content-Length
+    sent = run_asgi(reading_then_answering_app, chunks)
+    starts = [m for m in sent if m["type"] == "http.response.start"]
+    assert [m["status"] for m in starts] == [413]  # one response, and it is the 413
+    bodies = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    assert b"request_too_large" in bodies and b"the app's own answer" not in bodies
+
+
+def test_the_413_still_carries_the_security_headers_when_streamed():
+    sent = run_asgi(reading_then_answering_app, [b"x" * (MAX_BODY_BYTES + 1)])
+    (start,) = [m for m in sent if m["type"] == "http.response.start"]
+    names = {name.decode().lower() for name, _ in start["headers"]}
+    assert {name.lower() for name, _ in SECURITY_HEADERS} <= names
+
+
+def test_a_body_within_the_limit_gets_the_apps_own_answer_untouched():
+    sent = run_asgi(reading_then_answering_app, [b"x" * 100, b"y" * 100])
+    (start,) = [m for m in sent if m["type"] == "http.response.start"]
+    assert start["status"] == 200
+    assert b"the app's own answer" in b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+
+
+def test_a_declared_oversize_body_is_refused_without_calling_the_app():
+    called = []
+
+    async def app(scope, receive, send):
+        called.append(1)
+
+    sent = run_asgi(app, [], headers={"Content-Length": str(MAX_BODY_BYTES + 1)})
+    assert called == [] and [m["status"] for m in sent if m["type"] == "http.response.start"] == [
+        413
+    ]
+
+
 def test_an_oversize_body_never_reaches_the_route(env, monkeypatch):
     from app.api.routes import auth
 

@@ -74,14 +74,20 @@ def test_a_revoked_admin_token_cannot_change_roles(env):
     assert role_of(env, user_id) == "customer"
 
 
-def test_an_admin_who_was_just_demoted_loses_the_power_at_once(env):
-    first = env.admin_token("boss1")
+def test_an_admin_whose_role_was_removed_by_the_owner_loses_the_power_at_once(env):
+    env.admin_token("boss1")
     other_id = env.make_user("boss2", role="admin")
     second = env.token("boss2")
     victim = env.make_user("asha_rao")
-    assert change(env, first, other_id, "staff").status_code == 200  # boss1 demotes boss2
-    assert change(env, second, victim, "staff").status_code == 403  # boss2's token still valid
-    assert role_of(env, victim) == "customer"
+    assert change(env, second, victim, "staff").status_code == 200  # boss2 may act
+    import sqlite3
+
+    connection = sqlite3.connect(env.path)  # the owner demotes boss2 directly in the database
+    connection.execute("UPDATE users SET role = 'staff' WHERE id = ?", (other_id,))
+    connection.commit()
+    connection.close()
+    assert change(env, second, victim, "customer").status_code == 403  # the token is still valid
+    assert role_of(env, victim) == "staff"
 
 
 def test_nobody_changes_their_own_role(env):
@@ -92,23 +98,31 @@ def test_nobody_changes_their_own_role(env):
     assert role_of(env, admin_id) == "admin"
 
 
-def test_an_admin_can_promote_a_second_admin_who_can_then_manage_the_first(env):
-    first = env.admin_token("boss1")
-    first_id = env.rows("SELECT id FROM users WHERE username = 'boss1'")[0][0]
-    second_id = env.make_user("boss2")
-    assert change(env, first, second_id, "admin").status_code == 200
-    second = env.token("boss2")
-    assert change(env, second, first_id, "staff").status_code == 200  # fine: boss2 stays admin
-    assert role_of(env, first_id) == "staff" and role_of(env, second_id) == "admin"
+@pytest.mark.parametrize("role", ["admin", "Admin", "ADMIN"])
+def test_the_api_cannot_make_anyone_an_admin(env, role):
+    token = env.admin_token()
+    member = env.make_user("asha_rao")
+    response = change(env, token, member, role)
+    assert response.status_code == 422 and response.json()["error"]["fields"] == ["body.role"]
+    assert role_of(env, member) == "customer"
+    assert env.rows("SELECT COUNT(*) FROM users WHERE role = 'admin'") == [(1,)]
 
 
-def test_an_active_admin_may_demote_an_inactive_one_and_stays_admin_themselves(env):
+@pytest.mark.parametrize("role", ["customer", "staff"])
+def test_the_api_never_changes_an_account_that_is_already_an_admin(env, role):
+    token = env.admin_token("boss1")
+    other = env.make_user("boss2", role="admin")
+    before = len(audit_rows(env))
+    response = change(env, token, other, role)
+    assert response.status_code == 409 and response.json()["error"]["code"] == "target_is_admin"
+    assert role_of(env, other) == "admin" and len(audit_rows(env)) == before
+
+
+def test_an_inactive_admin_account_is_still_protected(env):
     token = env.admin_token("boss1")
     ghost = env.make_user("boss2", role="admin", active=False)
-    boss1 = env.rows("SELECT id FROM users WHERE username = 'boss1'")[0][0]
-    # boss2 is inactive and cannot act; boss1 demotes it and is untouched
-    assert change(env, token, ghost, "staff").status_code == 200  # an active admin may demote it
-    assert role_of(env, boss1) == "admin"
+    response = change(env, token, ghost, "staff")
+    assert response.status_code == 409 and role_of(env, ghost) == "admin"
 
 
 def test_an_unknown_user_is_a_404(env):

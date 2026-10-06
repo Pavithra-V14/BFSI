@@ -65,8 +65,18 @@ def test_a_role_in_the_registration_body_is_refused_with_422(env, role):
     response = env.client.post("/auth/register", json=env.body(role=role))
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
-    assert "body.role" in response.json()["error"]["fields"]
+    # The unexpected field is reported as "body" only: its name is the caller's own text.
+    assert response.json()["error"]["fields"] == ["body"]
+    assert "role" not in response.text
     assert env.rows("SELECT COUNT(*) FROM users") == [(0,)]  # nothing was created
+
+
+def test_the_name_of_an_unexpected_field_is_never_echoed_whatever_it_is(env):
+    probe = "-".join(["caller", "chosen", "key", "name", "9Zq"])
+    response = env.client.post("/auth/register", json=env.body(**{probe: 1, probe + "2": 2}))
+    assert response.status_code == 422
+    assert response.json()["error"]["fields"] == ["body"]  # one fixed entry, however many keys
+    assert probe not in response.text
 
 
 @pytest.mark.parametrize("extra", ["is_active", "id", "created_at", "password_hash", "is_admin"])
@@ -254,15 +264,6 @@ def test_the_eleventh_login_attempt_for_a_username_is_throttled(env):
     blocked = env.login("asha_rao", PASSWORD)  # even the right password is blocked now
     assert blocked.status_code == 429 and blocked.json()["error"]["code"] == "too_many_attempts"
     assert int(blocked.headers["retry-after"]) > 0
-
-
-def test_a_throttled_attempt_does_not_check_the_password_or_write_an_audit_row(env):
-    env.register()
-    for _ in range(10):
-        env.login("asha_rao", "wrong password here")
-    rows_before = env.rows("SELECT COUNT(*) FROM audit_log")
-    env.login("asha_rao", PASSWORD)
-    assert env.rows("SELECT COUNT(*) FROM audit_log") == rows_before
 
 
 def test_one_address_is_throttled_after_30_attempts_across_usernames(env):

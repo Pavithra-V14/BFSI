@@ -142,9 +142,10 @@ def test_only_an_admin_may_change_roles(db, role):
 
 
 def test_the_actors_role_is_read_again_from_the_database_not_trusted(db):
-    boss, other_admin, member = admin(db), admin(db, "boss2"), customer(db)
+    admin(db)
+    other_admin, member = admin(db, "boss2"), customer(db)
     stale = get_by_id(db, other_admin.id)  # an admin object that goes out of date
-    set_role(db, actor=boss, target_id=other_admin.id, new_role="customer", now=now())
+    db.execute("UPDATE users SET role = 'staff' WHERE id = ?", (other_admin.id,))  # demoted
     with pytest.raises(RoleChangeRefused) as caught:
         set_role(db, actor=stale, target_id=member.id, new_role="staff", now=now())
     assert caught.value.code == "not_an_admin"
@@ -189,22 +190,22 @@ def test_the_role_change_and_its_audit_row_are_one_transaction(db, monkeypatch):
     assert get_by_id(db, member.id).role == "customer"  # rolled back with the failed audit row
 
 
-def test_two_admins_demoting_each_other_at_once_cannot_leave_no_admin(env):
+def test_two_admins_deactivating_each_other_at_once_cannot_leave_no_active_admin(env):
     """The last-admin check and the update share one transaction that holds the write lock, so
-    of two simultaneous demotions exactly one succeeds."""
+    of two simultaneous deactivations exactly one succeeds (the owner's command can do this)."""
     seed = env.db()
-    one, two = admin(seed, "boss1"), admin(seed, "boss2")
+    admin(seed, "boss1")
+    admin(seed, "boss2")
     seed.close()
     barrier = threading.Barrier(2)
     outcomes = []
 
-    def demote(actor_id, target_id):
+    def deactivate(username):
         db = connect(env.url)
         try:
-            actor = get_by_id(db, actor_id)
             barrier.wait()
             try:
-                set_role(db, actor=actor, target_id=target_id, new_role="staff", now=now())
+                set_active(db, username=username, active=False, now=now(), actor="cli")
                 outcomes.append("done")
             except RoleChangeRefused as refusal:
                 outcomes.append(refusal.code)
@@ -212,18 +213,18 @@ def test_two_admins_demoting_each_other_at_once_cannot_leave_no_admin(env):
             db.close()
 
     threads = [
-        threading.Thread(target=demote, args=(one.id, two.id)),
-        threading.Thread(target=demote, args=(two.id, one.id)),
+        threading.Thread(target=deactivate, args=("boss1",)),
+        threading.Thread(target=deactivate, args=("boss2",)),
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     check = env.db()
-    admins = check.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin'")[0]
+    active = check.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1")[0]
     check.close()
-    assert admins == 1, outcomes  # never zero
-    assert sorted(outcomes) in (["done", "last_admin"], ["done", "not_an_admin"])
+    assert active == 1, outcomes  # never zero
+    assert sorted(outcomes) == ["done", "last_admin"]
 
 
 # ---- activation ---------------------------------------------------------------------------
@@ -271,20 +272,38 @@ def test_a_deactivated_admin_cannot_change_roles(db):
     assert get_by_id(db, member.id).role == "customer"
 
 
-def test_through_set_role_there_is_always_an_admin_left(db):
-    """An admin who is acting is an active admin, so demoting someone else never removes the last
-    one; an admin cannot demote themselves; and an admin who was demoted can no longer act."""
+def test_the_api_can_assign_only_customer_and_staff():
+    assert users.ASSIGNABLE_ROLES == ("customer", "staff")
+
+
+@pytest.mark.parametrize("role", ["admin", "superuser", "", "Staff"])
+def test_nobody_can_be_made_an_admin_through_set_role(db, role):
+    boss, member = admin(db), customer(db)
+    with pytest.raises(RoleChangeRefused) as caught:
+        set_role(db, actor=boss, target_id=member.id, new_role=role, now=now())
+    assert caught.value.code == "unknown_role"
+    assert get_by_id(db, member.id).role == "customer"
+    assert db.query_one("SELECT COUNT(*) FROM audit_log WHERE action = 'role_change'") == (1,)
+
+
+@pytest.mark.parametrize("new_role", ["customer", "staff"])
+def test_an_account_that_is_already_an_admin_is_never_changed_through_set_role(db, new_role):
     first, second = admin(db), admin(db, "boss2")
-    set_role(db, actor=first, target_id=second.id, new_role="staff", now=now())
+    before = db.query_one("SELECT COUNT(*) FROM audit_log")[0]
+    with pytest.raises(RoleChangeRefused) as caught:
+        set_role(db, actor=first, target_id=second.id, new_role=new_role, now=now())
+    assert caught.value.code == "target_is_admin"
+    assert get_by_id(db, second.id).role == "admin"
+    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == before  # nothing written
+
+
+def test_an_admin_cannot_change_themselves_and_both_admins_stay(db):
+    first = admin(db)
+    admin(db, "boss2")
     with pytest.raises(RoleChangeRefused) as own:
         set_role(db, actor=first, target_id=first.id, new_role="staff", now=now())
-    assert own.value.code == "own_role"
-    with pytest.raises(RoleChangeRefused) as demoted:
-        set_role(
-            db, actor=get_by_id(db, second.id), target_id=first.id, new_role="staff", now=now()
-        )
-    assert demoted.value.code == "not_an_admin"
-    assert db.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin'") == (1,)
+    assert own.value.code == "own_role"  # checked before the target-is-admin rule
+    assert db.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin'") == (2,)
 
 
 def test_the_last_admin_check_counts_only_active_admins(db):
@@ -294,16 +313,6 @@ def test_the_last_admin_check_counts_only_active_admins(db):
     assert other_active_admins(db, first.id) == 0  # the other admin is inactive: not counted
     assert other_active_admins(db, second.id) == 1  # first is active and is not second
     assert other_active_admins(db, "nobody") == 2 - 1  # one active admin exists in all
-
-
-def test_set_role_refuses_the_last_admin_if_the_guard_is_reached_some_other_way(db, monkeypatch):
-    """Defence in depth: the guard itself, with the other checks out of the way."""
-    boss, other = admin(db), admin(db, "boss2")
-    monkeypatch.setattr(users, "other_active_admins", lambda database, exclude: 0)
-    with pytest.raises(RoleChangeRefused) as caught:
-        set_role(db, actor=boss, target_id=other.id, new_role="customer", now=now())
-    assert caught.value.code == "last_admin"
-    assert get_by_id(db, other.id).role == "admin"
 
 
 def test_audit_rows_from_role_changes_hold_no_password_or_hash_text(db):

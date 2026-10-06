@@ -24,10 +24,14 @@ SOCKET_ADDRESS = "203.0.113.5"
 
 # Fake secrets, built from plain words at run time (never typed out as one long string): they
 # satisfy the rules (43 or more characters, many different characters, two different values).
-_WORDS = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike".split()
-JWT_SECRET = "-".join(["jwt"] + _WORDS[:9])
-AUDIT_KEY = "-".join(["audit"] + _WORDS[3:12])
-OTHER_SECRET = "-".join(["other"] + _WORDS[2:11])  # a third key, for "signed by someone else"
+_WORDS = (
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november "
+    "oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu"
+).split()
+# Three different keys made of three different sets of words, so no piece of one is in another.
+JWT_SECRET = "-".join(["jwt"] + _WORDS[:7])
+AUDIT_KEY = "-".join(["audit"] + _WORDS[7:14])
+OTHER_SECRET = "-".join(["other"] + _WORDS[14:22])  # for "signed by someone else"
 
 
 def make_settings(**overrides) -> ApiSettings:

@@ -35,6 +35,7 @@ IN_PROCESS_MAX_ENTRIES = 10_000
 class ThrottleDecision:
     allowed: bool
     retry_after: int | None = None  # seconds until the window ends, when blocked
+    scope: str | None = None  # which limit tripped: "ip" or "username"
 
 
 class InProcessCounters:
@@ -97,15 +98,21 @@ class Throttle:
         return self._fallback.hit(f"{scope}:{subject}", limit, window)
 
     def check_login(self, username: str, client_ip: str) -> ThrottleDecision:
-        """Count one login attempt for this username and this address. Blocked if either is over."""
+        """Count one login attempt for this username and this address. Blocked if either is over.
+
+        The address is counted first. Once it is blocked the username is not counted at all, so a
+        blocked flood with a new random username on every request creates no new counter anywhere
+        (not in Upstash, not in this process).
+        """
+        by_ip = self._hit("login_ip", "throttle-ip", client_ip, LOGIN_PER_IP, LOGIN_WINDOW_SECONDS)
+        if not by_ip.allowed:
+            return ThrottleDecision(False, by_ip.retry_after or LOGIN_WINDOW_SECONDS, "ip")
         by_name = self._hit(
             "login_user", "throttle-username", username, LOGIN_PER_USERNAME, LOGIN_WINDOW_SECONDS
         )
-        by_ip = self._hit("login_ip", "throttle-ip", client_ip, LOGIN_PER_IP, LOGIN_WINDOW_SECONDS)
-        if by_name.allowed and by_ip.allowed:
-            return ThrottleDecision(True)
-        waits = [d.retry_after or LOGIN_WINDOW_SECONDS for d in (by_name, by_ip) if not d.allowed]
-        return ThrottleDecision(False, max(waits))
+        if not by_name.allowed:
+            return ThrottleDecision(False, by_name.retry_after or LOGIN_WINDOW_SECONDS, "username")
+        return ThrottleDecision(True)
 
     def check_register(self, client_ip: str) -> ThrottleDecision:
         return self._hit(

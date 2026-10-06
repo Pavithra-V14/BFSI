@@ -209,19 +209,5 @@ def test_the_stand_in_blocks_over_the_limit_and_allows_up_to_it():
     assert decisions[3].retry_after >= 1
 
 
-def test_the_stand_in_is_safe_under_threads():
-    import threading
-
-    counters = InProcessCounters(clock=FakeClock())
-    results = []
-
-    def work():
-        for _ in range(50):
-            results.append(counters.hit("shared", 100, 60).allowed)
-
-    threads = [threading.Thread(target=work) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert results.count(True) == 100  # exactly the limit got through, never more
+# The thread-safety tests (a test that fails without the lock, and one that shows it would) are
+# in test_api_hardening.py.

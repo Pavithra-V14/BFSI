@@ -19,6 +19,7 @@ from app.db.connection import Database
 from app.db.identity import normalise_email, normalise_username
 
 ROLES = ("customer", "staff", "admin")
+ASSIGNABLE_ROLES = ("customer", "staff")  # admins are made only by the owner's command
 
 _COLUMNS = "id, username, email, password_hash, role, created_at, is_active"
 
@@ -134,15 +135,17 @@ def other_active_admins(db: Database, exclude_id: str) -> int:
 def set_role(
     db: Database, *, actor: User, target_id: str, new_role: str, now: datetime
 ) -> tuple[str, str]:
-    """An admin changes someone's role. Returns (old role, new role).
+    """An admin makes someone a customer or staff. Returns (old role, new role).
 
-    Refused (RoleChangeRefused): the actor is not an admin, the role is unknown, the target does
-    not exist, an admin changing their own role, or removing the last admin. The whole thing, the
-    last-admin check included, runs in ONE transaction that holds the write lock (BEGIN IMMEDIATE
-    on SQLite, LOCK TABLE on Postgres), so two admins demoting each other at the same moment
-    cannot both pass the check and leave no admin. The audit row is part of the same transaction.
+    The API can assign only the roles in ASSIGNABLE_ROLES and never touches an account that is
+    already an admin: admins are created by the owner's command (create_admin) and an admin is
+    removed or locked out only there (set_active). Refused (RoleChangeRefused): an unknown or
+    unassignable role, an actor who is not an active admin, an admin changing their own role,
+    an unknown target, or a target that is an admin. The check and the update run in ONE
+    transaction that holds the write lock (BEGIN IMMEDIATE on SQLite, LOCK TABLE on Postgres), and
+    the audit row is part of the same transaction.
     """
-    if new_role not in ROLES:
+    if new_role not in ASSIGNABLE_ROLES:
         raise RoleChangeRefused("unknown_role")
     with db.transaction(write=True):
         if db.kind == "postgres":
@@ -155,14 +158,10 @@ def set_role(
         target = get_by_id(db, target_id)
         if target is None:
             raise RoleChangeRefused("not_found")
+        if target.role == "admin":
+            raise RoleChangeRefused("target_is_admin")
         if target.role == new_role:
             return target.role, new_role
-        if (
-            target.role == "admin"
-            and new_role != "admin"
-            and other_active_admins(db, target.id) == 0
-        ):
-            raise RoleChangeRefused("last_admin")
         db.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, target.id))
         write_audit(
             db,

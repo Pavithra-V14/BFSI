@@ -77,7 +77,15 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
         # Only where the problem is, never what was sent.
-        fields = sorted({".".join(str(part) for part in item["loc"]) for item in error.errors()})
+        # An unexpected field is reported as "body" only: its name is the caller's own text.
+        fields = sorted(
+            {
+                "body"
+                if item["type"] == "extra_forbidden"
+                else ".".join(str(part) for part in item["loc"])
+                for item in error.errors()
+            }
+        )
         return error_response(
             422,
             "invalid_request",

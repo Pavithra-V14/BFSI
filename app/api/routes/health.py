@@ -23,6 +23,7 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/live")
+@router.head("/live")  # some uptime monitors ask with HEAD
 def live() -> dict[str, str]:
     return {"status": "ok"}
 

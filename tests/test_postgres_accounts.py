@@ -105,7 +105,7 @@ def test_set_active_uses_a_boolean_parameter(db):
         users.set_active(db, username="boss", active=False, now=NOW, actor="cli")
 
 
-def test_two_admins_demoting_each_other_at_once_leave_one_admin(pg_url):
+def test_set_role_never_touches_an_admin_even_when_two_try_at_once(pg_url):
     seed = connect(pg_url)
     one, two = make(seed, "boss1", "admin"), make(seed, "boss2", "admin")
     seed.close()
@@ -138,7 +138,7 @@ def test_two_admins_demoting_each_other_at_once_leave_one_admin(pg_url):
     check = connect(pg_url)
     admins = check.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin'")[0]
     check.close()
-    assert admins == 1, outcomes
+    assert admins == 2 and outcomes == ["target_is_admin", "target_is_admin"]
 
 
 def test_revoking_and_purging_tokens(db):
@@ -170,3 +170,48 @@ def test_the_whole_api_flow_works_on_postgres(pg_url):
     assert client.get("/auth/me", headers=headers).json()["role"] == "customer"
     assert client.post("/auth/logout", headers=headers).status_code == 204
     assert client.get("/auth/me", headers=headers).status_code == 401
+
+
+def test_every_connection_runs_at_read_committed(db):
+    assert db.query_one("SHOW transaction_isolation") == ("read committed",)
+
+
+def test_read_committed_is_set_even_when_the_servers_default_is_stricter(pg_url):
+    stricter = f"{pg_url}%20-cdefault_transaction_isolation%3Dserializable"
+    database = connect(stricter)
+    try:
+        assert database.query_one("SHOW default_transaction_isolation") == ("serializable",)
+        assert database.query_one("SHOW transaction_isolation") == ("read committed",)
+    finally:
+        database.close()
+
+
+def test_two_admins_deactivating_each_other_at_once_leave_one_active_admin(pg_url):
+    seed = connect(pg_url)
+    make(seed, "boss1", "admin")
+    make(seed, "boss2", "admin")
+    seed.close()
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def deactivate(username):
+        database = connect(pg_url)
+        try:
+            barrier.wait()
+            try:
+                users.set_active(database, username=username, active=False, now=NOW, actor="cli")
+                outcomes.append("done")
+            except users.RoleChangeRefused as refusal:
+                outcomes.append(refusal.code)
+        finally:
+            database.close()
+
+    threads = [threading.Thread(target=deactivate, args=(name,)) for name in ("boss1", "boss2")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    check = connect(pg_url)
+    active = check.query_one("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active")[0]
+    check.close()
+    assert active == 1 and sorted(outcomes) == ["done", "last_admin"]

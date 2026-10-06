@@ -99,12 +99,17 @@ def connect(url: str) -> Database:
         def open_connection() -> Any:
             # prepare_threshold=None: no server-side prepared statements, so a connection
             # pooler such as Neon's cannot break the app.
-            return psycopg.connect(
+            connection = psycopg.connect(
                 url,
                 autocommit=False,
                 prepare_threshold=None,
                 connect_timeout=POSTGRES_CONNECT_SECONDS,
             )
+            # Set explicitly, whatever the host's default is: the table lock in set_role and
+            # set_active only protects the last-admin check at READ COMMITTED, where each
+            # statement after the lock sees the rows committed before it.
+            connection.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
+            return connection
 
         return Database(call_database(open_connection), "postgres")
     raise MigrationError("unsupported database URL (use sqlite:///... or postgresql://...)")

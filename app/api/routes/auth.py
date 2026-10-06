@@ -1,7 +1,9 @@
 """Registration, login, logout, "who am I" (spec 13.1).
 
 Every route here is a plain `def` on purpose: FastAPI runs it in a worker thread, so the slow
-password hashing never blocks the event loop and other requests keep being served.
+password hashing never blocks the event loop and other requests keep being served. The hashing
+itself goes through the HashGate: at most a few hashes run at once, and a request that finds
+every slot taken is answered 503 at once instead of using more memory.
 """
 
 from __future__ import annotations
@@ -9,14 +11,23 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.accounts import audit, passwords, tokens, users
-from app.api.deps import CurrentUser, Services, authenticated, client_ip, get_db, services
+from app.accounts.gate import HashBusy
+from app.api.deps import (
+    CurrentUser,
+    Services,
+    authenticated,
+    authenticated_for_logout,
+    client_ip,
+    get_db,
+    services,
+)
 from app.api.errors import ApiError
-from app.db.connection import Database
 from app.db.identity import normalise_email, normalise_username
 
 log = logging.getLogger("app.api")
@@ -26,6 +37,7 @@ USERNAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{2,31}")
 EMAIL_PATTERN = re.compile(r"[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+")
 MAX_EMAIL_LENGTH = 254
 BAD_LOGIN = ("bad_credentials", "Wrong username or password.")
+BUSY_RETRY_SECONDS = 2
 
 
 class RegisterBody(BaseModel):
@@ -56,13 +68,21 @@ def _too_many(decision) -> ApiError:  # type: ignore[no-untyped-def]
     )
 
 
+def _busy() -> ApiError:
+    return ApiError(
+        503,
+        "busy",
+        "The service is busy right now. Please try again in a moment.",
+        headers={"Retry-After": str(BUSY_RETRY_SECONDS)},
+    )
+
+
 @router.post("/register", status_code=201)
-def register(
-    body: RegisterBody, request: Request, db: Database = Depends(get_db)
-) -> dict[str, str]:
+def register(body: RegisterBody, request: Request, db: Any = Depends(get_db)) -> dict[str, str]:
     svc = services(request)
     decision = svc.throttle.check_register(client_ip(request))
     if not decision.allowed:
+        svc.emit("register_throttled")
         raise _too_many(decision)
     username = normalise_username(body.username)
     email = normalise_email(body.email)
@@ -84,7 +104,11 @@ def register(
             "not a very common password).",
             extra={"reasons": problems},
         )
-    password_hash = passwords.hash_password(body.password)
+    try:
+        with svc.hash_gate.slot():
+            password_hash = passwords.hash_password(body.password)
+    except HashBusy:
+        raise _busy() from None
     try:
         with db.transaction(write=True):
             user = users.create_customer(
@@ -98,18 +122,27 @@ def register(
 
 
 @router.post("/login")
-def login(body: LoginBody, request: Request, db: Database = Depends(get_db)) -> dict[str, str]:
+def login(body: LoginBody, request: Request, db: Any = Depends(get_db)) -> dict[str, str]:
     svc: Services = services(request)
     username = normalise_username(body.username)
     decision = svc.throttle.check_login(username, client_ip(request))
     if not decision.allowed:
-        log.warning("login throttled")  # no name, no address
+        # Counted, and an alert event for Phase 12. No audit row (an attack could flood the
+        # table), no name and no address anywhere, and not even a database connection.
+        svc.emit("login_throttled", scope=decision.scope)
         raise _too_many(decision)
     user = users.get_by_username(db, username) if username else None
-    # Always check a hash, so an unknown name takes as long as a wrong password.
-    matches = passwords.verify_password(
-        user.password_hash if user else passwords.dummy_hash(), body.password
-    )
+    new_hash = None
+    try:
+        with svc.hash_gate.slot():
+            # Always check a hash, so an unknown name takes as long as a wrong password.
+            matches = passwords.verify_password(
+                user.password_hash if user else passwords.dummy_hash(), body.password
+            )
+            if user and matches and user.is_active and passwords.needs_rehash(user.password_hash):
+                new_hash = passwords.hash_password(body.password)
+    except HashBusy:
+        raise _busy() from None
     now = _now()
     ok = bool(user and matches and user.is_active)
     if user is None:
@@ -128,8 +161,8 @@ def login(body: LoginBody, request: Request, db: Database = Depends(get_db)) -> 
             details={"result": "success" if ok else "failed", "reason": reason},
             now=now,
         )
-        if ok and passwords.needs_rehash(user.password_hash):  # type: ignore[union-attr]
-            users.update_password_hash(db, user.id, passwords.hash_password(body.password))  # type: ignore[union-attr]
+        if new_hash is not None:
+            users.update_password_hash(db, user.id, new_hash)  # type: ignore[union-attr]
     if not ok:
         raise ApiError(401, *BAD_LOGIN)
     token, claims = tokens.issue_token(svc.settings, user.id, now)  # type: ignore[union-attr]
@@ -142,8 +175,10 @@ def login(body: LoginBody, request: Request, db: Database = Depends(get_db)) -> 
 
 @router.post("/logout", status_code=204)
 def logout(
-    current: CurrentUser = Depends(authenticated), db: Database = Depends(get_db)
+    current: CurrentUser = Depends(authenticated_for_logout), db: Any = Depends(get_db)
 ) -> Response:
+    """Revoke the token. Not counted against the per-user rate limit: a thief using up the
+    owner's 20 requests a minute must not be able to stop the owner revoking the token."""
     with db.transaction(write=True):
         tokens.revoke(db, current.claims, _now())
     return Response(status_code=204)

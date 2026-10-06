@@ -133,6 +133,26 @@ def test_a_token_with_a_malformed_claim_is_refused(changes):
         decode_token(make_settings(), token, now=NOW)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [{"sub": 123}, {"jti": 456}, {"sub": None}, {"jti": ["a"]}, {"sub": {"id": 1}}, {"sub": True}],
+)
+def test_our_own_code_rejects_a_sub_or_jti_that_is_not_text(monkeypatch, changes):
+    """The JWT library already refuses some of these. Here the library is replaced by one that
+    accepts anything, so this proves that OUR check does the refusing."""
+    payload = good_payload(**changes)
+    monkeypatch.setattr(tokens.jwt, "decode", lambda *args, **kwargs: dict(payload))
+    with pytest.raises(InvalidToken):
+        decode_token(make_settings(), "any.token.here", now=NOW)
+
+
+def test_the_same_replaced_library_accepts_a_good_payload_so_the_test_above_can_fail(monkeypatch):
+    payload = good_payload()
+    monkeypatch.setattr(tokens.jwt, "decode", lambda *args, **kwargs: dict(payload))
+    claims = decode_token(make_settings(), "any.token.here", now=NOW)
+    assert claims.user_id == "user-1" and claims.jti == "jti-1"
+
+
 def test_a_token_issued_in_the_future_is_refused():
     future = good_payload(iat=int((NOW + timedelta(hours=1)).timestamp()))
     future["exp"] = int((NOW + timedelta(hours=2)).timestamp())

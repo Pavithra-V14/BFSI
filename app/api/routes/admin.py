@@ -24,13 +24,14 @@ _REFUSALS = {
     "own_role": (409, "You cannot change your own role."),
     "last_admin": (409, "There must always be at least one active admin."),
     "not_an_admin": (403, "You do not have access to this."),
+    "target_is_admin": (409, "Admin accounts cannot be changed here."),
 }
 USER_ID_PATTERN = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
 class RoleBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    role: Literal["customer", "staff", "admin"]
+    role: Literal["customer", "staff"]  # admins are made only by the owner's command
 
 
 @router.put("/users/{user_id}/role")

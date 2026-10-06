@@ -20,6 +20,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp
 
 from app.accounts.budget import UsageLimits
+from app.accounts.gate import HashGate
 from app.accounts.throttle import Throttle
 from app.api.deps import Services
 from app.api.errors import install_error_handlers
@@ -65,6 +66,7 @@ def create_app(
         db_factory=db_factory,
         throttle=throttle or Throttle(cache, settings.audit_hash_key),
         limits=limits or UsageLimits(cache, settings),
+        hash_gate=HashGate(settings.password_hash_concurrency),
         cache=cache,
         vector_client=vector_client,
         gateway=gateway,

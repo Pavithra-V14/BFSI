@@ -84,10 +84,11 @@ def decode_token(settings: ApiSettings, token: str, now: datetime | None = None)
     try:
         issued = datetime.fromtimestamp(int(payload["iat"]), UTC)
         expires = datetime.fromtimestamp(int(payload["exp"]), UTC)
-        user_id, jti = str(payload["sub"]), str(payload["jti"])
+        user_id, jti = payload["sub"], payload["jti"]
     except (TypeError, ValueError, OverflowError, OSError):
         raise InvalidToken("invalid") from None
-    if not user_id or not jti:
+    # Our own check, whatever the JWT library does: both must be non-empty text.
+    if not isinstance(user_id, str) or not isinstance(jti, str) or not user_id or not jti:
         raise InvalidToken("invalid")
     if current >= expires:
         raise InvalidToken("expired")
