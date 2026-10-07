@@ -14,16 +14,13 @@ from __future__ import annotations
 from typing import Any
 
 from app.gateway import questions
+from app.guardrails.prompts import get_prompt
 from app.ingest.runner import LoopRunner
 
 MAX_WAIT_SECONDS = 90.0
 LABEL_MIN_CONFIDENCE = 0.5  # [P] below this the label is "general"
 SUMMARY_MAX_CHARS = 300
 STATE_MAX_CHARS = 2_500
-SUMMARY_PROMPT = (
-    "Write ONE plain sentence of at most 30 words saying what this table shows. "
-    "No preamble, no quotes, no bullet.\n\n"
-)
 
 
 def sniff_mime(data: bytes) -> str:
@@ -42,14 +39,26 @@ class LlmTools:
 
     def caption(self, image: bytes) -> str:
         result = self.runner.run(
-            self.gateway.caption_image(image, sniff_mime(image), max_wait_s=self.max_wait_s)
+            self.gateway.caption_image(
+                image,
+                sniff_mime(image),
+                prompt=get_prompt("caption").render(),
+                max_wait_s=self.max_wait_s,
+            )
         )
         return " ".join(result.text.split())
 
     def summarise(self, table_text: str) -> str:
         result = self.runner.run(
             self.gateway.complete(
-                [{"role": "user", "content": SUMMARY_PROMPT + table_text[:STATE_MAX_CHARS]}],
+                [
+                    {
+                        "role": "user",
+                        "content": get_prompt("table_summary").render(
+                            table=table_text[:STATE_MAX_CHARS]
+                        ),
+                    }
+                ],
                 tier="decide",
                 max_tokens=80,
                 max_wait_s=self.max_wait_s,

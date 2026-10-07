@@ -89,11 +89,6 @@ IMAGE_TOKEN_ESTIMATE = 1_500
 CAPTION_MAX_TOKENS = 300
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp")
-CAPTION_PROMPT = (
-    "Describe this image from a financial document so that it can be found by search. "
-    "Say what kind of image it is, any title, labels and axes, and the figures, trends or "
-    "relationships it shows. Plain text, under 150 words. Only describe what is visible."
-)
 EVENT_BUFFER = 1_000
 LITELLM_PREFIX = {"groq": "groq", "gemini": "gemini", "openrouter": "openrouter"}
 MOCK_TEXT = "[offline mock answer: no model could be reached]"
@@ -720,6 +715,7 @@ class Gateway:
         image: bytes,
         mime_type: str = "image/png",
         *,
+        prompt: str,
         timeout_s: float | None = None,
         max_wait_s: float = 0.0,
     ) -> CompletionResult:
@@ -737,7 +733,7 @@ class Gateway:
             raise ValueError("the image is empty or too large")
         started = self._clock.now()
         steps = [s for s in self.answer_steps() if s.provider == "gemini"]
-        prompt_tokens = self._counter.count_text(CAPTION_PROMPT) + IMAGE_TOKEN_ESTIMATE
+        prompt_tokens = self._counter.count_text(prompt) + IMAGE_TOKEN_ESTIMATE
         reserved = CAPTION_MAX_TOKENS + self.config.reasoning_allowance
         self._windows.check(prompt_tokens, reserved, [s.litellm_model for s in steps])
         data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
@@ -745,7 +741,7 @@ class Gateway:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": CAPTION_PROMPT},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             }

@@ -136,8 +136,11 @@ def test_development_vectors_are_never_indexed():
 
 
 # ---- local-only rules ------------------------------------------------------------------------
-def test_runtime_requirements_hold_no_ingestion_package():
+def test_runtime_requirements_hold_no_ingestion_package_but_do_hold_the_masking_ones():
     lines = (ROOT / "requirements.txt").read_text("utf-8").lower().splitlines()
     runtime = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
-    for name in ("unstructured", "spacy", "presidio", "pypdf", "tesseract"):
+    for name in ("unstructured", "pypdf", "tesseract", "torch", "transformers", "en_core_web_lg"):
         assert name not in runtime
+    # Phase 6: query masking runs in production, with the SMALL model only
+    for name in ("presidio-analyzer==", "spacy==", "en_core_web_sm @"):
+        assert name in runtime

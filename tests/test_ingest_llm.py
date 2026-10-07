@@ -28,8 +28,8 @@ class FakeGateway:
         self.answers = None
         self.completion = "Limits by plan. More words."
 
-    async def caption_image(self, image, mime, *, max_wait_s):
-        self.requests.append(("caption", mime, max_wait_s))
+    async def caption_image(self, image, mime, *, prompt, max_wait_s):
+        self.requests.append(("caption", mime, max_wait_s, prompt))
         return Text("  A   chart\nof things ")
 
     async def complete(self, messages, *, tier, max_tokens, max_wait_s):
@@ -52,7 +52,8 @@ def tools():
 def test_a_caption_goes_to_the_gateways_caption_call_with_the_sniffed_type(tools):
     llm, gateway = tools
     assert llm.caption(PNG) == "A chart of things"
-    assert gateway.requests == [("caption", "image/png", 90.0)]
+    kind, mime, wait, prompt = gateway.requests[0]
+    assert (kind, mime, wait) == ("caption", "image/png", 90.0) and "financial document" in prompt
 
 
 def test_the_image_type_is_sniffed_from_the_bytes_not_the_name():

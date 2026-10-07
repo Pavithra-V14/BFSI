@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 5 built, awaiting the owner's approval (next is Phase 6)
+Current phase: Phase 6 built, awaiting the owner's approval (next is Phase 7)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -21,6 +21,9 @@ Current phase: Phase 5 built, awaiting the owner's approval (next is Phase 6)
   budgets, audit rows, the owner's `admin_cli`) and `app/api/` (the FastAPI app and its security layer).
   Phase 5 adds ingestion in `app/ingest/` (admin machine only: parse, chunk, index, delete, entity
   allow-list, review) and the shared sparse tokenizer `app/vector/sparse.py`.
+  Phase 6 adds the guardrails in `app/guardrails/` (query limits, greetings, injection checks, PII
+  masking, the context and output guards, plain-text rendering, the disclaimer) and the versioned
+  prompts in `prompts/`. The pipeline that calls them is built in Phase 8.
 - `scripts/` : helper scripts you run by hand, such as the gateway smoke test and the Qdrant check
   (they use real services, so they do nothing unless you add `--run`).
 - `originals/` : created by ingestion; your original PDFs (git-ignored). It is the ONLY copy the
@@ -280,6 +283,42 @@ secrets) and tell Claude.
   failure half way leaves a partly updated document, and running the same command again finishes it.
   A delete leaves the saved answers, the original PDFs and open failed-page rows; they are removed
   by hand (the runbook says how).
+
+## Guardrails and prompts (Phase 6)
+These are the local checks around every question and answer. They run on Render, call no model and
+need no key. They are functions the pipeline (Phase 8) will call in the spec's order:
+
+1. **Local scan** (`app/guardrails/scan.py`): at most 100 tokens (never cut silently); a first
+   message of at least 10 characters (a follow-up only has to be non-empty); a whole-message greeting
+   or farewell gets a fixed reply; the injection regex is recorded; names, phones, emails and
+   identifiers (PAN, Aadhaar, cards, policy and account numbers) are replaced by `[PERSON]`,
+   `[PHONE]`, `[EMAIL]` and `[ID]` before any model sees the question. Places are not masked.
+2. **Injection decision**: a strong regex hit or a Jev score of 0.85 or more blocks; a weak hit or a
+   score from 0.50 asks the user to reword. These numbers are starting values for the Phase 16
+   baseline.
+3. **Context guard**: drops chunks below a relevance of 0.30 and chunks that read like instructions
+   to the model; if nothing is left the answer is a fixed refusal. What is left goes into the prompt
+   between clear delimiters that a chunk cannot forge.
+4. **Output guard**: the answer must be JSON with citations; every number, percentage, date and
+   amount must appear in the cited chunks; every citation must be a document the model was given; the
+   words of the answer must be found in the cited text (0.6 to start). If a check fails the answer is
+   still returned, with a warning and the unchecked numbers marked, and it is not cached.
+5. **Plain text**: model output is shown as plain text. HTML and markdown link syntax are removed; a
+   web address stays only when its domain is a regulator's or the company's (`COMPANY_DOMAINS`).
+6. **Disclaimer**: added only for advice-like questions or answers with a financial figure.
+
+**Prompts** are files in `prompts/` named `name.v1.md`, each with the same sections (role, task,
+constraints, output format, a good and a bad example, a refusal rule). Changing a prompt means a new
+file or a new version; its SHA-256 hash is recorded with every answer. The image-caption and
+table-summary prompts used by ingestion live there too, word for word as before.
+
+**Known limitations (recorded in Phase 6)**
+- **Phase 16 (baseline run).** The small spaCy model (`en_core_web_sm`) has limited recall for Indian
+  names: it misses some, and names typed in capitals are often missed. The name patterns catch "my name
+  is ...", "I am ..." and "Mr. ...", but a bare name can pass. All thresholds above are starting values.
+- **Phase 8 (pipeline) and Phase 15 (deployment).** The first masking call loads the model and takes
+  about 40 seconds on the admin machine (about 22 ms afterwards), so the API must warm it at start-up.
+  The model needs about 140 MB of memory in production.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

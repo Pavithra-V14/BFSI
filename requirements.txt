@@ -3,8 +3,7 @@
 # at install time.
 #
 # Phase 1 needs only the Postgres driver. Later phases add the packages they
-# use here (spec section 13.2: no unused packages). The small spaCy model
-# (en_core_web_sm) is added when query masking is built.
+# use here (spec section 13.2: no unused packages).
 psycopg[binary]==3.3.6
 # Phase 2: the gateway (LLM, embedding and rerank calls). tiktoken counts tokens;
 # httpx calls the Jev Decisions API and the rerank services directly.
@@ -21,3 +20,9 @@ fastapi==0.142.2
 uvicorn==0.54.0
 PyJWT==2.15.1
 argon2-cffi==25.1.0
+# Phase 6: query masking (spec 9.2, production uses the SMALL spaCy model). Presidio finds names
+# and structured identifiers, spaCy runs it. The model is installed from its release file (it is not
+# on PyPI). The large model, torch and Unstructured stay in requirements-ingest.txt, never here.
+presidio-analyzer==2.2.364
+spacy==3.8.16
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

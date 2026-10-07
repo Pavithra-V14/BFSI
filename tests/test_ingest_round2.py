@@ -893,7 +893,12 @@ def test_a_real_run_prints_the_warnings_but_not_the_removed_lines(rig, tmp_path)
 
 
 # ---- 12. a real import scan (ast): the API and the Render runtime stay free of ingestion ------
-HEAVY = {"spacy", "torch", "unstructured", "presidio_analyzer", "pypdf", "pdfminer", "pytesseract"}
+# Never in the Render runtime, anywhere:
+FORBIDDEN_IN_RUNTIME = {"torch", "unstructured", "pypdf", "pdfminer", "pytesseract", "transformers"}
+# spaCy and Presidio: only app/guardrails (query masking) may import them at runtime. app/ingest
+# does too, but it never runs on Render.
+NLP = {"spacy", "presidio_analyzer"}
+HEAVY = FORBIDDEN_IN_RUNTIME | NLP
 
 
 def imports_of(path: Path) -> list[str]:
@@ -952,10 +957,10 @@ def test_the_import_scan_sees_all_forms_of_import(tmp_path):
     assert "app.ingest" in found  # "from app import ingest" is app.ingest too
 
 
-def test_the_api_never_reaches_ingestion_or_a_heavy_package_by_any_import_chain():
+def test_the_api_never_reaches_ingestion_torch_or_unstructured_by_any_import_chain():
     modules, outside = reachable_from(ROOT / "app" / "api")
     assert not any(m == "app.ingest" or m.startswith("app.ingest.") for m in modules), modules
-    assert not (outside & HEAVY), outside & HEAVY
+    assert not (outside & FORBIDDEN_IN_RUNTIME), outside & FORBIDDEN_IN_RUNTIME
 
 
 def test_the_gateway_vector_and_cache_packages_do_not_import_heavy_packages_either():
@@ -965,10 +970,45 @@ def test_the_gateway_vector_and_cache_packages_do_not_import_heavy_packages_eith
         assert not any(m == "app.ingest" or m.startswith("app.ingest.") for m in modules), package
 
 
+def test_spacy_and_presidio_are_imported_only_inside_the_guardrails_masker_and_ingestion():
+    allowed = {
+        ROOT / "app" / "guardrails" / "masking.py",
+        ROOT / "app" / "ingest" / "entities.py",
+    }
+    for path in (ROOT / "app").rglob("*.py"):
+        found = {name.split(".")[0] for name in imports_of(path)} & NLP
+        assert not found or path in allowed, (path.relative_to(ROOT), found)
+
+
+def test_the_guardrails_never_reach_ingestion_or_a_forbidden_package():
+    modules, outside = reachable_from(ROOT / "app" / "guardrails")
+    assert not any(m == "app.ingest" or m.startswith("app.ingest.") for m in modules), modules
+    assert not (outside & FORBIDDEN_IN_RUNTIME), outside & FORBIDDEN_IN_RUNTIME
+    assert not any(m.startswith("app.api") for m in modules)  # the pipeline calls them, not back
+
+
+def test_importing_the_guardrails_loads_neither_spacy_nor_presidio_until_a_masker_is_built():
+    import subprocess
+
+    code = "\n".join(
+        [
+            "import sys, pkgutil, importlib, app.guardrails as g",
+            "for m in pkgutil.iter_modules(g.__path__):",
+            "    importlib.import_module('app.guardrails.' + m.name)",
+            "names = ('spacy', 'presidio_analyzer', 'torch', 'unstructured')",
+            "print('LOADED', [n for n in names if n in sys.modules])",
+        ]
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr[-400:]
+    assert "LOADED []" in done.stdout
+
+
 def test_the_ingest_package_is_where_the_heavy_imports_live():
     _, outside = reachable_from(ROOT / "app" / "ingest")
     assert {"qdrant_client"} <= outside  # the scan really does read the ingest package
-    assert str(ROOT) in sys.path or True
 
 
 def test_a_missing_package_says_which_one_and_how_to_install_it():

@@ -22,14 +22,17 @@ a term already stored for the document is never stored twice, and a reviewed sta
 from __future__ import annotations
 
 import re
-import unicodedata
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
 from app.accounts.tokens import utc_text
+from app.guardrails.domains import DEFAULT_COMPANY_DOMAINS, SEED_DOMAINS, domain_is_seeded
+from app.guardrails.normalise import normalise_entity
 from app.ingest.model import DocRequest
+
+__all__ = ["DEFAULT_COMPANY_DOMAINS", "SEED_DOMAINS", "domain_is_seeded", "normalise_entity"]
 
 AUTO_APPROVE_PROBABILITY = 0.85  # [P] a "public term" answer this confident is approved
 AUTO_KINDS = frozenset({"law", "regulator", "organisation", "place", "helpline"})
@@ -38,18 +41,6 @@ AUTO_KINDS = frozenset({"law", "regulator", "organisation", "place", "helpline"}
 # reviewer and is never put to a model question, because it could be personal.
 PENDING_KINDS = frozenset({"contact"})
 CONTEXT_CHARS = 160
-
-# Regulator domains (a name matches the domain itself and any sub-domain of it).
-SEED_DOMAINS = (
-    "irdai.gov.in",
-    "sebi.gov.in",
-    "rbi.org.in",
-    "npci.org.in",
-    "amfiindia.com",
-    "scores.gov.in",
-)
-# The company's own domain for the sample documents (spec 20); the real one is COMPANY_DOMAINS [T].
-DEFAULT_COMPANY_DOMAINS = ("auravance.aura",)
 
 SEED_REGULATORS = (
     "IRDAI",
@@ -139,22 +130,6 @@ def clean_ner_text(text: str, kind: str) -> str | None:
     if kind == "person_in_policy" and len(words) < 2:
         return None
     return text
-
-
-def domain_is_seeded(contact: str, domains: Iterable[str]) -> bool:
-    """True when an email address or web address belongs to one of the curated domains (the
-    domain itself or a sub-domain of it)."""
-    text = contact.strip().lower()
-    host = text.rsplit("@", 1)[1] if "@" in text else re.sub(r"^[a-z]+://", "", text)
-    host = re.split(r"[/:?#]", host, maxsplit=1)[0].removeprefix("www.").strip(".")
-    return any(host == d or host.endswith("." + d) for d in domains)
-
-
-def normalise_entity(text: str) -> str:
-    """The one rule for comparing entity text: NFKC, case-folded, whitespace collapsed, and
-    quotes, commas and brackets trimmed from the ends. Matching is exact on this form."""
-    folded = unicodedata.normalize("NFKC", text).casefold()
-    return " ".join(folded.split()).strip(" \t\"'`,;:()[]")
 
 
 @dataclass(frozen=True)

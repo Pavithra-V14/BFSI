@@ -98,12 +98,12 @@ One shared state object travels through the graph (query, masked query, role, se
 
 1. **Authenticate and rate-limit** (section 13).
 2. **Local scan — no LLM, no network.** In this order:
-   1. Query limits: **maximum 100 tokens** (counted with a real tokenizer). Over the limit → refuse with "please shorten"; never truncate silently. **Minimum 10 characters [T: confirm whether this is a hard refusal or applies only to the first message of a session — see 4.3].**
+   1. Query limits: **maximum 100 tokens** (counted with a real tokenizer). Over the limit → refuse with "please shorten"; never truncate silently. **Minimum 10 characters, for the first message of a session only [T]** (owner decision in Phase 6; a follow-up only has to be non-empty). An empty message is always refused.
    2. Greeting check (4.2).
    3. Injection patterns (regex).
    4. PII masking of the query copy that goes to any LLM (section 9.2).
 3. **Jev triage — one combined call** on the masked query. Returns, each with a confidence: domain relevance, `product_line`, `clause_type`, needs-history, vague/borderline flag, injection score. Fallback chain: Jev → Groq `gpt-oss-20b` → Gemini → rules and keywords with no LLM (full chain in 5.1).
-4. **Injection decision [P]:** regex plus the Jev score. Any strong detector blocks; mixed signals ask the user to reword. The detector that fired is logged.
+4. **Injection decision [P]:** regex plus the Jev score. Any strong detector blocks; mixed signals ask the user to reword. The detector that fired is logged. **[T]** Starting values: a strong regex hit, or a Jev injection score of at least 0.85, blocks; a weak regex hit, or a score from 0.50 up to 0.85, asks the user to reword; with no Jev score (the decider fell back to rules) the regex alone decides. A weak pattern never blocks alone, so ordinary questions such as "override a standing instruction" or "bypass surgery" go through.
 5. **Rewrite** (answer-tier LLM) runs only if (a) needs-history is true, or (b) it is a vague first message of a session (rewrite-then-clarify, 4.3). Otherwise the original query is kept.
 6. **Domain gate:** out-of-domain queries are refused.
 7. **Cache lookup:** exact cache first (section 10); a hit is verified before returning.
@@ -282,9 +282,11 @@ Cheap, local checks run first. Guardrail time budget: well under about 300 ms in
 - A name typed by a user that is in no approved document stays masked in answers.
 - Production uses the small spaCy model.
 - Traces, logs, caches and stored transcripts contain only masked text.
+- **[P]** Masked text uses the placeholders `[PERSON]`, `[PHONE]`, `[EMAIL]` and `[ID]`. Presidio (with the small spaCy model) finds names, emails and phone numbers; the program's own patterns find PAN, Aadhaar (with its checksum), card numbers (with the Luhn checksum), passports, policy, claim, account, folio, loan and customer numbers written after such a word, and a name after "my name is", "I am", "this is" or a title. A made-up number that fails its checksum, a public toll-free helpline (1800, 1860), an IFSC or GSTIN, a product name ("Silver plan"), a document code ("AV-GI-FCP-2026-0518") and amounts are not masked. **Two passes:** before retrieval the question is masked with the approved allow-list terms of the roles the user may see; at answer time the copy that is stored, logged or cached is masked again with only the terms of the documents that survived retrieval. A term is left unmasked only when its normalised text equals an allow-list term exactly (`normalise_entity`). The small spaCy model has limited recall for Indian names (it misses some, notably names typed in capitals); this is recorded for the Phase 16 baseline.
 
 ### 9.3 Injection defence
 - Regex patterns plus the Jev injection score; no separate injection model for now.
+- **[P]** Context guard: a chunk below the relevance floor [T 0.30] is dropped; a chunk that matches the wider chunk patterns (the narrow ingestion list plus lines that address the model, such as "when asked ... say", a role line, "respond only with yes") is **dropped** and the verdict records the pattern names, never the text. If every chunk is dropped the answer is a fixed refusal. Surviving chunks are placed between `<<<DOCUMENT id=S1 ...>>>` and `<<<END DOCUMENT>>>` with a label, source, effective date, clause and pages; angle brackets inside a chunk are replaced so a chunk cannot close or forge a delimiter.
 - **Indirect injection:** retrieved text is wrapped in clear delimiters and the model is told to treat it as data; chunks are scanned for instruction-like content at ingestion and again in the context guard.
 - **[P]** A chunk that matches the narrow ingestion patterns (for example "ignore the previous instructions", "reveal your system prompt", a chat-template marker) is stored but **not active** (`effective_to` is set and `quarantine` is `pending`) until the owner approves it with the review command. An approved chunk becomes active and counts as a new chunk (corpus version bump, cache entries of the document cleared). A rejected chunk stays inactive and is not recreated by a later run of the same text.
 
@@ -295,13 +297,18 @@ Cheap, local checks run first. Guardrail time budget: well under about 300 ms in
 - Lexical groundedness check.
 - **When the numeric or citation check fails: return the answer with a warning**, highlighting the unverified numbers.
 - A judge-model groundedness check runs in evaluation and on sampled live traffic, not on every answer.
+- **[P]** The answer schema is JSON: `answer` (text) and `citations`, a list of `{"chunk_id": "S1"}` using the labels of the context block, which the guard maps back to chunk ids. Numbers are compared by value across formats ("5 lakh" equals "5,00,000", "30-Sep-2026" equals "30 September 2026", "12.5%" equals "12.5 per cent"); the clause reference, heading and page numbers of a cited chunk count as evidence; list markers and the labels S1, S2 are not figures. Lexical groundedness is the share of the answer's content words (stemmed with the project's own tokenizer) found in the cited chunks, **[T]** starting at 0.6. A failed numeric, citation or groundedness check returns the answer with a warning and the unverified figures marked, clears the `grounded` flag, and keeps the answer out of the cache and out of history. An answer that cannot be parsed is a schema failure and is not shown.
+- **[P]** Model output is shown as plain text: HTML and markdown link syntax are removed (the link text is kept) and control characters dropped. A web address stays as inert plain text only when its domain is a curated one (a regulator's, or the company's, `COMPANY_DOMAINS` [T]); every other web address is removed.
 
 ### 9.5 Policy
 - No personalised financial, investment or legal advice. A standard disclaimer is shown **only when relevant** (advice-like or financial-figure answers).
 - Out-of-domain questions are refused.
+- **[T]** The disclaimer is shown only for an advice-like question ("should I", "recommend", "which is better", "invest in" and similar) or an answer that contains a financial figure (an amount, a rate or a percentage); a plain definition gets none. Text: "This is general information drawn from our documents, not personal financial, legal or tax advice. For decisions about your own situation, please speak to a qualified adviser or contact customer care."
 
 ### 9.6 Prompts
 Prompts are **versioned files** in a `prompts/` folder with a fixed structure: role, task, constraints, output format, one good and one bad example, and an explicit refusal rule. The hash of each prompt is recorded in every trace. Prompts stay short; rules move into code. Prompt token length is tracked over time.
+
+**[P]** A prompt file is `prompts/<name>.v<N>.md`: a header between two `---` lines (`name`, `version`, and `sent`, which is `all` to send every section or `task` to send the Task section alone, word for word), then the sections Role, Task, Constraints, Output format, Good example, Bad example and Refusal rule, in that order, none empty; a file that breaks this is refused. The hash is the SHA-256 of the file with line endings normalised; `prompt_set_version` (a short hash of every active prompt) is the prompt version in the exact cache key. The latest version of each name is the active one. The image-caption and table-summary prompts of ingestion are prompt files too, byte for byte the text they had in code; the typed triage questions stay in the gateway because they are data schemas for the deciders, not free-text prompts.
 
 ## 10. Caching
 
@@ -595,8 +602,7 @@ Each phase depends only on earlier phases. The sections each phase covers are in
 
 ## 23. Open items before launch
 
-- Meaning of the 10-character minimum (hard refusal, or first-message clarification only).
-- What counts as "only when relevant" for the disclaimer.
+- ~~Meaning of the 10-character minimum~~ and ~~what counts as "only when relevant" for the disclaimer~~: decided in Phase 6 (4.1 step 2.1, 9.5); the numbers and the disclaimer text stay [T] for the Phase 16 baseline.
 - Queries per day and the monthly budget ceiling; the staff token budget.
 - Review-queue overdue limit and shadow-mode length.
 - Terms-of-service review for several accounts per provider; Upstash, Render and Jev limits and prices.
