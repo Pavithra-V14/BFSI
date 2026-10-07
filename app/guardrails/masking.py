@@ -15,6 +15,12 @@ normalised text is in it stays as written. Two passes (decision of the owner):
    of the documents that survived retrieval (`AllowList.terms(doc_ids)`).
 The result carries counts and offsets, never the matched text.
 
+Before anything is looked for, the text is viewed in a normal form (NFKC, zero-width and bidi
+characters removed, every Unicode space and digit turned into the plain one) so that a number
+written with a non-breaking space, full-width digits or Devanagari digits is found; each span
+found is mapped back to the ORIGINAL text, which is what is replaced. Names typed in ALL CAPS or
+all lowercase get a second look at a copy with the name-like words capitalised (`_title_runs`).
+
 Known limit: `en_core_web_sm` has limited recall for Indian names (it misses some); the name
 patterns and the structured patterns catch what they can. Recorded for the Phase 16 baseline.
 """
@@ -23,6 +29,7 @@ from __future__ import annotations
 
 import re
 import threading
+import unicodedata
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,6 +46,7 @@ _PRIORITY = {"ID": 0, "PHONE": 1, "EMAIL": 2, "PERSON": 3}
 MODEL_NAME = "en_core_web_sm"
 PRESIDIO_ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER"]
 MIN_PRESIDIO_SCORE = 0.4
+CASED_NAME_SCORE = 0.6  # [T] the second look at capitals / lowercase names asks for more
 
 # Words that mark a "name" the small model found as a banking term, not a person.
 DOMAIN_WORDS = frozenset(
@@ -82,31 +90,88 @@ class MaskResult:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+# ---- the normalised view ------------------------------------------------------------------------
+_INVISIBLE = frozenset(
+    chr(code)
+    for code in (
+        0x00AD,  # soft hyphen
+        0x034F,  # combining grapheme joiner
+        0x061C,  # Arabic letter mark
+        0x180E,  # Mongolian vowel separator
+        0xFEFF,  # byte-order mark / zero-width no-break space
+        *range(0x200B, 0x2010),  # zero-width space .. right-to-left mark
+        *range(0x202A, 0x202F),  # bidi embeddings and overrides
+        *range(0x2060, 0x2070),  # word joiner, invisible operators, isolates
+    )
+)
+
+
+class View:
+    """The text in the form the patterns expect, with each character's place in the original.
+
+    NFKC turns full-width letters and digits into plain ones and every Unicode space into a plain
+    space; Devanagari, Arabic-Indic and other decimal digits become 0-9; zero-width and bidi
+    characters are dropped. Plain ASCII text is its own view."""
+
+    def __init__(self, original: str) -> None:
+        self.original = original
+        self._starts: list[int] | None = None
+        self._ends: list[int] | None = None
+        if original.isascii():
+            self.text = original
+            return
+        out: list[str] = []
+        starts: list[int] = []
+        ends: list[int] = []
+        for index, char in enumerate(original):
+            if char in _INVISIBLE:
+                continue
+            for piece in unicodedata.normalize("NFKC", char):
+                if piece.isspace() and not piece.isascii():
+                    piece = " "
+                elif piece.isdecimal() and not piece.isascii():
+                    piece = str(unicodedata.decimal(piece))
+                out.append(piece)
+                starts.append(index)
+                ends.append(index + 1)
+        self.text = "".join(out)
+        self._starts, self._ends = starts, ends
+
+    def to_original(self, span: Span) -> Span:
+        if self._starts is None or self._ends is None:
+            return span
+        return Span(self._starts[span.start], self._ends[span.end - 1], span.kind)
+
+
 # ---- structured identifiers ---------------------------------------------------------------------
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_SEP = r"[ .\-/]"  # what people put between groups of digits
 _PHONE = re.compile(
-    r"(?<![\w.])(?:(?:\+|00)?91[ -]?)?[6-9]\d{4}[ -]?\d{5}(?!\d)"  # an Indian mobile number
-    r"|(?<![\w.])\+\d{1,3}[ -]?\d{6,12}(?!\d)"  # any number written with a country code
-    r"|(?<![\w.])0\d{2,4}[ -]\d{6,8}(?!\d)"  # a landline written with an STD code
+    rf"(?<![\w.])(?:(?:\+|00)?91{_SEP}?)?[6-9]\d{{4}}{_SEP}?\d{{5}}(?!\d)"  # an Indian mobile
+    rf"|(?<![\w.])\+\d{{1,3}}{_SEP}?\d{{6,12}}(?!\d)"  # any number written with a country code
+    rf"|(?<![\w.])0\d{{2,4}}{_SEP}\d{{6,8}}(?!\d)"  # a landline written with an STD code
 )
 _PAN = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]{3}[PCHFATBLJGpchfatbljg][A-Za-z]\d{4}[A-Za-z](?![A-Za-z0-9])"
 )
-_AADHAAR = re.compile(r"(?<!\d)[2-9]\d{3}[ -]?\d{4}[ -]?\d{4}(?!\d)")
-_CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+_AADHAAR = re.compile(rf"(?<!\d)[2-9]\d{{3}}{_SEP}?\d{{4}}{_SEP}?\d{{4}}(?!\d)")
+# a run of digit groups; the card number is searched for inside it, group by group
+_DIGIT_RUN = re.compile(rf"(?<!\d)\d+(?:{_SEP}\d+){{0,12}}(?!\d)")
 _PASSPORT = re.compile(r"(?<![A-Za-z0-9])[A-PR-WYa-pr-wy][1-9]\d{6}(?![A-Za-z0-9])")
 _KEYWORDS = (
     "policy|claim|account|a/c|acct|folio|loan|customer|cust|member|reference|ref|application|"
     "ticket|certificate|proposal|mandate|upi|pran|demat|client"
 )
+# A value may be written in groups: "1234 5678 9012", "12 345 678" (a group is 2 or more digits).
+_VALUE = r"[A-Za-z0-9][A-Za-z0-9/-]{0,24}(?: \d{2,}[A-Za-z0-9/-]*){0,5}"
 # "policy number is AB123456", "claim no: 98765432", "a/c # 1234567890"
 _LABELLED = re.compile(
-    rf"\b(?:{_KEYWORDS})\b[^\n]{{0,24}}?\b(?:no\.?|number|num|id|#)[\s:#.\-]*(?:(?:is|are)\b[\s:#.\-]*)?"
-    r"([A-Za-z0-9][A-Za-z0-9/-]{4,24})",
+    rf"\b(?:{_KEYWORDS})\b[^\n]{{0,24}}?\b(?:no\.?|number|num|id|#)[\s:#.\-]*"
+    rf"(?:(?:is|are)\b[\s:#.\-]*)?({_VALUE})",
     re.IGNORECASE,
 )
 # "policy AB123456" (no label word): only a code that mixes letters and digits, or a long number
-_UNLABELLED = re.compile(rf"\b(?:{_KEYWORDS})\s+([A-Za-z0-9][A-Za-z0-9/-]{{5,24}})", re.IGNORECASE)
+_UNLABELLED = re.compile(rf"\b(?:{_KEYWORDS})\s+({_VALUE})", re.IGNORECASE)
 _STRONG_INTRO = re.compile(
     r"\b(?:my name is|my name's|name\s*[:\-]|call me|myself)\s+"
     r"([A-Za-z][A-Za-z'.-]*(?:\s+[A-Za-z][A-Za-z'.-]*){0,2})",
@@ -178,22 +243,53 @@ def _id_spans(text: str) -> list[Span]:
         digits = _digits(match.group())
         if len(digits) == 12 and verhoeff_ok(digits):
             spans.append(Span(match.start(), match.end(), "ID"))
-    for match in _CARD.finditer(text):
-        digits = _digits(match.group())
-        if 13 <= len(digits) <= 19 and luhn_ok(digits):
-            spans.append(Span(match.start(), match.end(), "ID"))
+    for match in _DIGIT_RUN.finditer(text):
+        spans.extend(_card_spans(match))
     for match in _PASSPORT.finditer(text):
         spans.append(Span(match.start(), match.end(), "ID"))
     for match in _LABELLED.finditer(text):
-        if len(_digits(match.group(1))) >= 3 and not _DOCUMENT_CODE.match(match.group(1)):
+        value = match.group(1)
+        if _labelled_value_ok(value) and not _DOCUMENT_CODE.match(value):
             spans.append(Span(match.start(1), match.end(1), "ID"))
     for match in _UNLABELLED.finditer(text):
         value = match.group(1)
         digits = len(_digits(value))
+        tokens = value.split()
+        long_enough = len(tokens[0]) >= (6 if len(tokens) == 1 else 4)
         mixed = digits >= 4 and any(ch.isalpha() for ch in value)
-        if (mixed or digits >= 9) and not _DOCUMENT_CODE.match(value):
+        if long_enough and (mixed or digits >= 9) and not _DOCUMENT_CODE.match(value):
             spans.append(Span(match.start(1), match.end(1), "ID"))
     return spans
+
+
+def _labelled_value_ok(value: str) -> bool:
+    """A value after "policy number" ...: at least 5 characters (spaces apart) and 3 digits."""
+    return len(value.replace(" ", "")) >= 5 and len(_digits(value)) >= 3
+
+
+def _card_spans(run: re.Match[str]) -> list[Span]:
+    """The card number inside a run of digit groups. Every window of whole groups holding 13 to 19
+    digits is tried, so a stray "12" in front ("12 4111 1111 1111 1111") cannot spoil the check.
+    Windows that pass the Luhn check and overlap are merged: when a chance window (a date and part
+    of the card) also passes, the whole of the card is still covered, never part of it."""
+    text = run.group()
+    groups = [(m.start(), m.end()) for m in re.finditer(r"\d+", text)]
+    windows: list[tuple[int, int]] = []
+    for first in range(len(groups)):
+        for last in range(first, len(groups)):
+            start, end = groups[first][0], groups[last][1]
+            digits = _digits(text[start:end])
+            if len(digits) > 19:
+                break
+            if len(digits) >= 13 and luhn_ok(digits):
+                windows.append((start, end))
+    merged: list[list[int]] = []
+    for start, end in sorted(windows):
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [Span(run.start() + a, run.start() + b, "ID") for a, b in merged]
 
 
 def _name_spans(text: str) -> list[Span]:
@@ -228,6 +324,68 @@ def _contact_spans(text: str) -> list[Span]:
     spans = [Span(m.start(), m.end(), "EMAIL") for m in _EMAIL.finditer(text)]
     spans += [Span(m.start(), m.end(), "PHONE") for m in _PHONE.finditer(text)]
     return spans
+
+
+# ---- names typed in capitals or in lowercase ----------------------------------------------------
+# The name model is trained on text where names start with a capital letter. For "RAHUL SHARMA" or
+# "priya nair" the words that could be a name get a second look in a copy where they are
+# capitalised (same length, so the spans map straight back). Everything below only ever ADDS
+# spans; it never unmasks anything, and the allow-list and the product-word protections still
+# apply to what it finds.
+COMMON_WORDS = frozenset(
+    "the a an and or but if of to in on at for from with without by as is are was were be been "
+    "being am i my me we our you your he his she her it its they their this that these those what "
+    "which who whom how when where why can could will would shall should may might must do does "
+    "did has have had not no yes please also about regarding over under after before between into "
+    "than then so too very just only any all some each every more most other such own want wants "
+    "wanted need needs needed help helps helped ask asks asked asking know tell told say said says "
+    "call called calls calling lost lose loses get gets got give gives gave make makes made take "
+    "takes took pay pays paid paying check checks checked update updates updated change changes "
+    "changed apply applied applies report reported reports wrote write writes send sends sent open "
+    "opened close closed cancel cancelled renew renewed wish wishes like likes here there today "
+    "tomorrow yesterday now later again still already pending rejected approved denied refused "
+    "settled delayed issue problem complaint request requests status details detail info "
+    "information query question document documents form forms number copy new old explain show "
+    "list download upload contact email phone mobile address name names".split()
+)
+_NOT_NAME_WORDS = COMMON_WORDS | DOMAIN_WORDS | PRODUCT_TIERS | _PRODUCT_NOUNS
+_ASCII_WORD = re.compile(r"[A-Za-z]+")
+_RUN_GAP = re.compile(r" {1,2}")
+MAX_NAME_WORDS = 4
+
+
+def _title_runs(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """A copy of `text` (same length) where each run of 2 to 4 words that could be a name has its
+    words capitalised, and the places of those runs. A word could be a name when it is not an
+    ordinary word of a banking question; a run needs at least one word typed wholly in capitals or
+    wholly in lowercase (a name already written as "Rahul Sharma" is the first pass's business)."""
+    words = list(_ASCII_WORD.finditer(text))
+    chars = list(text)
+    runs: list[tuple[int, int]] = []
+    for word in words:
+        piece = word.group()
+        if len(piece) >= 2 and piece.isupper() and piece.lower() in _NOT_NAME_WORDS:
+            chars[word.start() : word.end()] = piece.lower()  # "HAS A POLICY": calm the capitals
+    candidates = [
+        w for w in words if len(w.group()) >= 2 and w.group().lower() not in _NOT_NAME_WORDS
+    ]
+    index = 0
+    while index < len(candidates):
+        end = index
+        while end + 1 < len(candidates) and _RUN_GAP.fullmatch(
+            text[candidates[end].end() : candidates[end + 1].start()]
+        ):
+            end += 1
+        run = candidates[index : end + 1]
+        index = end + 1
+        uniform = [w for w in run if w.group().islower() or w.group().isupper()]
+        if 2 <= len(run) <= MAX_NAME_WORDS and uniform:
+            for word in run:
+                piece = word.group()
+                if piece.islower() or piece.isupper():
+                    chars[word.start() : word.end()] = piece[0].upper() + piece[1:].lower()
+            runs.append((run[0].start(), run[-1].end()))
+    return "".join(chars), runs
 
 
 # ---- Presidio -----------------------------------------------------------------------------------
@@ -286,27 +444,69 @@ class Masker:
                 spans.append(Span(hit.start, hit.end, "PHONE"))
         return spans
 
-    def find(self, text: str) -> list[Span]:
-        """Every span that would be masked, before the allow-list, with overlaps resolved (an
+    def _cased_name_spans(self, text: str) -> list[Span]:
+        """Names typed in capitals or lowercase: the name model looks again at a copy where the
+        words that could be a name are capitalised. A name needs two words or more here (a single
+        lowercase word is far too often an ordinary word); the words must lie inside one capitalised
+        run, and the product-word protection applies as before."""
+        titled, runs = _title_runs(text)
+        if not runs:
+            return []
+        spans: list[Span] = []
+        for match in _TITLED.finditer(titled):  # "MR SHARMA", "dr anita rao"
+            words = list(_ASCII_WORD.finditer(match.group(1)))
+            if words and not any(w.group().lower() in _NOT_NAME_WORDS for w in words):
+                spans.append(Span(match.start(1), match.start(1) + words[-1].end(), "PERSON"))
+        hits = self._engine().analyze(
+            text=titled, language="en", entities=["PERSON"], score_threshold=CASED_NAME_SCORE
+        )
+        for hit in hits:
+            for first, last in runs:
+                start, end = max(hit.start, first), min(hit.end, last)
+                if end <= start:
+                    continue
+                # only the words really typed in capitals / lowercase: a name already written
+                # "Anita Rao" was the first pass's, and must not drag a lowercase "writing" along
+                best: list[re.Match[str]] = []
+                current: list[re.Match[str]] = []
+                for word in _ASCII_WORD.finditer(text, start, end):
+                    uniform = word.group().islower() or word.group().isupper()
+                    current = current + [word] if uniform else []
+                    best = max(best, current, key=len)
+                if len(best) >= 2 and not _is_a_product_not_a_person(
+                    text, best[0].start(), best[-1].end()
+                ):
+                    spans.append(Span(best[0].start(), best[-1].end(), "PERSON"))
+        return spans
+
+    def _detect(self, text: str) -> list[Span]:
+        """Every span that would be masked, in the offsets of `text`, with overlaps resolved (an
         identifier beats a phone number beats an email beats a name)."""
         candidates = _id_spans(text) + _contact_spans(text) + _name_spans(text)
         candidates += self._presidio_spans(text)
+        candidates += self._cased_name_spans(text)
         chosen: list[Span] = []
         for span in sorted(candidates, key=lambda s: (_PRIORITY[s.kind], -(s.end - s.start))):
             if all(span.end <= other.start or span.start >= other.end for other in chosen):
                 chosen.append(span)
         return sorted(chosen, key=lambda s: s.start)
 
+    def find(self, text: str) -> list[Span]:
+        """Every span that would be masked, before the allow-list, in the offsets of `text`."""
+        view = View(text)
+        return [view.to_original(span) for span in self._detect(view.text)]
+
     def mask(self, text: str, allow_terms: Collection[str] = ()) -> MaskResult:
         """`allow_terms` are NORMALISED terms (`normalise_entity`); a span equal to one stays."""
         allowed = allow_terms if isinstance(allow_terms, (set, frozenset)) else set(allow_terms)
+        view = View(text)
         masked: list[Span] = []
         kept = 0
-        for span in self.find(text):
-            if normalise_entity(text[span.start : span.end]) in allowed:
+        for found in self._detect(view.text):
+            if normalise_entity(view.text[found.start : found.end]) in allowed:
                 kept += 1
             else:
-                masked.append(span)
+                masked.append(view.to_original(found))
         pieces: list[str] = []
         cursor = 0
         for span in masked:

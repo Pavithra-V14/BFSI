@@ -2,7 +2,16 @@
 
 In the spec's order: (1) query limits, (2) greeting check, (3) injection patterns, (4) PII masking
 of the copy that goes to any model. The first two can end the request here with a fixed text; the
-injection regex only scans (stage 4 decides, after the Jev score is known).
+injection regex only scans (stage 4 decides, after the Jev score is known). One exception to the
+order, decided by the owner: the first-message MINIMUM length runs after the greeting check, so a
+first message of "hi" gets the greeting reply and not "too short" (empty and too long still come
+first).
+
+Two copies of a question exist, and the types keep them apart:
+- `ModelCopy` (pass 1, made here): masked with the role's approved list, for models only. It
+  cannot be printed or joined into a string by accident, and nothing stores, logs or caches it;
+- `StoredQuery` (pass 2, `mask_for_storage`): made at answer time from the RAW question with only
+  the surviving documents' entries. This is the only copy that may be stored, logged or cached.
 
 The result carries what the trace needs (token count, the pattern NAMES that matched, mask counts,
 the time each step took) and never the query text except the MASKED copy.
@@ -16,10 +25,52 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.guardrails import messages
+from app.guardrails.allowlist import AllowList
 from app.guardrails.greeting import classify_greeting, greeting_reply
 from app.guardrails.injection import InjectionScan, scan_query
-from app.guardrails.limits import MAX_QUERY_TOKENS, MIN_FIRST_MESSAGE_CHARACTERS, check_limits
+from app.guardrails.limits import (
+    MAX_QUERY_TOKENS,
+    MIN_FIRST_MESSAGE_CHARACTERS,
+    check_limits,
+    is_too_short,
+)
 from app.guardrails.masking import Masker
+
+
+@dataclass(frozen=True)
+class ModelCopy:
+    """Pass 1: the question masked with the role's approved list. For models only (rewrite, the
+    Jev check, the embedding, the generator). It is not a string on purpose: formatting or logging
+    it raises, so it cannot reach a log, a trace, a cache key or a stored transcript by mistake."""
+
+    text: str
+
+    def __str__(self) -> str:
+        raise TypeError("a ModelCopy is for models only: store the StoredQuery (pass 2) instead")
+
+    def __repr__(self) -> str:
+        return f"ModelCopy(<{len(self.text)} characters, for models only>)"
+
+
+@dataclass(frozen=True)
+class StoredQuery:
+    """Pass 2: the question re-masked with ONLY the entries of the documents that survived
+    retrieval. The one copy that may be stored, logged or cached."""
+
+    text: str
+    counts: dict[str, int] = field(default_factory=dict)
+
+
+def mask_for_storage(
+    raw_query: str, *, masker: Masker, allow: AllowList, doc_ids: Collection[str]
+) -> StoredQuery:
+    """Pass 2, at answer time. `raw_query` is the question as typed (kept in memory by the caller
+    for this purpose only); `doc_ids` are the documents the answer was built from. `None` is
+    refused, because "every document" is the pass-1 scope, not this one."""
+    if doc_ids is None:
+        raise TypeError("pass 2 needs the ids of the surviving documents, not None")
+    result = masker.mask(raw_query.strip(), allow.terms(set(doc_ids)))
+    return StoredQuery(result.text, dict(result.counts))
 
 
 @dataclass
@@ -30,7 +81,7 @@ class ScanResult:
     tokens: int = 0
     approximate_tokens: bool = False
     injection: InjectionScan = field(default_factory=InjectionScan)
-    masked: str | None = None  # the query copy that may go to a model
+    masked: ModelCopy | None = None  # the pass-1 copy: for models only, never stored
     mask_counts: dict[str, int] = field(default_factory=dict)
     allowlisted: int = 0
     timings_ms: dict[str, float] = field(default_factory=dict)
@@ -48,12 +99,11 @@ def local_scan(
     clock = time.perf_counter
 
     started = clock()
-    limits = check_limits(query, first_message=first_message, counter=counter)
+    limits = check_limits(query, first_message=False, counter=counter)  # empty and too long
     timings["limits"] = (clock() - started) * 1000
     if not limits.ok:
         text = {
             "empty": messages.EMPTY_QUERY,
-            "too_short": messages.TOO_SHORT.format(minimum=MIN_FIRST_MESSAGE_CHARACTERS),
             "too_long": messages.TOO_LONG.format(limit=MAX_QUERY_TOKENS),
         }[limits.reason or "empty"]
         return ScanResult(
@@ -73,6 +123,12 @@ def local_scan(
             timings_ms=timings,
         )
 
+    if is_too_short(query, first_message=first_message):
+        text = messages.TOO_SHORT.format(minimum=MIN_FIRST_MESSAGE_CHARACTERS)
+        return ScanResult(
+            "refuse", "too_short", text, limits.tokens, limits.approximate, timings_ms=timings
+        )
+
     started = clock()
     injection = scan_query(query)
     timings["injection"] = (clock() - started) * 1000
@@ -87,7 +143,7 @@ def local_scan(
         limits.tokens,
         limits.approximate,
         injection,
-        masked.text,
+        ModelCopy(masked.text),
         dict(masked.counts),
         masked.kept,
         timings,

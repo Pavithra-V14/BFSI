@@ -28,17 +28,26 @@ DOCUMENT_PATTERNS: Patterns = (
     (
         "ignore_instructions",
         re.compile(
-            r"\b(ignore|disregard|forget|override)\b[^.\n]{0,25}\b(previous|prior|above|earlier|"
+            r"\b(ignore|disregard|forget)\b[^.\n]{0,25}\b(previous|prior|above|earlier|"
             r"preceding|system|all|any|your)\b[^.\n]{0,25}\b(instructions?|rules|prompts?|"
-            r"guidelines|directives?)\b",
+            r"guidelines|directives?)\b"
+            # "override" is also what a customer does to a standing instruction: it counts only
+            # when the assistant's own instructions are meant
+            r"|\boverride\b[^.\n]{0,25}\b(previous|prior|above|earlier|preceding|system|your)\b"
+            r"[^.\n]{0,25}\b(instructions?|rules|prompts?|guidelines|directives?)\b",
             _FLAGS,
         ),
     ),
     (
+        # "show the instructions for filing a claim" is an ordinary question: asking for the
+        # assistant's own prompt needs "your ...", "system prompt" or "the prompt you were given"
         "reveal_prompt",
         re.compile(
-            r"\b(reveal|show|print|repeat|output|display|leak)\b[^.\n]{0,20}\b(your|the)\b"
-            r"[^.\n]{0,12}\b(system prompt|prompt|instructions)\b",
+            r"\b(reveal|show|print|repeat|output|display|leak|dump)\b[^.\n]{0,20}\b(your|ur)\b"
+            r"[^.\n]{0,12}\b(system prompt|prompt|instructions|rules|guidelines)\b"
+            r"|\b(reveal|show|print|repeat|output|display|leak|dump)\b[^.\n]{0,20}\bsystem prompt\b"
+            r"|\b(prompt|instructions|rules) (that )?you (were|have been|are) "
+            r"(given|using|following)\b",
             _FLAGS,
         ),
     ),
@@ -70,8 +79,12 @@ _QUERY_STRONG_EXTRA: Patterns = (
     (
         "disable_safety",
         re.compile(
-            r"\b(disable|turn off|bypass|remove)\b[^.\n]{0,25}\b(safety|filters?|guardrails?|"
-            r"restrictions?|moderation)\b",
+            # a customer may well "remove the restrictions on my demat account": "remove" and
+            # "restrictions" count only when they are the assistant's own ("your restrictions")
+            r"\b(disable|turn off|bypass)\b[^.\n]{0,25}\b(safety|guardrails?|moderation|"
+            r"content filters?)\b"
+            r"|\b(disable|turn off|bypass|remove)\b[^.\n]{0,15}\byour\b[^.\n]{0,15}\b(safety|"
+            r"filters?|guardrails?|restrictions?|moderation|rules|limits)\b",
             _FLAGS,
         ),
     ),

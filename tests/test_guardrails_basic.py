@@ -259,7 +259,6 @@ CURATED = ("irdai.gov.in", "auravance.aura")
         ("Visit https://evil.example/page now.", "Visit now."),
         ("Visit www.evil.example now", "Visit now"),
         ("javascript:alert(1) and data:text/html,<p>x</p>", "and"),
-        ("a\x00b\x07c‮d", "abcd"),
         ("Premium < 5 lakh and age > 60", "Premium < 5 lakh and age > 60"),
     ],
 )

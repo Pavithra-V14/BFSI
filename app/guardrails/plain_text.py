@@ -19,7 +19,14 @@ from collections.abc import Iterable
 
 from app.guardrails.domains import domain_is_seeded
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‏‪-‮⁦-⁩]")
+# Control characters, plus the invisible ones (soft hyphen, grapheme joiner, Arabic letter mark,
+# Mongolian separator, zero-width and bidi characters, word joiner and invisible operators, BOM).
+# Built from code points so the file holds no invisible characters itself.
+_INVISIBLE = (0x00AD, 0x034F, 0x061C, 0x180E, 0xFEFF, *range(0x200B, 0x2010))
+_INVISIBLE += (*range(0x202A, 0x202F), *range(0x2060, 0x2070))
+_CONTROL = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f" + re.escape("".join(map(chr, _INVISIBLE))) + "]"
+)
 _BLOCKS = re.compile(r"<\s*(script|style)\b.*?<\s*/\s*\1\s*>|<!--.*?-->", re.IGNORECASE | re.DOTALL)
 _AUTOLINK = re.compile(r"<((?:https?|ftp)://[^>\s]+)>", re.IGNORECASE)
 _TAG = re.compile(r"</?[A-Za-z!?][^>]*>")
@@ -35,7 +42,7 @@ _TRAILING = ".,;:!?)]}"
 def _strip_html(text: str) -> str:
     for _ in range(3):  # entities may hide a tag ("&lt;script&gt;"): decode, strip, repeat
         before = text
-        text = html.unescape(text)
+        text = _CONTROL.sub("", html.unescape(text))  # entities can hide them ("&#8238;")
         text = _BLOCKS.sub("", text)
         text = _AUTOLINK.sub(r"\1", text)
         text = _TAG.sub("", text)

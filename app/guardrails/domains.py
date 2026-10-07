@@ -33,11 +33,22 @@ def curated_domains(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
     return (*SEED_DOMAINS, *company)
 
 
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://")
+_AUTHORITY_END = re.compile(r"[/?#\\\s]")  # a backslash ends it too: browsers treat "\" as "/"
+_HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
+
+
 def host_of(contact: str) -> str:
-    """The host of an email address or web address, lower-cased, without "www."."""
-    text = contact.strip().lower()
-    host = text.rsplit("@", 1)[1] if "@" in text else re.sub(r"^[a-z][a-z0-9+.-]*://", "", text)
-    return re.split(r"[/:?#\s]", host, maxsplit=1)[0].removeprefix("www.").strip(".")
+    """The host of an email address or web address, lower-cased, without "www.". Empty when it is
+    not a plain host name.
+
+    Only the AUTHORITY (the text before the first "/", "?", "#" or "\\") is looked at, and "user@"
+    is taken from there alone: in `https://evil.com/login?next=a@irdai.gov.in` the host is evil.com,
+    not what follows an "@" further on."""
+    text = _SCHEME.sub("", contact.strip().lower())
+    authority = _AUTHORITY_END.split(text, maxsplit=1)[0]
+    host = authority.rsplit("@", 1)[-1].split(":", 1)[0].removeprefix("www.").strip(".")
+    return host if _HOST.fullmatch(host) else ""
 
 
 def domain_is_seeded(contact: str, domains: Iterable[str]) -> bool:

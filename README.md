@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 6 built, awaiting the owner's approval (next is Phase 7)
+Current phase: Phase 6 hardened (round 2, the last), awaiting the owner's approval (next is Phase 7)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -269,8 +269,9 @@ secrets) and tell Claude.
   stay refused until a paid or zero-retention plan exists.
 - **Phase 6 (guardrails and masking).** Organisations, places and laws that the NER model finds are
   approved automatically and can include harmless words (for example "Facility"); masking must be
-  measured against them. `normalise_entity` also trims `; : ( ) [ ]` and a closing "." of a stored
-  term (for example "Pvt. Ltd." is stored as "Pvt. Ltd"): masking must use the same function.
+  measured against them. `normalise_entity` trims spaces, quotes, commas, `; : ( ) [ ]` from both
+  ends of a stored term and keeps a full stop (for example "Pvt. Ltd." is stored as "pvt. ltd."):
+  masking uses the same function, so the two always agree.
 - **Phase 10 (chat, session and admin API).** Allow-list rows are saved before the chunks are
   written, so a run that fails in between leaves rows for text that was never indexed (harmless);
   the admin entity endpoints should clean them up. The entity review does not group titled people
@@ -288,23 +289,40 @@ secrets) and tell Claude.
 These are the local checks around every question and answer. They run on Render, call no model and
 need no key. They are functions the pipeline (Phase 8) will call in the spec's order:
 
-1. **Local scan** (`app/guardrails/scan.py`): at most 100 tokens (never cut silently); a first
-   message of at least 10 characters (a follow-up only has to be non-empty); a whole-message greeting
-   or farewell gets a fixed reply; the injection regex is recorded; names, phones, emails and
+1. **Local scan** (`app/guardrails/scan.py`): at most 100 tokens (never cut silently); a
+   whole-message greeting or farewell gets a fixed reply (this is checked before the minimum, so a
+   first message of "hi" is answered, not refused); a first message of at least 10 characters (a
+   follow-up only has to be non-empty); the injection regex is recorded; names, phones, emails and
    identifiers (PAN, Aadhaar, cards, policy and account numbers) are replaced by `[PERSON]`,
    `[PHONE]`, `[EMAIL]` and `[ID]` before any model sees the question. Places are not masked.
+   Masking looks at a normal form of the text (full-width and Devanagari digits, odd spaces,
+   zero-width characters, dot or slash separators, numbers written in groups of digits) and replaces
+   the original characters. Names typed in capitals or in lowercase get a second look with the
+   name-like words capitalised; the approved-name list and the product-word protections still apply.
+   The result has two kinds of copy, and the code keeps them apart: `ModelCopy` (pass 1, for models
+   only; printing it raises an error) and `StoredQuery` (pass 2, `mask_for_storage`, made from the
+   raw question with only the surviving documents' names: the only copy that may be stored, logged
+   or cached).
 2. **Injection decision**: a strong regex hit or a Jev score of 0.85 or more blocks; a weak hit or a
-   score from 0.50 asks the user to reword. These numbers are starting values for the Phase 16
-   baseline.
+   score from 0.50 asks the user to reword. Ordinary questions such as "show the instructions for
+   filing a claim" or "how do I remove the restrictions on my demat account" are not attacks; asking
+   for the assistant's own prompt ("your instructions", "system prompt") is. These numbers are
+   starting values for the Phase 16 baseline.
 3. **Context guard**: drops chunks below a relevance of 0.30 and chunks that read like instructions
    to the model; if nothing is left the answer is a fixed refusal. What is left goes into the prompt
    between clear delimiters that a chunk cannot forge.
 4. **Output guard**: the answer must be JSON with citations; every number, percentage, date and
    amount must appear in the cited chunks; every citation must be a document the model was given; the
    words of the answer must be found in the cited text (0.6 to start). If a check fails the answer is
-   still returned, with a warning and the unchecked numbers marked, and it is not cached.
+   still returned, with a warning and the unchecked numbers marked, and it is not cached. There is
+   ONE flag, `grounded`: it is true only when the answer parsed, cites at least one real document,
+   every citation is real, every figure is backed and the words are covered. Any failed check
+   clears it.
 5. **Plain text**: model output is shown as plain text. HTML and markdown link syntax are removed; a
    web address stays only when its domain is a regulator's or the company's (`COMPANY_DOMAINS`).
+   The domain is the part before the first `/`, `?`, `#` or `\`, so `evil.com/x?next=a@irdai.gov.in`
+   does not pass as `irdai.gov.in`. Invisible and direction-changing characters are removed, also
+   when they were written as HTML entities.
 6. **Disclaimer**: added only for advice-like questions or answers with a financial figure.
 
 **Prompts** are files in `prompts/` named `name.v1.md`, each with the same sections (role, task,
@@ -313,12 +331,55 @@ file or a new version; its SHA-256 hash is recorded with every answer. The image
 table-summary prompts used by ingestion live there too, word for word as before.
 
 **Known limitations (recorded in Phase 6)**
-- **Phase 16 (baseline run).** The small spaCy model (`en_core_web_sm`) has limited recall for Indian
-  names: it misses some, and names typed in capitals are often missed. The name patterns catch "my name
-  is ...", "I am ..." and "Mr. ...", but a bare name can pass. All thresholds above are starting values.
-- **Phase 8 (pipeline) and Phase 15 (deployment).** The first masking call loads the model and takes
-  about 40 seconds on the admin machine (about 22 ms afterwards), so the API must warm it at start-up.
-  The model needs about 140 MB of memory in production.
+- **Phase 8 (pipeline).**
+  - Check a Jev injection score before using it: a NaN or out-of-range value falls through to "pass".
+  - Keep `MaskResult.spans` out of traces and logs (they show where in the text a name or number was
+    and how long it was).
+  - Fail closed: if the masker raises, refuse the question; never send the unmasked text on.
+  - Pass 2 is made from the RAW question kept in memory, after retrieval, with the ids of the
+    surviving documents (`mask_for_storage`); only that `StoredQuery` is stored, logged or cached,
+    and the cache also needs: no refusal, no low-confidence flag, an unchanged corpus version, and
+    `grounded` true with no warning.
+  - Load the masker in the background at start-up. Until it is ready, never skip masking: answer
+    "starting up, please retry".
+- **Phase 15 (deployment).** Deploy `prompts/` next to `app/` (the prompt load stops if the folder
+  is missing). Pin the `en_core_web_sm` wheel by hash (its direct link has none today). Measure the
+  total memory of the whole service against the 512 MB host (only the masker was measured: about 140
+  MB with the model loaded). Editing only the comments of a prompt file still changes its version.
+- **Phase 16 (baseline run).** Recall and precision items, all measured then:
+  - First masking task: add a short list of common Indian first names and surnames as a third
+    check, then re-run the 17 sample capitalised/lowercase names and the 34 ordinary sentences
+    (`CASED_NAMES` and `ORDINARY_CASED_TEXT` in `tests/test_guardrails_round2.py`).
+  - Masking: the small spaCy model (`en_core_web_sm`) has limited recall for Indian names. A name in
+    capitals or lowercase is found only when the model recognises it in a capitalised copy and it has
+    two words or more (for example "ask for priya nair" and "claim of deepak verma" were missed, and
+    "suresh kumar iyer" lost its first word); a person-like product name ("Jeevan Anand") is masked
+    unless an approved document names it. Labels beyond the list (UTR, RRN, transaction id, vehicle
+    registration, IMEI), numbers written in words, single-spaced digit groups, numbers split by a
+    line break, "name at example dot com", a PAN written with spaces, a labelled value longer than
+    25 characters, a fourth name word, and the word "Max" as a product tier are not handled or are
+    handled only in part.
+  - Injection: the regex does not undo zero-width characters, look-alike letters, leet-speak, base64
+    or rot13; the context guard does not scan the header fields of a chunk or look-alike brackets.
+  - Output guard: number words, signs, units glued to a number, a day and month without a year, and
+    `$` or USD amounts are not checked; a page or clause number counts as evidence; groundedness
+    ignores "not" and "no" (so "war risks are covered" scores as grounded against "war risks are not
+    covered"); a bare `evil.com/login` and a `mailto:` link in an answer are kept.
+  - Query token count: if the tokenizer file is missing, the fallback (length divided by 4) counts
+    non-Latin text too low; the flag `approximate_tokens` only reports it.
+  - Prompts: no check for a repeated header key; a line starting with "## " inside an example starts
+    a new section (the load then refuses the file, which is safe).
+  - Isolation: the import test does not see relative imports, `importlib` or `__import__`; nothing
+    yet catches Phase 8 building the masker at import time; two requests masking at the same moment
+    are not tested.
+  - All thresholds above are starting values.
+- **Measured on the admin machine** (Intel Core i5-6300U, 2 cores, 7.9 GB, Windows 10, Python 3.12):
+  the first masking call loads the model and takes about 40 seconds (46.6 s with imports); after that
+  the whole local scan, including the second look at capitals and lowercase names, took a mean of
+  19 ms, a median of 18 ms and a 95th percentile of 30 ms over 80 questions (the slowest took 83 ms).
+  The unit tests check that every step is timed and the steps add up; they
+  no longer assert a number of milliseconds, because that fails on a busy machine for no reason in
+  the code.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

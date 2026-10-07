@@ -25,6 +25,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from app.guardrails.context import neutralise
+
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 SECTIONS = (
     "Role",
@@ -172,8 +174,9 @@ def describe_prompts(counter: Any, prompts: Mapping[str, Prompt] | None = None) 
 
 def assemble_answer(prompt: Prompt, context_block: str, question: str) -> str:
     """The generation prompt (spec 4.1 step 13): static instructions first, then the labelled
-    chunks, then the question. No history, ever."""
-    return f"{prompt.render()}\n\nDOCUMENTS\n{context_block}\n\nQUESTION\n{question}"
+    chunks, then the question. No history, ever. The question is neutralised like a chunk: it
+    cannot open or close a `<<<DOCUMENT ...>>>` block."""
+    return f"{prompt.render()}\n\nDOCUMENTS\n{context_block}\n\nQUESTION\n{neutralise(question)}"
 
 
 def assemble_rewrite(prompt: Prompt, summary: str, recent: str, message: str) -> str:

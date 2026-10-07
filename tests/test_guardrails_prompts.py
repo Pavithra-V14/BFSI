@@ -276,12 +276,15 @@ def test_the_rewrite_prompt_carries_the_static_bfsi_checklist_and_the_inputs():
     assert "(none)" in assemble_rewrite(prompt, "", "", "hello there friend")
 
 
-def test_the_answer_prompt_has_no_secrets_and_no_links():
-    text = get_prompt("answer").text().lower()
-    for word in ("api_key", "token", "password", "secret", "http://", "https://"):
-        if word in ("http://", "https://"):
-            continue  # the bad example names a link on purpose
-        assert word not in text
+def test_the_answer_prompt_has_no_secrets_and_no_links_outside_the_bad_example():
+    prompt = get_prompt("answer")
+    for word in ("api_key", "token", "password", "secret"):
+        assert word not in prompt.text().lower()
+    for name, body in prompt.sections.items():
+        if name != "Bad example":  # the bad example names a link on purpose
+            assert "http://" not in body.lower() and "https://" not in body.lower(), name
+            assert "www." not in body.lower(), name
+    assert "http" in prompt.sections["Bad example"]  # it really does, so this test can fail
 
 
 # ---- length is tracked and kept short --------------------------------------------------------

@@ -11,8 +11,12 @@ Checks a model's answer against the chunks it was given:
 4. lexical groundedness: the share of the answer's content words (stemmed with the project's own
    tokenizer) found in the cited chunks must reach the threshold [T 0.6].
 When the numeric or citation check fails the answer is NOT withheld: it is returned with a warning
-and the unverified numbers marked. A failed groundedness check also warns and clears `grounded`.
-Any warning means the answer is not cached and does not feed history (spec 8.6, 10.2).
+and the unverified numbers marked. `grounded` is ONE flag (owner decision): it is True only when
+the schema is valid, an answer cites at least one real chunk, every citation is a real one, every
+figure is backed by the cited chunks and the words are covered; any failed check clears it. Any
+warning (or a schema failure) means the answer is not cached and does not feed history
+(spec 8.6, 10.2). The cache rule of Phase 8 also needs: no refusal, no low-confidence flag, the
+corpus version unchanged, and the stored question is the pass-2 copy.
 
 The answer text is turned into plain text first (HTML and links stripped). Nothing here keeps or
 logs the answer: the verdict carries counts, labels and the figures that failed.
@@ -51,7 +55,7 @@ def parse_answer(raw: str | Mapping) -> tuple[Answer | None, str | None]:
     if isinstance(raw, str):
         try:
             data = json.loads(_FENCE.sub("", raw))
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: absurdly deep nesting
             return None, "not_json"
     if not isinstance(data, Mapping):
         return None, "not_an_object"
@@ -88,7 +92,7 @@ _MONTHS = {
 }  # fmt: skip
 _MONTH = (
     r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
-    r"sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
 _NUM = r"\d[\d,]*(?:\.\d+)?"
 _MULTIPLIERS = {
@@ -159,16 +163,16 @@ def extract_figures(text: str) -> list[Figure]:
         for match in pattern.finditer(text):
             g = match.groups()
             if index == 0:
-                key = _iso(g[2], _MONTHS[g[1].lower()], g[0])
+                key = _iso(g[2], _MONTHS.get(g[1].lower(), 0), g[0])
             elif index == 1:
-                key = _iso(g[2], _MONTHS[g[0].lower()], g[1])
+                key = _iso(g[2], _MONTHS.get(g[0].lower(), 0), g[1])
             elif index == 2:
                 key = _iso(g[0], int(g[1]), g[2])
             else:
                 key = _iso(g[2], int(g[1]), g[0])
             add(match, key)
     for match in _MONTH_YEAR.finditer(text):
-        add(match, _iso(match.group(2), _MONTHS[match.group(1).lower()]))
+        add(match, _iso(match.group(2), _MONTHS.get(match.group(1).lower(), 0)))
     for match in _PERCENT.finditer(text):
         value = _value(match.group(1))
         add(match, f"pct:{value}" if value else None)
@@ -264,7 +268,9 @@ class OutputVerdict:
 
     @property
     def has_warning(self) -> bool:
-        return bool(self.warnings)
+        """Anything that must keep this answer out of the cache and out of history: a warning, or
+        an answer that did not even parse (it has no warning text, there is nothing to show)."""
+        return bool(self.warnings) or not self.schema_ok
 
 
 def check_output(
@@ -293,7 +299,11 @@ def check_output(
     verdict.unverified = unverified
     verdict.numeric_ok = not unverified
     verdict.coverage = coverage(text, cited_chunks) if cited_chunks else 0.0
-    verdict.grounded = bool(cited_chunks) and verdict.coverage >= min_coverage
+    # ONE flag: any failed check (a bad or missing citation, an unbacked figure, thin coverage)
+    # clears it, so Phase 8 has a single value to cache on
+    verdict.grounded = (
+        bool(cited_chunks) and not bad and not unverified and verdict.coverage >= min_coverage
+    )
     if unverified:
         verdict.marked_text = mark_figures(text, unverified)
         verdict.warnings.append(

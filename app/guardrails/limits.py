@@ -24,6 +24,14 @@ class LimitResult:
     approximate: bool  # True when the tokenizer file was unavailable and the count is an estimate
 
 
+def is_too_short(
+    text: str, *, first_message: bool, min_characters: int = MIN_FIRST_MESSAGE_CHARACTERS
+) -> bool:
+    """The first-message minimum alone (the scan runs it after the greeting check, so that "hi" on
+    the first message gets the greeting reply and not "too short")."""
+    return first_message and 0 < len(text.strip()) < min_characters
+
+
 def check_limits(
     text: str,
     *,
