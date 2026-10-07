@@ -92,7 +92,12 @@ def test_set_role_runs_under_the_table_lock_and_writes_its_audit_row(db):
     )
     rows = db.query_all("SELECT actor, action, target, details FROM audit_log")
     assert [(a, act, t, json.loads(d)) for a, act, t, d in rows] == [
-        (boss.id, "role_change", member.id, {"from": "customer", "to": "staff"})
+        (
+            boss.id,
+            "role_change",
+            member.id,
+            {"from": "customer", "sessions_reset": 0, "to": "staff"},
+        )
     ]
 
 
