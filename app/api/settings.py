@@ -126,7 +126,7 @@ def check_secret(value: str, name: str) -> None:
     )
     if (
         lowered in _PLACEHOLDER_EXACT
-        or lowered.startswith(_PLACEHOLDER_START)
+        or (lowered.startswith(_PLACEHOLDER_START) and not _is_generated_shape(value))
         or len(set(value)) < minimum_distinct
         or _repeats_a_pattern(value)
         or _has_a_run(lowered)
@@ -135,6 +135,22 @@ def check_secret(value: str, name: str) -> None:
             f"{name} does not look random (a placeholder, a repeated pattern or a keyboard "
             "run): generate a new one with the command in .env.example"
         )
+
+
+GENERATED_LENGTH = 43  # secrets.token_urlsafe(32): 32 random bytes as 43 URL-safe characters
+GENERATED_MIN_DISTINCT = 20  # a random one has about 33; a typed placeholder has far fewer
+_URLSAFE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _is_generated_shape(value: str) -> bool:
+    """The exact shape `secrets.token_urlsafe(32)` makes. A random key of this shape can start with
+    "xxx" or "todo" by chance (about 1 in 25,000), which must not make it a "placeholder"; every
+    other rule (distinct characters, repeats, runs, related keys) still applies to it."""
+    return (
+        len(value) == GENERATED_LENGTH
+        and _URLSAFE.fullmatch(value) is not None
+        and len(set(value)) >= GENERATED_MIN_DISTINCT
+    )
 
 
 def _repeats_a_pattern(value: str) -> bool:

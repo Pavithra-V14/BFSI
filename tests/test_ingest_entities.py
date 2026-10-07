@@ -45,7 +45,6 @@ def test_a_sentence_boundary_stops_the_name_of_a_law():
         ("Write to care@auravance.aura today", "care@auravance.aura", "helpline"),
         ("Visit https://www.irdai.gov.in/page now", "https://www.irdai.gov.in/page", "helpline"),
         ("Call 1800-425-4000 any day", "1800-425-4000", "helpline"),
-        ("Call +91 9876543210 for help", "+91 9876543210", "helpline"),
         ("IFSC code HDFC0001234 applies", "HDFC0001234", "product"),
         ("CIN U65110MH2026PTC384152 is listed", "U65110MH2026PTC384152", "product"),
         ("Plan code HLT-2026 is covered", "HLT-2026", "product"),

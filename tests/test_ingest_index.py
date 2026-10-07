@@ -395,7 +395,7 @@ def test_bad_doc_type_and_role_are_refused(rig):
 
 def test_a_second_ingest_after_a_first_is_audited_as_a_reindex(rig):
     rig.ingest(parsed(*sample_elements()))
-    rig.ingest(parsed(*sample_elements()))
+    rig.ingest(parsed(*sample_elements(), para("3.1 A new rule appears.")))
     actions = [r[0] for r in rig.db.query_all("SELECT action FROM audit_log ORDER BY created_at")]
     assert actions == ["ingest", "reindex"]
 

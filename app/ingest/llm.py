@@ -57,7 +57,9 @@ class LlmTools:
         )
         return " ".join(result.text.split())[:SUMMARY_MAX_CHARS]
 
-    def label(self, text: str) -> str:
+    def label(self, text: str) -> str | None:
+        """A clause category, "general" when the decider is unsure, or None when no decider answered
+        at all (the caller must not save that)."""
         result = self.runner.run(
             self.gateway.decide(
                 [questions.clause_label()],
@@ -67,7 +69,7 @@ class LlmTools:
             )
         )
         if result.answers is None:
-            return "general"
+            return None
         answer = result.answers.get("clause_label")
         option = getattr(answer, "option", None)
         if option in questions.CLAUSE_LABELS and getattr(answer, "confidence", 0) >= (

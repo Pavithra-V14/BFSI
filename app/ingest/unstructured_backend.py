@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from app.ingest.model import Element
-from app.ingest.table_grid import box_from_pixels, grid_rows, read_layout
+from app.ingest.table_grid import box_from_pixels, grid_with_loss, read_layout
 
 _KINDS = {
     "Title": "title",
@@ -74,6 +74,7 @@ def element_from_unstructured(
     html: str | None = None,
     image_base64: str | None = None,
     grid: tuple[tuple[str, ...], ...] | None = None,
+    lost_words: int = 0,
 ) -> Element | None:
     """One Unstructured element as ours, or None for a kind we do not use (headers, footers and
     page numbers are page furniture, not content).
@@ -88,7 +89,7 @@ def element_from_unstructured(
         rows = grid or rows_from_html(html)
         if not rows and not text:
             return None
-        return Element("table", text, page, rows=rows)
+        return Element("table", text, page, rows=rows, lost_words=lost_words if grid else 0)
     if kind == "image":
         try:
             data = base64.b64decode(image_base64 or "", validate=True)
@@ -128,7 +129,7 @@ def parse_page(path: Path, number: int) -> list[Element]:
     found: list[Element] = []
     for item in raw:
         meta = item.metadata
-        grid = None
+        grid, lost = None, 0
         coordinates = getattr(meta, "coordinates", None)
         if item.category == "Table" and layout is not None and coordinates is not None:
             box = box_from_pixels(
@@ -137,7 +138,7 @@ def parse_page(path: Path, number: int) -> list[Element]:
                 coordinates.system.width,
                 coordinates.system.height,
             )
-            grid = grid_rows(layout, box)
+            grid, lost = grid_with_loss(layout, box)
         element = element_from_unstructured(
             item.category,
             item.text,
@@ -145,6 +146,7 @@ def parse_page(path: Path, number: int) -> list[Element]:
             html=getattr(meta, "text_as_html", None),
             image_base64=getattr(meta, "image_base64", None),
             grid=grid,
+            lost_words=lost,
         )
         if element is not None:
             found.append(element)

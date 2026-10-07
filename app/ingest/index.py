@@ -38,6 +38,7 @@ from app.accounts.tokens import utc_text
 from app.cache.store import CacheStore
 from app.db.connection import Database
 from app.gateway.embeddings import DIMENSIONS, vectors_ok
+from app.ingest import pending
 from app.ingest.chunker import TokenCount, chunk_document
 from app.ingest.identity import Identified, assign_identities, image_source, point_id
 from app.ingest.lock import document_lock
@@ -52,6 +53,7 @@ from app.ingest.model import (
     ParsedDocument,
     check_choice,
     check_doc_id,
+    refuse_customer_document,
 )
 from app.store_errors import call_vector
 from app.vector import sparse
@@ -60,6 +62,7 @@ from app.vector.documents import (
     DENSE_VECTOR,
     SPARSE_VECTOR,
     checked_payload,
+    checked_update,
     chunk_is_active,
 )
 
@@ -85,16 +88,20 @@ class IngestContext:
     embed: Embed
     count: TokenCount
     lock_dir: Path
+    marker_dir: Path
     enrich: Enricher | None = None
     collection: str = COLLECTION
     actor: str = "cli"
+    # Customer-specific documents are refused until a paid or zero-retention plan exists
+    # (Phase 16); this is the one switch that will allow them.
+    accept_customer_documents: bool = False
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
 @dataclass
 class IngestResult:
     doc_id: str
-    status: str  # ok | unchanged | failed_pages
+    status: str  # ok | unchanged | finished | failed_pages
     new: int = 0
     changed: int = 0
     unchanged: int = 0
@@ -106,7 +113,7 @@ class IngestResult:
 
     @property
     def complete(self) -> bool:
-        return self.status in ("ok", "unchanged") and not self.incomplete
+        return self.status in ("ok", "unchanged", "finished") and not self.incomplete
 
 
 @dataclass
@@ -211,10 +218,13 @@ def plan_changes(doc_id: str, identified: list[Identified], existing: list[Exist
         else:
             still.append(ident)
 
-    # 3. The rest are new. A computed id that is already taken gets a salt.
+    # 3. The rest are new. A computed id that is already taken gets a salt. "Taken" includes the
+    # id of a stored current chunk that matched nothing: it is about to be removed, and a new chunk
+    # that reused its id would be deactivated by that same removal.
+    unmatched = {item.id for item in current if item.id not in claimed}
     for ident in still:
         chunk_id, salt = ident.chunk_id, 0
-        while chunk_id in used:
+        while chunk_id in used or chunk_id in unmatched:
             salt += 1
             chunk_id = point_id(doc_id, f"{ident.key}~s{salt}", ident.chunk.part_index)
         ident.chunk_id = chunk_id
@@ -306,6 +316,8 @@ def ingest_document(
     check_doc_id(request.doc_id)
     check_choice(request.doc_type, DOC_TYPES, "doc_type")
     check_choice(request.access_role, ACCESS_ROLES, "access_role")
+    if not ctx.accept_customer_documents:
+        refuse_customer_document(request.doc_type)
     with document_lock(ctx.lock_dir, request.doc_id):
         return _ingest_locked(ctx, request, parsed)
 
@@ -396,7 +408,17 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
                 name in updates for name in ("access_role", "product_line")
             )
     removed_ids = [e.id for e in plan.removed]
-    removed_payload = {"effective_to": now_text}
+    # A removed chunk is inactive at once and also leaves the review state: a held or rejected
+    # chunk whose clause is gone must not stay "current" or be approvable later.
+    removed_payload = checked_update(
+        {"effective_to": now_text, "quarantine": None, "quarantine_reason": None}, now=now
+    )
+    refreshed = [(point, checked_update(updates, now=now)) for point, updates in refreshed]
+
+    needs_finish = any_change or permission_changed
+    redo = not needs_finish and pending.is_pending(ctx.marker_dir, request.doc_id)
+    if needs_finish:  # before the first write, so even a crash in between is found next time
+        pending.mark(ctx.marker_dir, request.doc_id, now, "ingest")
 
     def write() -> None:
         for batch in _batches(points, UPSERT_BATCH):
@@ -409,21 +431,20 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
     call_vector(write)
 
     incomplete: list[str] = []
-    if any_change or permission_changed:
-        if ctx.cache.bump_corpus_version() is None:
-            incomplete.append("the corpus version was not bumped")
-        failed_chunks = sum(
-            ctx.cache.invalidate_chunk(chunk_id) is None
-            for chunk_id in [e.id for _, e in plan.changed] + removed_ids
+    if needs_finish or redo:
+        incomplete = pending.finish_cache_steps(
+            ctx.cache,
+            ctx.marker_dir,
+            request.doc_id,
+            chunk_ids=[e.id for _, e in plan.changed] + removed_ids if needs_finish else [],
+            whole_document=bool(plan.new or permission_changed) or redo,
+            now=now,
+            reason="ingest",
         )
-        if failed_chunks:
-            incomplete.append(f"{failed_chunks} chunk cache invalidation(s) failed")
-        if (plan.new or permission_changed) and ctx.cache.invalidate_doc(request.doc_id) is None:
-            incomplete.append("the document cache invalidation failed")
 
     result = IngestResult(
         request.doc_id,
-        "ok" if (any_change or permission_changed) else "unchanged",
+        "ok" if needs_finish else ("finished" if redo else "unchanged"),
         new=len(plan.new),
         changed=len(plan.changed),
         unchanged=len(plan.unchanged),
@@ -432,6 +453,8 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
         incomplete=incomplete,
         images_skipped=images_skipped,
     )
+    if not (needs_finish or redo):
+        return result  # a true no-op: nothing written, bumped, cleared or audited
     first_time = not any(is_current(e.payload) for e in existing)
     with ctx.db.transaction(write=True):
         write_audit(
@@ -446,6 +469,7 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
                 "removed": result.removed,
                 "doc_version": doc_version,
                 "incomplete": bool(incomplete),
+                "finished_earlier_run": redo,
             },
             now=now,
         )

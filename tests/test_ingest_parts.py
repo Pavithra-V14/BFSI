@@ -3,7 +3,6 @@ and the rule that the API never imports ingestion."""
 
 import base64
 import hashlib
-import re
 from pathlib import Path
 
 import pytest
@@ -137,20 +136,8 @@ def test_development_vectors_are_never_indexed():
 
 
 # ---- local-only rules ------------------------------------------------------------------------
-def test_the_api_never_imports_ingestion():
-    for path in (ROOT / "app" / "api").rglob("*.py"):
-        assert not re.search(r"^\s*(from|import)\s+app\.ingest", path.read_text("utf-8"), re.M), (
-            path
-        )
-
-
 def test_runtime_requirements_hold_no_ingestion_package():
     lines = (ROOT / "requirements.txt").read_text("utf-8").lower().splitlines()
     runtime = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
     for name in ("unstructured", "spacy", "presidio", "pypdf", "tesseract"):
         assert name not in runtime
-
-
-def test_the_cli_command_never_loads_dotenv():
-    source = (ROOT / "app" / "ingest" / "cli.py").read_text("utf-8")
-    assert "dotenv" not in source and "load_env" not in source

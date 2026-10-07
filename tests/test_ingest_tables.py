@@ -11,60 +11,122 @@ from app.ingest.model import Element
 from app.ingest.parse import drop_page_furniture, parse_pdf
 from app.ingest.table_grid import PageLayout, Word, box_from_pixels, grid_rows
 from app.ingest.unstructured_backend import element_from_unstructured
-from tests.ingest_fixtures import para, parsed, table, title, words
+from tests.ingest_fixtures import para, parsed, table, words
 
 SAMPLES = Path(__file__).resolve().parents[1] / "spec" / "samples" / "company"
 
 
 # ---- page furniture --------------------------------------------------------------------------
-def three_pages():
-    header, footer = "Insurance | AuraVance | Policy Guide", "Document code AV-1 | Page {} of 3"
+HEADER = "Insurance | AuraVance | Policy Guide"
+FOOTER = "Document code AV-1 | Page {} of 3"
+
+
+def page(number, *middle, header=True, footer=True):
     elements = []
-    for page in (1, 2, 3):
-        elements += [
-            Element("title", header, page),
-            Element("title", f"Part {page}. Real heading", page),
-            Element("text", f"Real body text for page {page}.", page),
-            Element("text", footer.format(page), page),
-        ]
+    if header:
+        elements.append(Element("title", HEADER, number))
+    elements += [Element(kind, text, number) for kind, text in middle]
+    if footer:
+        elements.append(Element("text", FOOTER.format(number), number))
+    return elements
+
+
+def three_pages():
+    elements = []
+    for n in (1, 2, 3):
+        elements += page(
+            n, ("title", f"Part {n}. Real heading"), ("text", f"Real body for page {n}.")
+        )
     return elements
 
 
 def test_running_headers_and_footers_are_dropped_and_real_content_is_kept():
-    kept, dropped = drop_page_furniture(three_pages(), 3)
-    assert dropped == 6
+    kept, removed = drop_page_furniture(three_pages(), 3)
+    assert len(removed) == 6
+    assert (1, HEADER) in removed and (2, FOOTER.format(2)) in removed
     assert [e.text for e in kept if e.page == 2] == [
         "Part 2. Real heading",
-        "Real body text for page 2.",
+        "Real body for page 2.",
     ]
 
 
+def test_a_document_under_three_pages_is_never_touched():
+    two = [e for e in three_pages() if e.page < 3]
+    assert drop_page_furniture(two, 2) == (two, [])
+    # a failed page does not count as a parsed page either
+    assert drop_page_furniture(three_pages(), 2) == (three_pages(), [])
+
+
+def test_a_repeated_line_in_the_middle_of_a_page_is_never_furniture():
+    elements = []
+    for n in (1, 2, 3):
+        elements += page(
+            n,
+            ("text", f"Real first paragraph {n}."),
+            ("text", "Not applicable."),  # repeated on every page, but not at an edge
+            ("text", f"Real last paragraph {n}."),
+            ("text", f"One more real paragraph {n}."),
+            ("text", f"Another real paragraph {n}."),
+            ("text", f"Closing real paragraph {n}."),
+            ("text", f"Final real paragraph {n}."),
+        )
+    kept, removed = drop_page_furniture(elements, 3)
+    assert sum(1 for e in kept if e.text == "Not applicable.") == 3
+    assert {text for _, text in removed} == {
+        HEADER,
+        FOOTER.format(1),
+        FOOTER.format(2),
+        FOOTER.format(3),
+    }
+
+
+def test_a_repeated_line_after_a_real_one_at_the_edge_stays():
+    elements = []
+    for n in (1, 2, 3):
+        elements += [
+            Element("title", f"Section {n}. Real", n),
+            Element(
+                "title", "Not applicable.", n
+            ),  # repeated, second from the top, behind a real line
+            Element("text", f"Body {n}.", n),
+        ]
+    kept, removed = drop_page_furniture(elements, 3)
+    assert removed == [] and kept == elements
+
+
+def test_a_long_repeated_line_is_content_not_furniture():
+    long_line = "This clause is repeated word for word on every page " + "and goes on " * 10
+    assert len(long_line.split()) > 25
+    elements = []
+    for n in (1, 2, 3):
+        elements += [Element("text", f"Body {n}.", n), Element("text", long_line, n)]
+    kept, removed = drop_page_furniture(elements, 3)
+    assert removed == [] and kept == elements
+
+
 def test_a_line_on_too_few_pages_is_content_not_furniture():
-    elements = three_pages() + [Element("text", "Only on one page.", 1)]
+    elements = three_pages() + [Element("text", "Only on page one.", 1)]
     kept, _ = drop_page_furniture(elements, 3)
-    assert any(e.text == "Only on one page." for e in kept)
-    two_of_ten = [Element("text", "Seen twice.", 1), Element("text", "Seen twice.", 4)]
-    assert drop_page_furniture(two_of_ten, 10)[1] == 0  # 2 of 10 pages is below 60%
+    assert any(e.text == "Only on page one." for e in kept)
+    two_of_ten = [Element("text", "Seen twice.", p) for p in (1, 4)]
+    two_of_ten += [Element("text", f"Body {p}.", p) for p in range(1, 11)]
+    assert drop_page_furniture(two_of_ten, 10)[1] == []  # 2 of 10 pages is below 60%
 
 
 def test_tables_and_images_are_never_dropped_as_furniture():
     same = [Element("table", "a b", p, rows=(("a", "b"),)) for p in (1, 2, 3)]
     same += [Element("image", "", p, image=b"x") for p in (1, 2, 3)]
-    assert drop_page_furniture(same, 3) == (same, 0)
+    assert drop_page_furniture(same, 3) == (same, [])
 
 
-def test_a_one_page_document_has_no_furniture():
-    elements = [Element("text", "Same.", 1), Element("text", "Same.", 1)]
-    assert drop_page_furniture(elements, 1) == (elements, 0)
-
-
-def test_the_parser_reports_how_much_furniture_it_removed():
+def test_the_parser_lists_every_line_it_removed_and_counts_them():
     pages = {n: [e for e in three_pages() if e.page == n] for n in (1, 2, 3)}
     document = parse_pdf(Path("x.pdf"), page_count=3, parse_page=lambda p, n: pages[n])
-    assert document.furniture_dropped == 6 and len(document.elements) == 6
+    assert document.furniture_dropped == 6 == len(document.furniture)
+    assert len(document.elements) == 6 and (3, FOOTER.format(3)) in document.furniture
 
 
-def test_a_failed_page_does_not_hide_furniture_on_the_others():
+def test_a_failed_page_leaves_two_parsed_pages_so_nothing_is_removed():
     pages = {n: [e for e in three_pages() if e.page == n] for n in (1, 2, 3)}
 
     def parse_page(path, n):
@@ -73,7 +135,31 @@ def test_a_failed_page_does_not_hide_furniture_on_the_others():
         return pages[n]
 
     document = parse_pdf(Path("x.pdf"), page_count=3, parse_page=parse_page)
-    assert document.furniture_dropped == 4 and [f.page for f in document.failed_pages] == [3]
+    assert document.furniture_dropped == 0 and [f.page for f in document.failed_pages] == [3]
+
+
+def test_a_page_that_parses_to_nothing_counts_as_a_failed_page():
+    def parse_page(path, n):
+        return [] if n == 2 else [Element("text", f"Body {n}.", n)]
+
+    document = parse_pdf(Path("x.pdf"), page_count=3, parse_page=parse_page)
+    assert [(f.page, f.reason) for f in document.failed_pages] == [(2, "EmptyPage")]
+    blank = [Element("text", "   ", 2)]  # only whitespace: still nothing
+    document = parse_pdf(
+        Path("x.pdf"),
+        page_count=2,
+        parse_page=lambda p, n: blank if n == 2 else [Element("text", "x", 1)],
+    )
+    assert [f.page for f in document.failed_pages] == [2]
+
+
+def test_a_table_that_lost_words_is_reported_as_a_warning_with_page_and_count_only():
+    def parse_page(path, n):
+        table = Element("table", "a b", n, rows=(("a", "b"),), lost_words=3 if n == 2 else 0)
+        return [table, Element("text", f"Body {n}.", n)]
+
+    document = parse_pdf(Path("x.pdf"), page_count=3, parse_page=parse_page)
+    assert document.warnings == ["page 2: a table lost 3 word(s)"]
 
 
 def test_unstructured_headers_and_footers_are_not_content():
@@ -82,19 +168,20 @@ def test_unstructured_headers_and_footers_are_not_content():
 
 
 def test_a_footer_no_longer_ends_up_inside_the_last_clause():
-    elements = [
-        title("Section 5. Role"), para("AuraVance solicits and services this policy."),
-        para("Document code AV-1 | Page 1 of 3"),
-        title("Section 6. Claims"), para("Notify the insurer at once."),
-        para("Document code AV-1 | Page 2 of 3"),
-        para("Document code AV-1 | Page 3 of 3", 3),
-    ]  # fmt: skip
-    elements = [
-        Element(e.kind, e.text, 1 if i < 3 else 2 if i < 6 else 3) for i, e in enumerate(elements)
-    ]
+    elements = []
+    for n, (heading, body) in enumerate(
+        [
+            ("Section 5. Role", "AuraVance services this policy."),
+            ("Section 6. Claims", "Notify the insurer."),
+            ("Section 7. End", "Final words."),
+        ],
+        start=1,
+    ):
+        elements += page(n, ("title", heading), ("text", body))
     kept, _ = drop_page_furniture(elements, 3)
     chunks = chunk_document(parsed(*kept), words).chunks
-    assert all("Document code" not in c.text for c in chunks)
+    assert all("Document code" not in c.text and "AuraVance |" not in c.text for c in chunks)
+    assert [c.clause_ref for c in chunks] == ["5", "6", "7"]
 
 
 # ---- clause labels -----------------------------------------------------------------------------

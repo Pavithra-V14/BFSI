@@ -32,6 +32,18 @@ def check_choice(value: str, allowed: tuple[str, ...], name: str) -> str:
     return value
 
 
+CUSTOMER_REFUSAL = (
+    "customer-specific documents are not accepted yet: even without captions or labels, their "
+    "text would be sent to a model provider to be embedded. They stay refused until a paid or "
+    "zero-retention plan is in place (Phase 16)."
+)
+
+
+def refuse_customer_document(doc_type: str) -> None:
+    if doc_type == "customer-specific":
+        raise IngestError(CUSTOMER_REFUSAL)
+
+
 @dataclass(frozen=True)
 class Element:
     """One typed piece of a page, as the parser reports it."""
@@ -41,6 +53,7 @@ class Element:
     page: int
     rows: tuple[tuple[str, ...], ...] = ()  # a table's rows; the first row is the header
     image: bytes | None = None
+    lost_words: int = 0  # words of a table that fell outside the rebuilt grid (table_grid.py)
 
 
 @dataclass(frozen=True)
@@ -55,7 +68,12 @@ class ParsedDocument:
     page_count: int
     failed_pages: list[FailedPage] = field(default_factory=list)
     parser: str = "unstructured"
-    furniture_dropped: int = 0  # running headers and footers removed (parse.py)
+    furniture: list[tuple[int, str]] = field(default_factory=list)  # (page, text) removed
+    warnings: list[str] = field(default_factory=list)  # page numbers and counts only
+
+    @property
+    def furniture_dropped(self) -> int:
+        return len(self.furniture)
 
 
 @dataclass

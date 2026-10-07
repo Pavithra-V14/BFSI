@@ -33,7 +33,23 @@ from app.ingest.model import DocRequest
 
 AUTO_APPROVE_PROBABILITY = 0.85  # [P] a "public term" answer this confident is approved
 AUTO_KINDS = frozenset({"law", "regulator", "organisation", "place", "helpline"})
+# An email address or web address is only a "helpline" when its domain is a curated seed (a
+# regulator, or the company's own domain). Any other one is "contact": it always waits for the
+# reviewer and is never put to a model question, because it could be personal.
+PENDING_KINDS = frozenset({"contact"})
 CONTEXT_CHARS = 160
+
+# Regulator domains (a name matches the domain itself and any sub-domain of it).
+SEED_DOMAINS = (
+    "irdai.gov.in",
+    "sebi.gov.in",
+    "rbi.org.in",
+    "npci.org.in",
+    "amfiindia.com",
+    "scores.gov.in",
+)
+# The company's own domain for the sample documents (spec 20); the real one is COMPANY_DOMAINS [T].
+DEFAULT_COMPANY_DOMAINS = ("auravance.aura",)
 
 SEED_REGULATORS = (
     "IRDAI",
@@ -57,9 +73,9 @@ NER_KINDS = {
     "GPE": "place",
     "LOC": "place",
     "LAW": "law",
-    "EMAIL_ADDRESS": "helpline",
-    "URL": "helpline",
-    "PHONE_NUMBER": "helpline",
+    "EMAIL_ADDRESS": "contact",
+    "URL": "contact",
+    "PHONE_NUMBER": None,  # a number is never allow-listed on NER's word (it could be personal)
     "LOCATION": "place",
     "NRP": None,
 }
@@ -84,7 +100,11 @@ _NAME_LEAD_IN = frozenset(
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _URL = re.compile(r"(?:https?://|www\.)[^\s)>\],;]+")
 _TOLL_FREE = re.compile(r"\b1(?:800|860)[ -]?\d{2,3}[ -]?\d{3,4}\b")
-_MOBILE = re.compile(r"(?:\+91[ -]?)?\b[6-9]\d{9}\b")
+# A short helpline code (1930, 14447 ...) counts only right after a word like "helpline", "call" or
+# "dial"; a bare four- or five-digit number is a year, an amount or a clause number.
+_SHORT_CODE = re.compile(
+    r"(?i:helpline|toll[- ]?free|dial|call)[^.\n]{0,40}?\b(1\d{3,5})\b(?![ -]?\d)"
+)
 _IFSC = re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b")
 _CIN = re.compile(r"\b[LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b")
 _PRODUCT_CODE = re.compile(r"\b[A-Z]{2,6}[-/]\d{2,6}(?:[-/][A-Z0-9]+)?\b")
@@ -119,6 +139,15 @@ def clean_ner_text(text: str, kind: str) -> str | None:
     if kind == "person_in_policy" and len(words) < 2:
         return None
     return text
+
+
+def domain_is_seeded(contact: str, domains: Iterable[str]) -> bool:
+    """True when an email address or web address belongs to one of the curated domains (the
+    domain itself or a sub-domain of it)."""
+    text = contact.strip().lower()
+    host = text.rsplit("@", 1)[1] if "@" in text else re.sub(r"^[a-z]+://", "", text)
+    host = re.split(r"[/:?#]", host, maxsplit=1)[0].removeprefix("www.").strip(".")
+    return any(host == d or host.endswith("." + d) for d in domains)
 
 
 def normalise_entity(text: str) -> str:
@@ -178,14 +207,20 @@ def extract_candidates(
     request: DocRequest,
     ner: Ner,
     company_names: Iterable[str] = DEFAULT_COMPANY_NAMES,
+    company_domains: Iterable[str] = DEFAULT_COMPANY_DOMAINS,
 ) -> list[Candidate]:
     """Candidates from the text and headings of the given chunks, first sighting of each term."""
     found: dict[tuple[str, str], Candidate] = {}
+    seeded_domains = tuple(
+        d.lower().strip() for d in (*SEED_DOMAINS, *company_domains) if d.strip()
+    )
 
     def add(text: str, kind: str, context: str, source: str) -> None:
         text = " ".join(text.split()).strip(" ,;:.\"'")
         if len(text) < 2:
             return
+        if kind == "contact" and domain_is_seeded(text, seeded_domains):
+            kind = "helpline"
         found.setdefault((normalise_entity(text), kind), Candidate(text, kind, context, source))
 
     seeds = [(name, "regulator") for name in SEED_REGULATORS]
@@ -205,16 +240,17 @@ def extract_candidates(
                     "ner",
                 )
         for pattern, kind in (
-            (_EMAIL, "helpline"),
-            (_URL, "helpline"),
+            (_EMAIL, "contact"),
+            (_URL, "contact"),
             (_TOLL_FREE, "helpline"),
-            (_MOBILE, "helpline"),
             (_IFSC, "product"),
             (_CIN, "product"),
             (_PRODUCT_CODE, "product"),
         ):
             for match in pattern.finditer(text):
                 add(match.group(), kind, _context(text, match.start(), match.end()), "pattern")
+        for match in _SHORT_CODE.finditer(text):
+            add(match.group(1), "helpline", _context(text, match.start(), match.end()), "pattern")
         for start, end in _law_spans(text):
             add(text[start:end], "law", _context(text, start, end), "pattern")
         for match in _PERSON_BY_ROLE.finditer(text):
@@ -330,6 +366,8 @@ def record_candidates(
             status = "rejected"
         elif candidate.kind in AUTO_KINDS:
             status = "approved"
+        elif candidate.kind in PENDING_KINDS:
+            status = "pending"  # never auto-approved, never put to a model
         else:
             probability = classify(candidate.text, candidate.context) if classify else None
             confident = probability is not None and probability >= AUTO_APPROVE_PROBABILITY

@@ -129,23 +129,32 @@ def box_from_pixels(
     )
 
 
-def grid_rows(layout: PageLayout, box: Box, pad: float = 3.0) -> tuple[tuple[str, ...], ...] | None:
+Rows = tuple[tuple[str, ...], ...]
+
+
+def grid_rows(layout: PageLayout, box: Box, pad: float = 3.0) -> Rows | None:
+    return grid_with_loss(layout, box, pad)[0]
+
+
+def grid_with_loss(layout: PageLayout, box: Box, pad: float = 3.0) -> tuple[Rows | None, int]:
+    """The table's rows (or None) and how many of its words fell outside every cell and are
+    missing from the rows. The caller warns when that number is above zero."""
     x0, y0, x1, y1 = box
     inside = [
         w for w in layout.words if x0 - pad <= w.cx <= x1 + pad and y0 - pad <= w.cy <= y1 + pad
     ]
     if not inside:
-        return None
+        return None, 0
     ys = _lines(layout.h_rules, (y0, y1), (x0, x1), pad)
     xs = _lines(layout.v_rules, (x0, x1), (y0, y1), pad)
     if len(ys) < 2 or len(xs) < 2:
-        return None  # no ruling lines at all: not a ruled table
+        return None, 0  # no ruling lines at all: not a ruled table
     # A border that is not drawn (the right edge of a two-column table, the line above a title
     # row) is the outer edge of the words beyond the last drawn line.
     ys = _extend(ys, [w.y0 for w in inside], [w.y1 for w in inside], [w.cy for w in inside])
     xs = _extend(xs, [w.x0 for w in inside], [w.x1 for w in inside], [w.cx for w in inside])
     if len(ys) < 3 or len(xs) < 3:
-        return None  # fewer than two rows or two columns: no grid to read
+        return None, 0  # fewer than two rows or two columns: no grid to read
     cells: dict[tuple[int, int], list[Word]] = {}
     placed = 0
     for word in inside:
@@ -155,7 +164,7 @@ def grid_rows(layout: PageLayout, box: Box, pad: float = 3.0) -> tuple[tuple[str
         cells.setdefault((row, col), []).append(word)
         placed += 1
     if placed / len(inside) < MIN_COVERAGE:
-        return None
+        return None, len(inside) - placed
     row_count, col_count = len(ys) - 1, len(xs) - 1
     table: list[list[str]] = []
     for row in range(row_count - 1, -1, -1):  # top row first (PDF y grows upwards)
@@ -167,8 +176,8 @@ def grid_rows(layout: PageLayout, box: Box, pad: float = 3.0) -> tuple[tuple[str
     kept_cols = [c for c in range(col_count) if any(row[c] for row in table)]
     rows = tuple(tuple(row[c] for c in kept_cols) for row in table if any(row))
     if len(rows) < 2 or len(kept_cols) < 2:
-        return None
-    return rows
+        return None, 0
+    return rows, len(inside) - placed
 
 
 def read_layout(path: Path) -> PageLayout:

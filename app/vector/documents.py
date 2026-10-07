@@ -118,6 +118,16 @@ def checked_payload(payload: Mapping[str, Any], *, now: datetime | None = None) 
     return checked
 
 
+def checked_update(payload: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """A copy of a PARTIAL payload (for set_payload) that is safe to write. `effective_to` is
+    validated when the update carries it and is never added when it does not, so refreshing the
+    pages of a held-back chunk can never make it active (checked_payload would add a null)."""
+    checked = dict(payload)
+    if "effective_to" in checked:
+        checked["effective_to"] = validate_effective_to(checked["effective_to"], now=now)
+    return checked
+
+
 class VectorConfigError(Exception):
     """A setting is wrong. The message names the variable, never a value."""
 

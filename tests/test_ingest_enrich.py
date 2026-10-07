@@ -126,14 +126,34 @@ def test_captions_and_labels_are_cached_so_a_retry_does_not_ask_again(rig, tools
     elements = [*sample_elements(), *CHART, table([["a", "b"]])]
     assert rig.ingest(parsed(*elements)).status == "failed_pages"
     first = dict(tools.calls)
+    assert first["label"] == 0  # a failed run makes no label call at all
     tools.fail.clear()
     assert rig.ingest(parsed(*elements)).status == "ok"
     assert tools.calls["caption"] == first["caption"]  # the picture that worked is not re-sent
-    assert tools.calls["label"] == first["label"]  # every label came from the local cache
     assert tools.calls["summarise"] == first["summarise"] + 1
+    labels = tools.calls["label"]
+    assert labels > 0
+    rig.ingest(parsed(*elements, para("3.1 A new rule appears.")))
+    assert tools.calls["label"] == labels + 1  # only the new chunk: the rest came from the cache
 
 
-def test_a_customer_specific_document_calls_no_model_and_captions_no_image(rig, tools):
+def test_a_label_that_was_never_obtained_is_not_saved_so_the_next_run_asks_again(
+    rig, tools, tmp_path
+):
+    cache = DiskCache(tmp_path / "cache")
+    tools.label = lambda text: None  # no decider answered
+    rig.ctx.enrich = enricher_for(rig, tools, cache)
+    rig.ingest(parsed(*sample_elements()), title=None)
+    assert {p["payload"]["clause_type"] for p in rig.points().values()} == {"general"}
+    assert all(cache.get("label", p["payload"]["text"]) is None for p in rig.points().values())
+    tools.label = lambda text: "claims"  # the decider is back
+    rig.ctx.enrich = enricher_for(rig, tools, cache)
+    rig.ingest(parsed(*sample_elements(), para("3.1 Another rule appears.")), title=None)
+    assert cache.get("label", "3.1 Another rule appears.") == "claims"
+
+
+def test_a_customer_specific_document_calls_no_enrichment_model_and_captions_no_image(rig, tools):
+    rig.ctx.accept_customer_documents = True  # refused by default; the enricher rule still holds
     result = rig.ingest(
         parsed(*sample_elements(), *CHART, table([["a", "b"]])), doc_type="customer-specific"
     )
@@ -331,6 +351,7 @@ def test_no_answer_from_any_decider_also_leaves_it_pending(rig, tools):
 
 
 def test_a_customer_specific_documents_candidates_are_all_rejected(rig, tools):
+    rig.ctx.accept_customer_documents = True  # refused by default; the entity rule still holds
     rig.ingest(parsed(title("S"), para(LAW_TEXT + " Contact Rahul Sharma, Chief Officer.")),
                doc_type="customer-specific")  # fmt: skip
     assert rows(rig) and {s for _, _, s, _ in rows(rig)} == {"rejected"}

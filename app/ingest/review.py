@@ -19,10 +19,13 @@ from dataclasses import dataclass, field
 
 from app.accounts.audit import write_audit
 from app.accounts.tokens import utc_text
+from app.ingest import pending
 from app.ingest.entities import normalise_entity, person_variants
 from app.ingest.index import IngestContext, load_existing
+from app.ingest.lock import document_lock
 from app.ingest.model import check_doc_id
 from app.store_errors import call_vector
+from app.vector.documents import checked_update
 
 SNIPPET_CHARS = 240
 
@@ -94,7 +97,7 @@ class ReviewResult:
     skipped: int = 0
 
 
-def review_entities(
+def _review_entities(
     ctx: IngestContext,
     doc_id: str,
     ask: Callable[[str], str],
@@ -189,15 +192,39 @@ def review_chunks(
     out: Callable[[str], None],
 ) -> ChunkReview:
     check_doc_id(doc_id)
+    with document_lock(ctx.lock_dir, doc_id):
+        return _review_chunks(ctx, doc_id, ask, out)
+
+
+def review_entities(
+    ctx: IngestContext,
+    doc_id: str,
+    ask: Callable[[str], str],
+    out: Callable[[str], None],
+) -> ReviewResult:
+    check_doc_id(doc_id)
+    with document_lock(ctx.lock_dir, doc_id):
+        return _review_entities(ctx, doc_id, ask, out)
+
+
+def _review_chunks(
+    ctx: IngestContext,
+    doc_id: str,
+    ask: Callable[[str], str],
+    out: Callable[[str], None],
+) -> ChunkReview:
     result = ChunkReview()
     held = [
         e
         for e in load_existing(ctx.qdrant, ctx.collection, doc_id)
         if e.payload.get("quarantine") == "pending"
     ]
-    if not held:
+    # An unfinished earlier review is finished first, even when nothing is left to decide.
+    redo = pending.is_pending(ctx.marker_dir, doc_id)
+    if not held and not redo:
         out("no chunk is held back for this document")
         return result
+    now = ctx.now()
     for number, chunk in enumerate(held, start=1):
         payload = chunk.payload
         out(
@@ -210,44 +237,49 @@ def review_chunks(
             result.skipped += len(held) - number + 1
             break
         if answer == "a":
+            pending.mark(ctx.marker_dir, doc_id, now, "review")  # before the chunk goes live
+            update = checked_update(
+                {"effective_to": None, "quarantine": None, "quarantine_reason": None}, now=now
+            )
             call_vector(
-                lambda point=chunk.id: ctx.qdrant.set_payload(
-                    ctx.collection,
-                    payload={
-                        "effective_to": None,
-                        "quarantine": None,
-                        "quarantine_reason": None,
-                    },
-                    points=[point],
-                    wait=True,
+                lambda point=chunk.id, update=update: ctx.qdrant.set_payload(
+                    ctx.collection, payload=update, points=[point], wait=True
                 )
             )
             result.approved += 1
         elif answer == "r":
+            update = checked_update({"quarantine": "rejected"}, now=now)
             call_vector(
-                lambda point=chunk.id: ctx.qdrant.set_payload(
-                    ctx.collection, payload={"quarantine": "rejected"}, points=[point], wait=True
+                lambda point=chunk.id, update=update: ctx.qdrant.set_payload(
+                    ctx.collection, payload=update, points=[point], wait=True
                 )
             )
             result.rejected += 1
         else:
             result.skipped += 1
-    if result.approved:  # a chunk became active: like any new chunk (spec 10.3)
-        if ctx.cache.bump_corpus_version() is None:
-            result.incomplete.append("the corpus version was not bumped")
-        if ctx.cache.invalidate_doc(doc_id) is None:
-            result.incomplete.append("the document cache invalidation failed")
-    with ctx.db.transaction(write=True):
-        write_audit(
-            ctx.db,
-            actor=ctx.actor,
-            action="chunk_review",
-            target=doc_id,
-            details={
-                "approved": result.approved,
-                "rejected": result.rejected,
-                "incomplete": bool(result.incomplete),
-            },
-            now=ctx.now(),
+    if result.approved or redo:  # a chunk became active: like any new chunk (spec 10.3)
+        result.incomplete = pending.finish_cache_steps(
+            ctx.cache,
+            ctx.marker_dir,
+            doc_id,
+            chunk_ids=[],
+            whole_document=True,
+            now=now,
+            reason="review",
         )
+    if result.approved or result.rejected or redo:
+        with ctx.db.transaction(write=True):
+            write_audit(
+                ctx.db,
+                actor=ctx.actor,
+                action="chunk_review",
+                target=doc_id,
+                details={
+                    "approved": result.approved,
+                    "rejected": result.rejected,
+                    "incomplete": bool(result.incomplete),
+                    "finished_earlier_run": redo,
+                },
+                now=now,
+            )
     return result

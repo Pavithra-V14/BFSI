@@ -11,8 +11,10 @@ For each chunk it, in order:
 
 A caption or summary that fails does NOT stop the run half way: the page is reported as failed, the
 document is not activated, and nothing is written (6.3). A decide-tier label that cannot be had is
-"general". For a customer-specific document no model is called at all: nothing leaves the machine,
-no image is captioned, labels stay "general", and every entity candidate is rejected.
+"general". Customer-specific documents are refused before they reach this module (their text
+would still be embedded by a model provider, which is why); the rules below for them stay in place
+for the day they are allowed (Phase 16): no enrichment call at all, no image captioned, labels
+stay "general", and every entity candidate is rejected.
 
 Results of the paid calls are kept in a local cache (cache.py), so a run repeated after a failed
 page does not ask again for the pages that worked.
@@ -27,6 +29,7 @@ from typing import Any
 
 from app.ingest.cache import DiskCache
 from app.ingest.entities import (
+    DEFAULT_COMPANY_DOMAINS,
     DEFAULT_COMPANY_NAMES,
     Classify,
     Ner,
@@ -44,12 +47,13 @@ CAPTION_MAX_WORDS = 200  # about 250 tokens (spec 6.2: image chunks are 100-250 
 class EnrichTools:
     caption: Callable[[bytes], str]
     summarise: Callable[[str], str]
-    label: Callable[[str], str]
+    label: Callable[[str], str | None]  # None when no decider answered (never cached)
     classify: Callable[[str, str], float | None]
     ner: Ner
     db: Any  # app.db.connection.Database
     cache: DiskCache = field(default_factory=lambda: DiskCache(None))
     company_names: tuple[str, ...] = DEFAULT_COMPANY_NAMES
+    company_domains: tuple[str, ...] = DEFAULT_COMPANY_DOMAINS
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
@@ -98,22 +102,27 @@ def make_enricher(tools: EnrichTools) -> Enricher:
                     )
                 except Exception as error:
                     fail(chunk, error)
+        if failed:  # the document will not be activated: no more calls, the database untouched
+            return [FailedPage(page, reason) for page, reason in sorted(failed.items())]
         for chunk in chunks:
             if local_only or not chunk.text.strip():
                 continue
+            saved = tools.cache.get("label", chunk.text)
+            if saved is not None:
+                chunk.clause_type = saved
+                continue
             try:
-                chunk.clause_type = (
-                    cached("label", chunk.text, lambda c=chunk: tools.label(c.text)) or "general"
-                )
+                label = tools.label(chunk.text)
             except Exception:  # a label is a nicety: "general" is always acceptable
-                chunk.clause_type = "general"
+                label = None
+            chunk.clause_type = label or "general"
+            if label:  # an answer that was never obtained must not be saved as "general"
+                tools.cache.put("label", chunk.text, label)
         for chunk in chunks:
             hits = scan_text(chunk.text) + (scan_text(chunk.summary) if chunk.summary else [])
             if hits:
                 chunk.quarantine = "pending"
                 chunk.quarantine_reason = ",".join(sorted(set(hits)))
-        if failed:  # the document will not be activated: leave the main database untouched
-            return [FailedPage(page, reason) for page, reason in sorted(failed.items())]
 
         def cached_classify(term: str, context: str) -> float | None:
             key = f"{term}\x00{context}"
@@ -130,7 +139,9 @@ def make_enricher(tools: EnrichTools) -> Enricher:
         texts: Iterable[tuple[str, tuple[str, ...]]] = [
             (c.text, c.heading_path) for c in chunks if c.text.strip()
         ]
-        candidates = extract_candidates(texts, request, tools.ner, tools.company_names)
+        candidates = extract_candidates(
+            texts, request, tools.ner, tools.company_names, tools.company_domains
+        )
         with tools.db.transaction(write=True):
             record_candidates(tools.db, request, candidates, classify, tools.now())
         return []

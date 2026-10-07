@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from qdrant_client import models
 
 from app.accounts.audit import write_audit
+from app.ingest import pending
 from app.ingest.index import IngestContext, doc_filter, load_existing
 from app.ingest.lock import document_lock
 from app.ingest.model import check_doc_id
@@ -67,7 +68,12 @@ def delete_document(ctx: IngestContext, doc_id: str) -> DeleteResult:
     with document_lock(ctx.lock_dir, doc_id):
         existing = load_existing(ctx.qdrant, ctx.collection, doc_id)
         result.chunks = len(existing)
+        now = ctx.now()
+        # A repeat finishes what an earlier run left (the marker), and does nothing when there is
+        # nothing stored and no unfinished run.
+        redo = pending.is_pending(ctx.marker_dir, doc_id)
         if existing:
+            pending.mark(ctx.marker_dir, doc_id, now, "delete")  # before the first change
             call_vector(
                 lambda: ctx.qdrant.delete(
                     ctx.collection,
@@ -75,16 +81,17 @@ def delete_document(ctx: IngestContext, doc_id: str) -> DeleteResult:
                     wait=True,
                 )
             )
-        # Always, even when nothing was stored: a run that stopped here before is finished now.
-        if ctx.cache.bump_corpus_version() is None:
-            result.incomplete.append("the corpus version was not bumped")
-        failed = sum(ctx.cache.invalidate_chunk(e.id) is None for e in existing)
-        if failed:
-            result.incomplete.append(f"{failed} chunk cache invalidation(s) failed")
-        if ctx.cache.invalidate_doc(doc_id) is None:
-            result.incomplete.append("the document cache invalidation failed")
+        if existing or redo:
+            result.incomplete += pending.finish_cache_steps(
+                ctx.cache,
+                ctx.marker_dir,
+                doc_id,
+                chunk_ids=[e.id for e in existing],
+                whole_document=True,
+                now=now,
+                reason="delete",
+            )
 
-        now = ctx.now()
         with ctx.db.transaction(write=True):
             cursor = ctx.db.execute("DELETE FROM allowlist_entities WHERE doc_id = ?", (doc_id,))
             result.allowlist_entries = max(cursor.rowcount or 0, 0)

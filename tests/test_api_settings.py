@@ -58,11 +58,36 @@ def test_a_hex_key_from_openssl_is_accepted_every_time():
     check_secret(secrets.token_hex(32).upper(), "JWT_SECRET_KEY")
 
 
-def test_a_random_url_safe_key_is_accepted_every_time():
-    import secrets
+def test_a_url_safe_key_of_the_shape_token_urlsafe_32_makes_is_always_accepted():
+    """Deterministic: a fixed seed, so this never flakes. 20,000 keys of the generated shape, plus
+    keys that start with every placeholder word (a random key can, by chance)."""
+    import random
 
-    for _ in range(300):
-        check_secret(secrets.token_urlsafe(32), "JWT_SECRET_KEY")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    rng = random.Random(20261007)
+    for _ in range(20_000):
+        check_secret("".join(rng.choice(alphabet) for _ in range(43)), "JWT_SECRET_KEY")
+    for start in ("your", "change", "replace", "example", "placeholder", "insert", "paste",
+                  "todo", "xxx", "XXX", "Todo", "YOUR"):  # fmt: skip
+        tail = "".join(rng.choice(alphabet) for _ in range(43 - len(start)))
+        key = start + tail
+        assert len(set(key)) >= 20 and len(key) == 43
+        check_secret(key, "JWT_SECRET_KEY")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "your-secret-key-here-please-change-me-now",  # a typed placeholder, not 43 characters
+        "your_jwt_secret_key_replace_me_please_ok_ok_ok"[:43],  # 43 long, few distinct characters
+        "xxx" + "k3Jd9sLq2" * 4 + "ab",  # starts with a placeholder word, repeats a pattern
+        "change-me-" + "abcdefghijklmnop" + "0987654321qazwsx",  # placeholder start, 42 characters
+        "<paste-your-key-here>-and-more-words-to-be-long",  # angle bracket placeholder
+    ],
+)
+def test_a_placeholder_start_is_still_refused_unless_the_key_has_the_generated_shape(value):
+    with pytest.raises(SettingsError, match="random"):
+        check_secret(value, "JWT_SECRET_KEY")
 
 
 @pytest.mark.parametrize(

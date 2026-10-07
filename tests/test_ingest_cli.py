@@ -28,7 +28,7 @@ class Run:
         self.closed = 0
 
     def go(self, *args, confirm=lambda prompt: "", env=None):
-        def factory(env):
+        def factory(env, needs="models"):
             return Services(self.rig.ctx, close=lambda: setattr(self, "closed", self.closed + 1))
 
         code = main(
@@ -119,7 +119,7 @@ def test_only_pdf_files_are_accepted(rig, tmp_path):
 
 
 def test_a_dry_run_calls_no_service_and_prints_the_estimate(rig, tmp_path):
-    def forbidden(env):
+    def forbidden(env, needs="models"):
         raise AssertionError("a dry run must not build any service")
 
     def fake_ner():
@@ -191,13 +191,14 @@ def test_a_failed_page_puts_a_row_in_the_review_queue_and_a_later_success_closes
     assert rig.db.query_all("SELECT status FROM review_queue") == [("dismissed",)]
 
 
-def test_a_customer_specific_run_says_that_no_model_is_called(rig, tmp_path):
+def test_a_customer_specific_run_is_refused_with_a_clear_message(rig, tmp_path):
     run = Run(rig, tmp_path)
-    run.go(
+    code = run.go(
         "ingest", str(run.pdf), "--doc-id", "doc-a", "--doc-type", "customer-specific",
         "--access-role", "staff",
     )  # fmt: skip
-    assert any("no model is called" in line for line in run.out)
+    assert code == 1 and any("not accepted yet" in line for line in run.err)
+    assert rig.points() == {}
 
 
 def test_a_normal_run_warns_that_text_and_images_go_to_model_providers(rig, tmp_path):

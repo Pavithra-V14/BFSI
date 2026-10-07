@@ -81,7 +81,7 @@ def test_a_label_is_used_only_when_the_decider_is_sure_enough(tools):
     gateway.answers = {"clause_label": ChoiceAnswer("not-a-label", {}, 0.99)}
     assert llm.label("odd") == "general"
     gateway.answers = None  # no decider answered: the rules say "general"
-    assert llm.label("anything") == "general"
+    assert llm.label("anything") is None  # no answer at all: the caller must not save it
     assert all(r[:3] == ("decide", "clause_label", "decide") for r in gateway.requests)
 
 

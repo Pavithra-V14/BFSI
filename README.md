@@ -108,7 +108,8 @@ Do not trust `X-Forwarded-For` or deploy behind a proxy until Phase 15 sets the 
 
 ## Ingestion on the admin machine (Phase 5)
 Ingestion turns a PDF into searchable chunks. It runs only on your machine, never on Render, and
-you start it yourself in your own terminal. Claude never runs it on real services.
+you start it yourself in your own terminal. Claude never runs it on real services and never reads
+your `.env`.
 
 **Before the first run (once):**
 1. Install poppler (turns PDF pages into pictures) and tesseract (reads text from scanned images).
@@ -121,37 +122,164 @@ you start it yourself in your own terminal. Claude never runs it on real service
    `documents`, and deletes it again): `uv run python scripts/qdrant_check.py --run`.
    It needs `QDRANT_URL` and `QDRANT_API_KEY` in your shell. Every line should say PASS.
 
-**Settings** (in your shell, never a file): `DATABASE_URL`, `QDRANT_URL`, `QDRANT_API_KEY`,
-`UPSTASH_REDIS_URL`, the Gemini, Groq and OpenRouter key variables the gateway reads, and
-optionally `COMPANY_NAMES` (your real company name, comma-separated).
+**Rules that always hold**
+- **Only use the sample documents for now.** Clause text, table text and images are sent to model
+  providers (images to Gemini). A `customer-specific` document is **refused** with a clear message:
+  even without captions its text would still be embedded by a model provider. This stays so until a
+  paid or zero-retention plan exists (decided again in Phase 16).
+- `--doc-id` is a short name you choose and keep (letters, digits, hyphens). It is never taken from
+  the file name. Ingesting a changed PDF with the same `--doc-id` updates only what changed.
+- Every command is safe to run again. A run that stops (a limit, the network, Ctrl+C) never leaves
+  a half-activated document: the old version stays active until a run has every page.
+- After any command, type `$LASTEXITCODE`: `0` done; `1` an error, or "ingest incomplete" (a cache
+  step failed: run the same command again); `2` a page failed, so the document was not activated;
+  `130` you pressed Ctrl+C.
+- Output shows counts and names only: never a key, an address or document text. (The dry run also
+  lists the header and footer lines it removed, shortened, so you can see no real text went.)
 
-**Count first, then ingest.** `--dry-run` parses and counts but calls nothing:
+### The real-run procedure
+Work in one PowerShell window, in the project folder, in this order. Each step says what you should
+see and what to do if you do not.
+
+**(a) The variables each command needs.** Set them in the window (`$env:NAME = "value"`, gone when
+you close it), or add `--load-env` to a command to read the ones you have not set from the project's
+`.env` file. `--load-env` is off unless you write it; it reads only the names this tool needs, a
+variable already set in the window wins, it prints the names it loaded and never a value, and it
+refuses to run on Render.
+
+| Command | Needs |
+|---|---|
+| `status`, `review entities` | `DATABASE_URL`, `QDRANT_URL` (and `QDRANT_API_KEY` if your Qdrant uses one) |
+| `review chunks`, `delete` | the above plus `UPSTASH_REDIS_URL` |
+| `ingest` | all of the above plus `GEMINI_EMBEDDING_KEY_A` (and `_B` if you have it) and `GEMINI_API_KEYS` (image captions); `GROQ_API_KEYS`, `OPENROUTER_API_KEYS` and `JEV_OPENROUTER_API_KEY` are optional (labels and summaries try them first, then Gemini) |
+| optional | `COMPANY_NAMES`, `COMPANY_DOMAINS` (your real company name and domains; the sample company is the default) |
+
+Try it: `uv run python -m app.ingest status --doc-id insurance-flexi-property --load-env`
+
+- You should see: `--load-env: loaded N variable(s): ...` (names only), then
+  `chunks: active 0, held back 0, rejected 0, inactive 0 (stored 0)` and
+  `allow-list entries: none`. Exit code 0.
+- If it says `error: these settings are not set: ...` the names listed are missing: set them or fix
+  the line in `.env`. If it says `a store could not be reached`, check the URL and your network, then
+  run it again.
+
+**(b) One small document first** (the insurance sample: 18 chunks, 1 picture, 7 tables). Count, then
+ingest:
 
     uv run python -m app.ingest ingest spec/samples/company/insurance_flexi_commercial_property.pdf `
       --doc-id insurance-flexi-property --doc-type policy --access-role customer `
       --product-line insurance --title "Flexi Commercial Property Policy" --dry-run
 
-It prints how many chunks, tables and images there are and about how many embedding, caption,
-summary and label calls a real run would make. Check that against your provider limits, then run
-the same command without `--dry-run`.
+- You should see about: `pages parsed: 3 of 3`, `running headers and footers removed: 12` followed by
+  12 `removed, page N: ...` lines (the document code, "Page N of 3", the company line and the sample
+  notice, on each page), `chunks: 18 (text 11, table 7); images: 1`, `embedding calls 2`,
+  `image caption calls: 1; table summary calls: 7`, `clause label calls: 19`,
+  `entity questions: 11 of 55 candidates`, and `no service was called (dry run)`. Nothing is called.
+- If a `removed` line is real text, stop and tell Claude. If `pages parsed` is lower than the page
+  count, a page failed to parse (see (h)). A `warning: page N: a table lost K word(s)` means a table's
+  cells are not complete: tell Claude.
 
-- `--doc-id` is a short name you choose and keep (letters, digits, hyphens). It is never taken from
-  the file name. Re-ingesting a changed PDF with the same `--doc-id` updates only what changed.
-- `--doc-type` is `policy`, `regulatory` or `customer-specific`. For `customer-specific` no model is
-  called at all and no image is captioned.
-- **Only use the sample documents for now.** Clause text, table text and images are sent to model
-  providers (and images to Gemini); real documents wait for a paid or zero-retention plan.
-- A document with a page that failed is **not activated**; the old version stays active. Run the same
-  command again to retry. If the command says `ingest incomplete`, a cache step failed: run it again.
+Then the same command without `--dry-run` (add `--load-env` if you use it). It takes several minutes
+(about a minute to read the PDF, then the model calls).
 
-**Afterwards:**
-- `uv run python -m app.ingest review entities --doc-id SLUG` approves the names the program was not
-  sure about (a person is shown with the sentence they appear in; the surname alone is approved
-  only if you tick it).
-- `uv run python -m app.ingest review chunks --doc-id SLUG` shows chunks held back because they read
-  like instructions to the model; they stay inactive until you approve them.
-- `uv run python -m app.ingest delete --doc-id SLUG` removes a document everywhere (it asks you to
-  type the id).
+- You should see a `note:` line, then `insurance-flexi-property: new 19, changed 0, unchanged 0,
+  removed 0, version 1` (18 chunks and 1 picture caption). Exit code 0.
+- `ingest incomplete` (exit 1): the chunks are written but a cache step failed. Run the same command
+  again: it says `finished the cache steps an earlier run had left undone`.
+- `the model providers could not answer` (exit 1): a free-tier limit or a key problem. Wait a few
+  minutes and run it again.
+- `NOT activated ... page N failed` (exit 2): see (h).
+
+**(c) The same ingest again: it must be a true no-op.** Run exactly the same command.
+
+- You should see `insurance-flexi-property: new 0, changed 0, unchanged 19, removed 0, version 1` and
+  `nothing changed: no write, no version bump, no audit row`. It makes no model call.
+- If `new` or `changed` is not 0, the document is not being recognised as the same: stop and tell
+  Claude. Do not go on to (d).
+
+**(d) Status.** `uv run python -m app.ingest status --doc-id insurance-flexi-property`
+
+- You should see: `chunks: active 19, held back 0, rejected 0, inactive 0 (stored 19)`,
+  `document version: 1`, `unfinished cache step (pending-finish marker): no`,
+  `allow-list entries: approved N, pending M` (about 70 to 110 in all, most approved by themselves),
+  and `failed pages waiting in the review queue: 0`.
+- A marker of `YES` means an earlier run did not finish its cache steps: run the `ingest` command
+  again, or the `review chunks` / `delete` you were doing, and it clears.
+
+**(e) Review.** `uv run python -m app.ingest review chunks --doc-id insurance-flexi-property` should
+say `no chunk is held back for this document` (the samples contain no instruction-like text; if one
+is held back it shows the page, the clause and why: read it, then `a` approve, `r` reject, `s` skip,
+`q` quit). Then `uv run python -m app.ingest review entities --doc-id insurance-flexi-property`
+shows the names and codes the program was not sure about, each with the sentence it appears in. `a`
+approves the group (full name, "Mr. Sharma", "R. Sharma"); the surname alone needs `t`; `r` rejects;
+`s` skips; `A` approves all the rest; `q` quits. Run `status` again: the `pending` count is lower.
+Both commands stop with a clear message if an ingest is running on the same document; run them again when it ends.
+
+**(f) The delete test.** `uv run python -m app.ingest delete --doc-id insurance-flexi-property` asks
+you to type the id. You should see `insurance-flexi-property: removed 19 chunk(s), N allow-list
+entr(ies); 0 chat message(s) flagged 'source removed'`. Then `status`: `stored 0`,
+`allow-list entries: none`, marker `no`. Then ingest it again (same command as in (b)): `new 19 ...
+version 1`. It is much quicker and makes far fewer model calls, because the answers are saved in
+`originals/.cache`.
+
+**(g) The other two documents** (same pattern):
+
+    uv run python -m app.ingest ingest spec/samples/company/banking_rtl_standard_facility_agreement.pdf `
+      --doc-id banking-rtl-facility --doc-type policy --access-role customer --product-line banking
+    uv run python -m app.ingest ingest spec/samples/company/finserv_mutual_fund_ecas_and_servicing.pdf `
+      --doc-id finserv-mf-ecas --doc-type policy --access-role customer --product-line finserv
+
+You should see `new 22 ...` for the banking one and `new 21 ...` for the finserv one. Run (c) and (d)
+for each. **Approximate real calls for all three documents**, from the dry run: 6 embedding calls
+(16 texts each), 3 image captions, 22 table summaries, 62 clause labels and 29 entity questions.
+**The free tiers can slow or pause the run** (the Gemini limits are unpublished; Groq allows about 30
+requests a minute). The program waits for room, and when a provider still says no it stops with a
+clear message. That is safe: run the same command again, and the calls that already worked are not
+repeated.
+
+**(h) A failed page and its retry.** Use the banking document, which you have just ingested:
+
+1. Delete it (type its id): `uv run python -m app.ingest delete --doc-id banking-rtl-facility`
+2. Remove the saved answers so the picture is asked for again: `Remove-Item -Recurse -Force originals\.cache`
+3. Break the Gemini key for this window only (the caption has no other provider):
+   `$env:GEMINI_API_KEYS = "not-a-real-key"`
+4. Run the banking ingest command again. You should see `document 'banking-rtl-facility' was NOT
+   activated; the old version (if any) stays active`, one or more lines `page N failed (<an error name>)` (at least page 2, which holds
+   the picture; table pages too if no other provider key is set), and `each failed page is in the review
+   queue; run the same command again to retry`. Exit code 2.
+5. `status` shows `stored 0` and `failed pages waiting in the review queue:` as many as there were
+   `page N failed` lines.
+6. Put the real key back (close the window and open a new one, or set the variable again; use
+   `--load-env`), run the same ingest command again. You should see `new 22 ...`, exit code 0, and
+   `status` shows `failed pages waiting in the review queue: 0`.
+
+If a step differs from what is written here, stop, copy the lines the program printed (they hold no
+secrets) and tell Claude.
+
+### Known limitations of ingestion (recorded in Phase 5; the number is the phase that handles it)
+- **Phase 16 (baseline run).** Table identity depends on the table's order under its clause. A paragraph that
+  starts with a number like "1.5 times ..." is taken as a clause. A table with only a border and a header
+  line can be read as two rows. A clause `~N` suffix can differ between parts of one clause. A clause
+  label of "general" given when no decider answered is not retried unless the chunk changes. A page that
+  parses to nothing counts as a failed page, so a scanned PDF whose OCR finds no text, or a deliberately
+  blank page, blocks activation: scanned-PDF behaviour is decided here. Customer-specific documents
+  stay refused until a paid or zero-retention plan exists.
+- **Phase 6 (guardrails and masking).** Organisations, places and laws that the NER model finds are
+  approved automatically and can include harmless words (for example "Facility"); masking must be
+  measured against them. `normalise_entity` also trims `; : ( ) [ ]` and a closing "." of a stored
+  term (for example "Pvt. Ltd." is stored as "Pvt. Ltd"): masking must use the same function.
+- **Phase 10 (chat, session and admin API).** Allow-list rows are saved before the chunks are
+  written, so a run that fails in between leaves rows for text that was never indexed (harmless);
+  the admin entity endpoints should clean them up. The entity review does not group titled people
+  ("Dr. Rao" and "Dr. Anita Rao" show as two groups), and a group of one single word answered `a`
+  approves nothing and says so only in the count. The audit "who" is `cli:<operating-system login>`;
+  the admin ids of Phase 10 replace it, and `approved_by` stays empty until then.
+- **Phase 12 (observability).** A delete retried after a database failure can record a chunk count of 0
+  or no audit row.
+- **Phase 15 (deployment and runbooks).** Qdrant writes go in batches of 64 and are not atomic; a
+  failure half way leaves a partly updated document, and running the same command again finishes it.
+  A delete leaves the saved answers, the original PDFs and open failed-page rows; they are removed
+  by hand (the runbook says how).
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

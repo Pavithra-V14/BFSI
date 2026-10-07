@@ -123,6 +123,7 @@ class Rig:
             embed=self.embedder,
             count=words,
             lock_dir=tmp_path / "locks",
+            marker_dir=tmp_path / "pending",
             enrich=enrich,
             now=lambda: self.moment,
         )
