@@ -2,10 +2,11 @@
 
 Removes every vector of the document at once, then bumps the corpus version and clears the
 cache entries that cited it, then (in the main database) removes the document's allow-list
-entries, flags the transcripts that cited it as "source removed" and writes ONE audit row (document
-id, who, when, chunk count; no document text). Safe to repeat: a second run finds nothing to
-delete, still bumps and invalidates (so a run that stopped half way is finished by running it
-again), and writes no second audit row.
+entries, flags the transcripts that cited it as "source removed", clears the summaries built from
+it (Phase 7, `app.memory.documents`, with its own counts-only audit row) and writes ONE audit row
+(document id, who, when, chunk count; no document text). Safe to repeat: a second run finds
+nothing to delete, still bumps and invalidates (so a run that stopped half way is finished by
+running it again), and writes no second audit row.
 
 The "source removed" rule: a citation in `messages.citations` (JSON text) is an object with a
 `doc_id`; a message with any citation whose `doc_id` is this document is flagged. (The chat phases
@@ -24,6 +25,7 @@ from app.ingest import pending
 from app.ingest.index import IngestContext, doc_filter, load_existing
 from app.ingest.lock import document_lock
 from app.ingest.model import check_doc_id
+from app.memory.documents import clear_summaries_for_document
 from app.store_errors import call_vector
 
 
@@ -33,6 +35,7 @@ class DeleteResult:
     chunks: int = 0
     allowlist_entries: int = 0
     transcripts_flagged: int = 0
+    summaries_cleared: int = 0
     incomplete: list[str] = field(default_factory=list)
 
     @property
@@ -96,6 +99,10 @@ def delete_document(ctx: IngestContext, doc_id: str) -> DeleteResult:
             cursor = ctx.db.execute("DELETE FROM allowlist_entities WHERE doc_id = ?", (doc_id,))
             result.allowlist_entries = max(cursor.rowcount or 0, 0)
             result.transcripts_flagged = flag_source_removed(ctx.db, doc_id)
+            # spec 8.4: a summary built from the deleted document is cleared (its own audit row)
+            result.summaries_cleared = clear_summaries_for_document(
+                ctx.db, doc_id, actor=ctx.actor, now=now
+            )
             if result.chunks or result.allowlist_entries or result.transcripts_flagged:
                 write_audit(
                     ctx.db,

@@ -124,6 +124,8 @@ If the **whole** message is only a greeting or farewell (hi, hey, hello, good mo
 ### 4.3 Vague first message
 A first message of a session that is vague gets rewrite-then-clarify: the rewrite step restates it using a **static BFSI domain checklist** hard-coded in the prompt; if it is still unclear, the assistant asks the user for more detail and shows what it understood. Follow-up messages have no minimum length. **Two unclear turns in a row** end with a fixed message and a flag in the review queue.
 
+- **[P]** The count of consecutive unclear turns is the key `unclear_turns` of `session_facts`; it is bookkeeping and is never put in any prompt. The second unclear turn in a row returns the fixed message (a draft wording the owner confirms before release), writes one `two_unclear_turns` row in the review queue (the session id and the count, no text) and starts counting again from zero; a clear turn resets the count.
+
 ### 4.4 New session versus existing session
 - **New session:** no history; vague handling per 4.3.
 - **Existing session:** load the summary, session facts and the verbatim buffer (section 8); the history-based rewrite resolves follow-ups such as "and for senior citizens?".
@@ -246,16 +248,22 @@ Purpose: do not mask legitimate terms (laws, regulators, places, products, publi
 - When the buffer overflows, the oldest turns are folded into the summary by a decide-tier call (one call per overflow).
 - The summary is built **only from masked text**.
 - The **generator never sees history**.
+- **[T]** The verbatim buffer size is the environment setting `MEMORY_BUFFER_TOKENS` (a whole number from 50 to 4,000, default 400); the sweep over 200, 400, 800 and 1,200 tokens needs the multi-turn evaluation set and is done at the Phase 16 baseline. The summary limit (150) and the answer clip (80) are fixed starting values.
+- **[P]** History is built from the stored messages after the summary boundary, newest first, whole messages within the buffer size. Every masked user question feeds it; an assistant answer feeds it only when it is grounded and its source has not been removed (refusals, ungrounded answers and "source removed" answers are left out), clipped to about 80 tokens with the clause references of its citations. The summary input is those same lines (masked questions and clipped grounded answers), so it holds user questions plus cited facts and no free model prose.
+- **[P]** The summary a model returns is made plain text, masked again, scanned with the chunk injection patterns and clipped to 150 tokens before it is saved. On a pattern hit the old summary and boundary stay and an alert event is emitted (pattern names only). A failed call or an empty reply changes nothing; the older turns are tried again on the next turn. A summary is saved only if the boundary is still the one that was read, so two turns folding at once cannot overwrite each other.
 
 ### 8.3 Persistence and resume
 - Sessions and messages persist in Postgres so a user who returns to a session can continue it.
 - New columns on sessions: `summary_text`, `summary_upto_message_id`, `session_facts` (JSON), `last_active_at`, `status` [P].
 - On resume: load the summary and session facts, then rebuild the verbatim buffer from the messages after `summary_upto_message_id`, within the token limit. The "last 3 turns" are derived from stored messages, not stored twice.
 - `session_facts` is structured state (current product line, topic, approved entities) filled from the Jev triage output and deterministic entity matches — **no extra LLM call** [P].
+- **[P]** `session_facts` keys: `product_line`, `topic` (short plain labels; anything else is ignored), `entities` (approved names found in the masked question, at most 20) and `unclear_turns`. Only the first three can reach a prompt.
+- **[P]** Every session function takes the user id, and a session that belongs to someone else gives exactly the same "not found" as a missing one. Message text is stored only as the masked types `StoredQuery` (a user message) and `StoredAnswer` (an assistant message), both made by the same storage-masking function; a plain string is refused. Two messages of one session never share a number: the unique `(session_id, seq)` constraint decides and a collision is retried with a fresh number.
 
 ### 8.4 Retention and deletion
 - Chats are kept **90 days**. Users can delete their own chats themselves.
 - When a document is deleted, any summary built from it is cleared.
+- **[P]** The 90 days are counted from `last_active_at`. The retention sweep runs in one transaction through the same delete as a user's own deletion, writes one audit row `retention_sweep` with counts only (and none when nothing was deleted), and has a `--dry-run` that only counts; scheduling it is a deployment step (Phase 15). A summary counts as built from a document when any turn folded into it (a message up to the summary boundary) cites that document; clearing it writes one audit row `summary_clear` with the document id and a count, and none when no summary was cleared.
 
 ### 8.5 Source removed
 Transcript messages that cite a deleted document are flagged **"source removed"** in the history view. **[P]** `messages.citations` is a JSON list of objects, each with the `doc_id` of the cited document (and its clause and page); delete flags every message with any citation whose `doc_id` is the deleted document.

@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 6 hardened (round 2, the last), awaiting the owner's approval (next is Phase 7)
+Current phase: Phase 7 built, awaiting the owner's approval (next is Phase 8)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -380,6 +380,51 @@ table-summary prompts used by ingestion live there too, word for word as before.
   The unit tests check that every step is timed and the steps add up; they
   no longer assert a number of milliseconds, because that fails on a busy machine for no reason in
   the code.
+
+## Memory and sessions (Phase 7)
+Short-term memory only (no memory across sessions). The code is in `app/memory/`; these are
+functions the pipeline (Phase 8) and the chat API (Phase 10) will call. Nothing here is a web route.
+
+- **Sessions and messages** (`store.py`): every function takes the user id, and a session that
+  belongs to someone else gives the same "not found" as one that does not exist. Message text is
+  accepted only as `StoredQuery` (a user message) or `StoredAnswer` (an assistant message), made by
+  `mask_for_storage`; a plain string is refused. Two messages never share a number (the database's
+  unique constraint decides and a collision is retried).
+- **History** (`buffer.py`, `summary.py`, `history.py`): the rewrite step gets a running summary
+  (at most 150 tokens) plus the newest turns word for word within `MEMORY_BUFFER_TOKENS` (default
+  400, a starting value). Only grounded answers whose source is still there feed it; each is clipped
+  to about 80 tokens. When turns no longer fit, one decide-tier call folds them into the summary. The
+  reply is made plain text, masked, scanned for instruction-like text and clipped; on a hit the old
+  summary stays and an alert event is emitted. The generator never sees any of this.
+- **Facts and unclear turns** (`facts.py`, `unclear.py`): `session_facts` holds the product line,
+  topic and approved names found by plain matching (no model call) and the count of unclear turns in
+  a row. That count is never put in a prompt. Two in a row end with a fixed message and one
+  `two_unclear_turns` row in the review queue.
+- **Retention** (`retention.py`): chats not used for 90 days (counted from the last activity) are
+  deleted, with one audit row of counts. To see what would go, in your own terminal:
+  `uv run python -m app.memory.retention --dry-run` (it needs `DATABASE_URL` in the shell and only
+  counts). Without `--dry-run` it deletes. Scheduling it is a deployment step (Phase 15).
+- **Deleting a document** (`documents.py`, called by the Phase 5 delete): a summary that rests on
+  the deleted document is cleared, with one audit row of counts.
+
+**Known limitations (recorded in Phase 7)**
+- **Phase 8 (pipeline).** Use `facts_for_prompt` / `render_facts` for anything that goes into a
+  prompt; use `prepare_history` before the rewrite; store messages only through the masked types;
+  decide "unclear" from the Jev vague flag and call `record_turn`; connect the alert events
+  (`summary_rejected_injection`, `summary_fold_failed`) to the alert path. When the summary call
+  fails, the turns that no longer fit are left out of that turn's history and tried again on the
+  next turn.
+- **Phase 10 (chat API).** The routes call these functions with the signed-in user's id; a wrong
+  session id must give the same answer as a missing one at the HTTP level too (404 both ways).
+- **Phase 12 (observability).** The two summary events are plain callbacks until the alert path
+  exists. The retention sweep is one transaction; a very large backlog should be swept in smaller
+  batches.
+- **Phase 15 (deployment).** Schedule the retention command (daily is enough).
+- **Phase 16 (baseline run).** Sweep the buffer size (200, 400, 800, 1,200) on the multi-turn set;
+  the 150 and 80 token limits and the fixed "unclear" message wording are starting values. Session
+  facts (topic, names) are not cleared when a document is deleted, only the summary is.
+- **Postgres.** `tests/test_postgres_memory.py` covers every new query but was written without a
+  Postgres on this machine; its first run is the first CI run.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, overload
 
 from app.guardrails import messages
 from app.guardrails.allowlist import AllowList
@@ -61,16 +61,52 @@ class StoredQuery:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class StoredAnswer:
+    """The answer text masked the same way as a StoredQuery (the same function makes both), the
+    only form of an assistant message that the chat store accepts."""
+
+    text: str
+    counts: dict[str, int] = field(default_factory=dict)
+
+
+@overload
 def mask_for_storage(
-    raw_query: str, *, masker: Masker, allow: AllowList, doc_ids: Collection[str]
-) -> StoredQuery:
+    raw_query: str,
+    *,
+    masker: Masker,
+    allow: AllowList,
+    doc_ids: Collection[str],
+    kind: Literal["query"] = "query",
+) -> StoredQuery: ...
+@overload
+def mask_for_storage(
+    raw_query: str,
+    *,
+    masker: Masker,
+    allow: AllowList,
+    doc_ids: Collection[str],
+    kind: Literal["answer"],
+) -> StoredAnswer: ...
+def mask_for_storage(
+    raw_query: str,
+    *,
+    masker: Masker,
+    allow: AllowList,
+    doc_ids: Collection[str],
+    kind: Literal["query", "answer"] = "query",
+) -> StoredQuery | StoredAnswer:
     """Pass 2, at answer time. `raw_query` is the question as typed (kept in memory by the caller
-    for this purpose only); `doc_ids` are the documents the answer was built from. `None` is
-    refused, because "every document" is the pass-1 scope, not this one."""
+    for this purpose only), or with `kind="answer"` the answer text to be stored; `doc_ids` are the
+    documents the answer was built from. `None` is refused, because "every document" is the pass-1
+    scope, not this one. The chat store accepts only what this function returns."""
     if doc_ids is None:
         raise TypeError("pass 2 needs the ids of the surviving documents, not None")
+    if kind not in ("query", "answer"):
+        raise ValueError("kind must be 'query' or 'answer'")
     result = masker.mask(raw_query.strip(), allow.terms(set(doc_ids)))
-    return StoredQuery(result.text, dict(result.counts))
+    made = StoredQuery if kind == "query" else StoredAnswer
+    return made(result.text, dict(result.counts))
 
 
 @dataclass
