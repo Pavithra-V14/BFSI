@@ -173,6 +173,7 @@ Read each model's window from LiteLLM's model map at startup, with a configurati
 ### 6.1 Parsing
 - Unstructured.io partitions each PDF into typed elements (titles, narrative text, list items, tables, images) with page numbers.
 - **Images:** the image bytes are sent to the Gemini hosted API, which describes them as text; the text is embedded as a chunk. Because document content leaves the machine, this must never run on documents that contain customer data.
+- **[P]** The gateway has one image call, `caption_image` (PNG, JPEG or WebP up to 8 MB): Gemini only, on the same key pool, rate limiter and circuit breaker as Gemini answers; neither the image bytes nor the caption text is ever logged or put in an event. A caption chunk is identified by the image's hash, not by the caption, so an unchanged picture is never captioned twice. For now only the sample documents are ingested; a customer-specific document sends nothing to any model (no captions, summaries, labels or entity questions) until a paid or zero-retention plan is in place.
 - **Tables** are kept as tables.
 
 ### 6.2 Chunking [P]
@@ -193,13 +194,17 @@ Read each model's window from LiteLLM's model map at startup, with a configurati
 - Page numbers are stored for citation display only and are never part of identity.
 - A per-document lock prevents concurrent ingest, reindex and delete on the same document; ingest and delete are safe to repeat.
 - If one page fails to parse or caption, the document is **flagged for the admin** and the page is retried later; no half-indexed documents.
+- **[P]** A document with a failed page or caption is **not activated**: nothing is written, the previous version (if any) stays active, each failed page gets one open `failed_ingest_page` row in the review queue (page number and a short reason, no page text), and running the same ingest again retries it and closes the rows once every page succeeds. An empty parse never deactivates a stored document.
+- **[P]** Re-ingest matches new chunks to stored ones by content hash first: an unchanged chunk, even if moved or renumbered, keeps its point id, vector and version, and only its payload (clause, heading, pages, role) is refreshed. Chunks are then paired by identity key: the same clause keeps its point id and gets `chunk_version` + 1. The rest are new or removed. A clause number that repeats in one document gets a numeric suffix on its identity key. A fragment under about 50 tokens merges only into another unnumbered chunk under the same parent heading, so adding or removing a numbered clause never changes another clause's chunk. All embedding finishes before the first write; the corpus version is bumped after the writes, and cache entries are cleared after the bump. A bump or an invalidation that fails makes the command exit non-zero and say "ingest incomplete" (running it again finishes the job).
 
 ### 6.4 Payload fields stored with each vector [P]
 `doc_id`, `source`, `chunk_id`, `clause_ref`, `part_index`, `content_hash`, `doc_version`, `chunk_version`, `effective_date`, `effective_to`, `page_start`, `page_end`, `heading_path`, `clause_type`, `product_line`, `content_type` (text, table, image_caption), `image_ref`, `access_role`, `ingested_at`, `parser`.
 
+**[P]** Four more fields are stored: `text` (the chunk text, which retrieval returns), `summary` (a table chunk's one-line summary, embedded but not part of the content hash, so a new summary never makes a chunk "changed"), and `quarantine` and `quarantine_reason` (9.3). `doc_version` on a chunk is the document version at which that chunk's current content was written, so adding a clause leaves every other chunk's version untouched. Each ingest command takes a required stable `--doc-id` slug (never derived from a path), a required `--doc-type` (policy, regulatory, customer-specific) and `--access-role`; `product_line` is an optional argument.
+
 ### 6.5 Embeddings
 - Gemini embedding with two keys from different accounts; key B is used when key A fails (same model, same 768 dimensions, so vectors are interchangeable).
-- **[P]** The Gemini Embedding 2 query and document text prefixes (`task: search result | query: ...` and `title: ... | text: ...`) come from Google's documentation. Using `title: none` for untitled documents is an assumption to confirm in the ingestion phase, before any document is indexed.
+- **[P]** The Gemini Embedding 2 query and document text prefixes (`task: search result | query: ...` and `title: ... | text: ...`) come from Google's documentation. Using `title: none` for untitled documents is an assumption; the owner confirmed in Phase 5 that the document title is used when there is one and the literal `none` otherwise.
 - If both fail: queries get "temporarily unavailable"; ingestion stops and flags the document. **A hash-based fallback embedding is for development only** and must never index or retrieve in production.
 
 ### 6.6 Sparse vectors
@@ -217,6 +222,7 @@ Purpose: do not mask legitimate terms (laws, regulators, places, products, publi
 5. The admin reviews pending people in bulk, seeing each name with its context snippet, and approves name variants as a group. **Single-word variants are approved only when the reviewer ticks them.**
 6. Matching is **exact on normalised variants** — no fuzzy matching.
 7. Entries are tied to `doc_id`, removed when the document is deleted, and only changed chunks are re-extracted.
+8. **[P]** One allow-list row is stored per variant. Pattern kinds that are not in the auto-approved list (people, product codes, IFSC and CIN) are put to a decide-tier question with the surrounding text; an answer of at least 0.85 is approved, anything else (or no answer) stays pending. In a customer-specific document every candidate is rejected and no model is called. The product names come from the document title and from headings that end in a product word (plan, policy, scheme, fund and so on). A term already stored for the document is not stored twice and a reviewed status is never overwritten. The company name seeds come from the `COMPANY_NAMES` setting [T]. The review command groups a person's variants, shows the sentence each name appears in, and approves the group with one answer; the surname alone is approved only when ticked. Matching later uses `normalise_entity` (NFKC, case-folded, whitespace collapsed, quotes and commas trimmed), exact and not fuzzy.
 
 ## 7. Retrieval
 
@@ -251,7 +257,7 @@ Purpose: do not mask legitimate terms (laws, regulators, places, products, publi
 - When a document is deleted, any summary built from it is cleared.
 
 ### 8.5 Source removed
-Transcript messages that cite a deleted document are flagged **"source removed"** in the history view.
+Transcript messages that cite a deleted document are flagged **"source removed"** in the history view. **[P]** `messages.citations` is a JSON list of objects, each with the `doc_id` of the cited document (and its clause and page); delete flags every message with any citation whose `doc_id` is the deleted document.
 
 ### 8.6 Protection against context failures
 | Failure | Mitigation |
@@ -279,6 +285,7 @@ Cheap, local checks run first. Guardrail time budget: well under about 300 ms in
 ### 9.3 Injection defence
 - Regex patterns plus the Jev injection score; no separate injection model for now.
 - **Indirect injection:** retrieved text is wrapped in clear delimiters and the model is told to treat it as data; chunks are scanned for instruction-like content at ingestion and again in the context guard.
+- **[P]** A chunk that matches the narrow ingestion patterns (for example "ignore the previous instructions", "reveal your system prompt", a chat-template marker) is stored but **not active** (`effective_to` is set and `quarantine` is `pending`) until the owner approves it with the review command. An approved chunk becomes active and counts as a new chunk (corpus version bump, cache entries of the document cleared). A rejected chunk stays inactive and is not recreated by a later run of the same text.
 
 ### 9.4 Output checks
 - The answer must match the structured schema (answer text plus citations).
@@ -344,6 +351,8 @@ When any fallback is active (mock answer, skipped rerank), the UI says so instea
 
 ### 11.3 Backups
 Periodic Qdrant snapshot, or at minimum the ability to re-ingest from the original PDFs, which are kept in storage [P].
+
+**[P]** The original PDFs are kept on the admin machine in a git-ignored folder `originals/<doc_id>/<sha256>.pdf`, copied once and never overwritten. It is the only copy the project keeps, so the owner backs it up. The local model-answer cache (`originals/.cache/`) holds only text derived from documents and may be deleted at any time.
 
 ### 11.4 Human-review queue
 Refused answers, low-confidence answers, thumbs-down answers, two-unclear-turn sessions and failed ingest pages land in an **admin review queue**. From it the admin can label an item and add it to the evaluation set with one click. The admin reviews the queue; the overdue limit is [T: placeholder 2 working days].

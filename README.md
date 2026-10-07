@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 4 built, awaiting the owner's approval (next is Phase 5)
+Current phase: Phase 5 built, awaiting the owner's approval (next is Phase 6)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -19,8 +19,13 @@ Current phase: Phase 4 built, awaiting the owner's approval (next is Phase 5)
   `app/cache/` (the Upstash cache primitives) and `app/store_errors.py` ("temporarily unavailable").
   Phase 4 adds accounts and the API: `app/accounts/` (passwords, login tokens, users, throttling,
   budgets, audit rows, the owner's `admin_cli`) and `app/api/` (the FastAPI app and its security layer).
-- `scripts/` : helper scripts you run by hand, such as the gateway smoke test (it makes real
-  provider calls, so it is off unless you add `--run`).
+  Phase 5 adds ingestion in `app/ingest/` (admin machine only: parse, chunk, index, delete, entity
+  allow-list, review) and the shared sparse tokenizer `app/vector/sparse.py`.
+- `scripts/` : helper scripts you run by hand, such as the gateway smoke test and the Qdrant check
+  (they use real services, so they do nothing unless you add `--run`).
+- `originals/` : created by ingestion; your original PDFs (git-ignored). It is the ONLY copy the
+  project keeps: back it up yourself. `originals/.cache/` holds saved model answers and may be
+  deleted at any time.
 - `tests/` : automated tests. They only use SQLite and local resources.
 - `migrations/` : numbered SQL files for the database (Phase 3 holds the full schema).
 - `.github/workflows/ci.yml` : the checks that run on GitHub.
@@ -100,6 +105,53 @@ start if any is missing, short or a placeholder. Optional, with defaults: `JWT_E
 `TOKEN_BUDGET_CUSTOMER`, `TOKEN_BUDGET_STAFF`, `PASSWORD_HASH_CONCURRENCY` (2),
 `CORS_ALLOWED_ORIGIN` (none). It serves on http://127.0.0.1:8000; check `/live`. Stop with Ctrl+C.
 Do not trust `X-Forwarded-For` or deploy behind a proxy until Phase 15 sets the proxy options.
+
+## Ingestion on the admin machine (Phase 5)
+Ingestion turns a PDF into searchable chunks. It runs only on your machine, never on Render, and
+you start it yourself in your own terminal. Claude never runs it on real services.
+
+**Before the first run (once):**
+1. Install poppler (turns PDF pages into pictures) and tesseract (reads text from scanned images).
+   Both must be on your `PATH`. Check in a new terminal: `pdftoppm -h` and `tesseract --version`
+   each print something instead of "not recognised".
+2. Install the ingestion packages: `uv pip install -r requirements-ingest.txt`. This also downloads the
+   spaCy language model `en_core_web_lg` (about 400 MB), so no separate model step is needed.
+3. Create the Qdrant collection if you have not: `uv run python -m app.vector.documents --ensure`.
+4. Check your real Qdrant (it makes a throw-away collection named `check_...`, never touches
+   `documents`, and deletes it again): `uv run python scripts/qdrant_check.py --run`.
+   It needs `QDRANT_URL` and `QDRANT_API_KEY` in your shell. Every line should say PASS.
+
+**Settings** (in your shell, never a file): `DATABASE_URL`, `QDRANT_URL`, `QDRANT_API_KEY`,
+`UPSTASH_REDIS_URL`, the Gemini, Groq and OpenRouter key variables the gateway reads, and
+optionally `COMPANY_NAMES` (your real company name, comma-separated).
+
+**Count first, then ingest.** `--dry-run` parses and counts but calls nothing:
+
+    uv run python -m app.ingest ingest spec/samples/company/insurance_flexi_commercial_property.pdf `
+      --doc-id insurance-flexi-property --doc-type policy --access-role customer `
+      --product-line insurance --title "Flexi Commercial Property Policy" --dry-run
+
+It prints how many chunks, tables and images there are and about how many embedding, caption,
+summary and label calls a real run would make. Check that against your provider limits, then run
+the same command without `--dry-run`.
+
+- `--doc-id` is a short name you choose and keep (letters, digits, hyphens). It is never taken from
+  the file name. Re-ingesting a changed PDF with the same `--doc-id` updates only what changed.
+- `--doc-type` is `policy`, `regulatory` or `customer-specific`. For `customer-specific` no model is
+  called at all and no image is captioned.
+- **Only use the sample documents for now.** Clause text, table text and images are sent to model
+  providers (and images to Gemini); real documents wait for a paid or zero-retention plan.
+- A document with a page that failed is **not activated**; the old version stays active. Run the same
+  command again to retry. If the command says `ingest incomplete`, a cache step failed: run it again.
+
+**Afterwards:**
+- `uv run python -m app.ingest review entities --doc-id SLUG` approves the names the program was not
+  sure about (a person is shown with the sentence they appear in; the surname alone is approved
+  only if you tick it).
+- `uv run python -m app.ingest review chunks --doc-id SLUG` shows chunks held back because they read
+  like instructions to the model; they stay inactive until you approve them.
+- `uv run python -m app.ingest delete --doc-id SLUG` removes a document everywhere (it asks you to
+  type the id).
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

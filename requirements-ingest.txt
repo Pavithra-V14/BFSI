@@ -1,13 +1,17 @@
 # Ingestion packages (spec sections 2 and 6). Admin machine only, never on Render.
 # Install requirements.txt first, then this file.
 #
-# NOT Python packages, install them yourself and make sure they are on PATH:
+# NOT Python packages, install them yourself and make sure they are on PATH
+# (steps for Windows are in README.md, "Ingestion on the admin machine"):
 #   poppler    (turns PDF pages into images)
 #   tesseract  (reads text from scanned images, OCR)
-# Exact Windows steps are added in Phase 5, when ingestion is built.
 #
-# The large spaCy model is installed from its release file. The version is the
+# The large spaCy model (about 400 MB) is installed from its release file by the line below, so
+# installing this file downloads it; no separate `spacy download` is needed. The version is the
 # one that the spaCy compatibility list names for spaCy 3.8.
 spacy==3.8.16
 en_core_web_lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
 unstructured[pdf]==0.27.10
+# Phase 5: Presidio runs the spaCy model for entity extraction (spec 6.8). pypdf, used to cut a
+# PDF into single pages, comes with unstructured[pdf].
+presidio-analyzer==2.2.364

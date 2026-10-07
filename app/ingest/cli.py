@@ -1,0 +1,318 @@
+"""The ingestion command line (spec 6). Run by the owner, in his own terminal, on the admin machine:
+
+    uv run python -m app.ingest ingest PDF --doc-id SLUG --doc-type policy --access-role customer
+    uv run python -m app.ingest ingest PDF ... --dry-run     (no service is called)
+    uv run python -m app.ingest review entities --doc-id SLUG   (approve pending allow-list terms)
+    uv run python -m app.ingest review chunks --doc-id SLUG     (chunks held back by the scan)
+    uv run python -m app.ingest delete --doc-id SLUG
+
+Settings come from the shell (never from a file): DATABASE_URL, QDRANT_URL, QDRANT_API_KEY,
+UPSTASH_REDIS_URL, COMPANY_NAMES (optional, comma-separated) and the gateway's key variables.
+Output is names and counts only: never document text, a key or a URL. `--doc-id` is a slug you
+choose and keep; it is never taken from the path.
+
+Exit codes: 0 done; 1 an error, or "ingest incomplete" (a cache step failed: run it again); 2 a
+page failed, so the document was not activated (run it again once the page can be parsed).
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from app.ingest.chunker import chunk_document
+from app.ingest.delete import delete_document
+from app.ingest.entities import AUTO_KINDS, Ner, extract_candidates, presidio_ner, variants_of
+from app.ingest.index import IngestContext, ingest_document
+from app.ingest.lock import DocumentBusy
+from app.ingest.model import (
+    ACCESS_ROLES,
+    DOC_TYPES,
+    DocRequest,
+    IngestError,
+    ParsedDocument,
+    check_choice,
+    check_doc_id,
+)
+from app.ingest.originals import keep_original
+from app.ingest.queue import flag_failed_pages, resolve_failed_pages
+from app.ingest.review import review_chunks, review_entities
+from app.store_errors import StoreRejected, StoreUnavailable
+
+ORIGINALS_DIR = Path("originals")
+LOCKS_DIR = ORIGINALS_DIR / ".locks"
+EMBED_BATCH = 16  # the gateway embeds this many texts per call (app.gateway.embeddings)
+
+Parse = Callable[[Path], ParsedDocument]
+
+
+@dataclass
+class Services:
+    ctx: IngestContext
+    close: Callable[[], None] = lambda: None
+
+
+def parse_with_unstructured(path: Path) -> ParsedDocument:
+    from app.ingest import unstructured_backend as backend
+    from app.ingest.parse import parse_pdf
+
+    return parse_pdf(path, page_count=backend.count_pages(path), parse_page=backend.parse_page)
+
+
+def build_services(env: Mapping[str, str]) -> Services:
+    """The real services, from the shell. Only the owner's own run reaches this."""
+    from app.cache.store import store_from_env
+    from app.db.connection import connect
+    from app.gateway import Gateway, GatewayConfig
+    from app.gateway.tokens import TokenCounter
+    from app.ingest.cache import DiskCache
+    from app.ingest.embedding import make_embedder
+    from app.ingest.enrich import EnrichTools, make_enricher
+    from app.ingest.entities import DEFAULT_COMPANY_NAMES, presidio_ner
+    from app.ingest.llm import LlmTools
+    from app.ingest.runner import LoopRunner
+    from app.vector.documents import client_from_env
+
+    url = (env.get("DATABASE_URL") or "").strip()
+    if not url:
+        raise IngestError("the environment variable DATABASE_URL is not set")
+    runner = LoopRunner()
+    db = connect(url)
+    gateway = Gateway(GatewayConfig.from_env(env))
+    llm = LlmTools(gateway, runner)
+    names = tuple(n.strip() for n in (env.get("COMPANY_NAMES") or "").split(",") if n.strip())
+    enrich = make_enricher(
+        EnrichTools(
+            caption=llm.caption,
+            summarise=llm.summarise,
+            label=llm.label,
+            classify=llm.classify,
+            ner=presidio_ner(),
+            db=db,
+            cache=DiskCache(ORIGINALS_DIR / ".cache"),
+            company_names=names or DEFAULT_COMPANY_NAMES,
+        )
+    )
+    ctx = IngestContext(
+        qdrant=client_from_env(env),
+        cache=store_from_env(env),
+        db=db,
+        embed=make_embedder(gateway, runner),  # development vectors are never allowed
+        count=TokenCounter().count_text,
+        lock_dir=LOCKS_DIR,
+        enrich=enrich,
+    )
+
+    def close() -> None:
+        db.close()
+        runner.close()
+
+    return Services(ctx, close)
+
+
+def _today() -> str:
+    return datetime.now(UTC).date().isoformat()
+
+
+def _estimate(
+    parsed: ParsedDocument,
+    request: DocRequest,
+    count: Callable[[str], int],
+    ner_factory: Callable[[], Ner] | None,
+    out: Callable[[str], None],
+) -> None:
+    """What a real run on a fresh document would call. Nothing here reaches a service: the entity
+    count runs the local NER model on the parsed chunks."""
+    chunked = chunk_document(parsed, count)
+    texts = len(chunked.chunks)
+    images = len(chunked.images)
+    tables = sum(1 for c in chunked.chunks if c.kind == "table")
+    out(f"pages parsed: {parsed.page_count - len(parsed.failed_pages)} of {parsed.page_count}")
+    out(f"running headers and footers removed: {parsed.furniture_dropped}")
+    for failed in parsed.failed_pages:
+        out(f"  page {failed.page} failed to parse ({failed.reason})")
+    out(f"chunks: {texts} (text {texts - tables}, table {tables}); images: {images}")
+    out(
+        f"if every chunk is new: embedding texts {texts + images}, "
+        f"embedding calls {math.ceil((texts + images) / EMBED_BATCH)}"
+    )
+    questions = "not counted (no NER available)"
+    if ner_factory is not None:
+        candidates = extract_candidates(
+            [(c.text, c.heading_path) for c in chunked.chunks], request, ner_factory()
+        )
+        asked = [c for c in candidates if c.kind not in AUTO_KINDS]
+        questions = (
+            f"{len(asked)} of {len(candidates)} candidates "
+            f"({sum(len(variants_of(c)) for c in candidates)} allow-list rows)"
+        )
+    out(f"image caption calls: {images}; table summary calls: {tables}")
+    out(f"clause label calls: {texts + images}; entity questions: {questions}")
+    out("no service was called (dry run)")
+
+
+def _ingest(args, env, services_factory, parse: Parse, ner_factory, out, err) -> int:
+    check_doc_id(args.doc_id)
+    check_choice(args.doc_type, DOC_TYPES, "doc-type")
+    check_choice(args.access_role, ACCESS_ROLES, "access-role")
+    path = Path(args.pdf)
+    if path.suffix.lower() != ".pdf" or not path.is_file():
+        raise IngestError("the file must be an existing .pdf")
+    request = DocRequest(
+        doc_id=args.doc_id,
+        source=path.name,
+        title=args.title,
+        doc_type=args.doc_type,
+        access_role=args.access_role,
+        product_line=args.product_line,
+        effective_date=args.effective_date or _today(),
+    )
+    if args.dry_run:
+        from app.gateway.tokens import TokenCounter
+
+        _estimate(parse(path), request, TokenCounter().count_text, ner_factory, out)
+        return 0
+    if args.doc_type == "customer-specific":
+        out("customer-specific document: no model is called and no image is captioned")
+    else:
+        out(
+            "note: clause text, table text and images of this document are sent to model "
+            "providers; use documents without customer data only"
+        )
+    services = services_factory(env)
+    try:
+        keep_original(path, ORIGINALS_DIR, args.doc_id)
+        parsed = parse(path)
+        result = ingest_document(services.ctx, request, parsed)
+        now = datetime.now(UTC)
+        if result.status == "failed_pages":
+            flag_failed_pages(services.ctx.db, result.doc_id, result.failed_pages, now)
+        else:
+            resolve_failed_pages(services.ctx.db, result.doc_id, now)
+    finally:
+        services.close()
+    if result.status == "failed_pages":
+        out(f"document '{result.doc_id}' was NOT activated; the old version (if any) stays active")
+        for failed in result.failed_pages:
+            out(f"  page {failed.page} failed ({failed.reason})")
+        out("each failed page is in the review queue; run the same command again to retry")
+        return 2
+    out(
+        f"{result.doc_id}: new {result.new}, changed {result.changed}, "
+        f"unchanged {result.unchanged}, removed {result.removed}, version {result.doc_version}"
+    )
+    if result.images_skipped:
+        out(f"{result.images_skipped} image(s) were not captioned in this run")
+    if result.incomplete:
+        for reason in result.incomplete:
+            err(f"  {reason}")
+        err("ingest incomplete: run the same command again to finish it")
+        return 1
+    return 0
+
+
+def _review(args, env, services_factory, ask, out, err) -> int:
+    check_doc_id(args.doc_id)
+    services = services_factory(env)
+    try:
+        if args.what == "entities":
+            result = review_entities(services.ctx, args.doc_id, ask, out)
+            out(
+                f"approved {result.approved}, rejected {result.rejected}, "
+                f"left pending {result.skipped}"
+            )
+            return 0
+        held = review_chunks(services.ctx, args.doc_id, ask, out)
+    finally:
+        services.close()
+    out(f"approved {held.approved}, rejected {held.rejected}, left held back {held.skipped}")
+    if held.incomplete:
+        for reason in held.incomplete:
+            err(f"  {reason}")
+        err("review incomplete: a cache step failed; run the review again to finish it")
+        return 1
+    return 0
+
+
+def _delete(args, env, services_factory, confirm, out, err) -> int:
+    check_doc_id(args.doc_id)
+    out(
+        f"This removes every vector and allow-list entry of '{args.doc_id}' "
+        "and flags chats that cited it."
+    )
+    if confirm(f"Type the document id ({args.doc_id}) to confirm: ").strip() != args.doc_id:
+        out("not confirmed; nothing was deleted")
+        return 1
+    services = services_factory(env)
+    try:
+        result = delete_document(services.ctx, args.doc_id)
+    finally:
+        services.close()
+    out(
+        f"{result.doc_id}: removed {result.chunks} chunk(s), {result.allowlist_entries} allow-list "
+        f"entr(ies); {result.transcripts_flagged} chat message(s) flagged 'source removed'"
+    )
+    if result.incomplete:
+        for reason in result.incomplete:
+            err(f"  {reason}")
+        err("delete incomplete: run the same command again to finish it")
+        return 1
+    return 0
+
+
+def main(
+    argv: list[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    services_factory: Callable[[Mapping[str, str]], Services] = build_services,
+    parse: Parse = parse_with_unstructured,
+    ner_factory: Callable[[], Ner] | None = presidio_ner,
+    confirm: Callable[[str], str] = input,
+    out: Callable[[str], None] = print,
+    err: Callable[[str], None] = lambda text: print(text, file=sys.stderr),
+) -> int:
+    parser = argparse.ArgumentParser(prog="python -m app.ingest", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    ingest = commands.add_parser("ingest", help="parse, chunk, embed and index one PDF")
+    ingest.add_argument("pdf")
+    ingest.add_argument("--doc-id", required=True)
+    ingest.add_argument("--doc-type", required=True, choices=DOC_TYPES)
+    ingest.add_argument("--access-role", required=True, choices=ACCESS_ROLES)
+    ingest.add_argument("--product-line")
+    ingest.add_argument("--title")
+    ingest.add_argument("--effective-date", help="YYYY-MM-DD; default today (UTC)")
+    ingest.add_argument("--dry-run", action="store_true", help="parse and count; call no service")
+    review = commands.add_parser("review", help="approve or reject held-back items of a document")
+    review.add_argument("what", choices=["entities", "chunks"])
+    review.add_argument("--doc-id", required=True)
+    delete = commands.add_parser("delete", help="remove a document everywhere (asks to confirm)")
+    delete.add_argument("--doc-id", required=True)
+    args = parser.parse_args(argv)
+    env = os.environ if env is None else env
+    try:
+        if args.command == "ingest":
+            return _ingest(args, env, services_factory, parse, ner_factory, out, err)
+        if args.command == "review":
+            return _review(args, env, services_factory, confirm, out, err)
+        return _delete(args, env, services_factory, confirm, out, err)
+    except DocumentBusy as error:
+        err(f"error: {error}")
+    except IngestError as error:
+        err(f"error: {error}")
+    except StoreUnavailable as error:
+        err(f"error: a store could not be reached ({error.cause})")
+    except StoreRejected as error:
+        err(f"error: a store rejected the request ({error.reason})")
+    except Exception as error:  # names only: a message could echo a key or a URL
+        err(f"error: the run stopped ({type(error).__name__}); nothing secret is printed")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

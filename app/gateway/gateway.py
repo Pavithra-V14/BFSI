@@ -11,6 +11,7 @@ reason any earlier step was skipped. Keys never appear in results, logs or error
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import random
@@ -83,6 +84,16 @@ log = logging.getLogger("app.gateway")
 
 AUTH_COOLDOWN_SECONDS = 3_600.0
 MIN_RETRY_BUDGET_SECONDS = 2.0  # less of the caller's time than this: no reasoning retry
+# Image captions (spec 6.1) [P]: what one picture costs the limiter, and what may be sent.
+IMAGE_TOKEN_ESTIMATE = 1_500
+CAPTION_MAX_TOKENS = 300
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp")
+CAPTION_PROMPT = (
+    "Describe this image from a financial document so that it can be found by search. "
+    "Say what kind of image it is, any title, labels and axes, and the figures, trends or "
+    "relationships it shows. Plain text, under 150 words. Only describe what is visible."
+)
 EVENT_BUFFER = 1_000
 LITELLM_PREFIX = {"groq": "groq", "gemini": "gemini", "openrouter": "openrouter"}
 MOCK_TEXT = "[offline mock answer: no model could be reached]"
@@ -703,6 +714,63 @@ class Gateway:
                 skipped=skipped,
             )
         raise AllProvidersFailed(skipped)
+
+    async def caption_image(
+        self,
+        image: bytes,
+        mime_type: str = "image/png",
+        *,
+        timeout_s: float | None = None,
+        max_wait_s: float = 0.0,
+    ) -> CompletionResult:
+        """Describe one image as text (spec 6.1). Gemini only, the one provider the spec names.
+
+        It uses the same Gemini key pool, rate limiter and circuit breaker as Gemini answers.
+        The image bytes and the caption text are never logged or put in an event: events carry the
+        provider and a reason only. If Gemini cannot answer, AllProvidersFailed is raised (the
+        caller flags the page). Document content leaves this machine here, so this is for
+        documents without customer data only.
+        """
+        if mime_type not in IMAGE_TYPES:
+            raise ValueError("the image type must be PNG, JPEG or WebP")
+        if not image or len(image) > MAX_IMAGE_BYTES:
+            raise ValueError("the image is empty or too large")
+        started = self._clock.now()
+        steps = [s for s in self.answer_steps() if s.provider == "gemini"]
+        prompt_tokens = self._counter.count_text(CAPTION_PROMPT) + IMAGE_TOKEN_ESTIMATE
+        reserved = CAPTION_MAX_TOKENS + self.config.reasoning_allowance
+        self._windows.check(prompt_tokens, reserved, [s.litellm_model for s in steps])
+        data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": CAPTION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ]
+        per_call, deadline = self._timing(timeout_s)
+        # tier "answer": the breaker is the one the Gemini answers use.
+        outcome = await self._llm_step(
+            steps[0],
+            "answer",
+            messages,
+            prompt_tokens=prompt_tokens,
+            max_tokens=reserved,
+            json_mode=False,
+            validator=None,
+            per_call=per_call,
+            deadline=deadline,
+            reasoning_effort=self.config.reasoning_effort_answer,
+            max_wait_s=max_wait_s,
+        )
+        if outcome.ok:
+            result = self._completion_result(steps[0], outcome, [], started, prompt_tokens)
+            self.stats.record("caption", result.decider)
+            return result
+        self._emit("step_skipped", tier="caption", provider="gemini", reason=outcome.reason)
+        raise AllProvidersFailed([("gemini", outcome.reason)])
 
     # ---- typed decisions ------------------------------------------------------------
 

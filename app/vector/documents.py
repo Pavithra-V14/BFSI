@@ -167,40 +167,41 @@ def client_from_env(env: Mapping[str, str] | None = None) -> QdrantClient:
     return make_client(env.get("QDRANT_URL"), env.get("QDRANT_API_KEY"), env=env)
 
 
-def _check_shape(info: models.CollectionInfo) -> None:
+def _check_shape(info: models.CollectionInfo, collection: str = COLLECTION) -> None:
     params = info.config.params
     dense = params.vectors.get(DENSE_VECTOR) if isinstance(params.vectors, dict) else None
     if dense is None:
-        raise CollectionMismatch(f"collection '{COLLECTION}' has no named vector '{DENSE_VECTOR}'")
+        raise CollectionMismatch(f"collection '{collection}' has no named vector '{DENSE_VECTOR}'")
     if dense.size != DIMENSIONS:
         raise CollectionMismatch(
-            f"collection '{COLLECTION}' has {dense.size} dimensions, the spec says {DIMENSIONS}; "
+            f"collection '{collection}' has {dense.size} dimensions, the spec says {DIMENSIONS}; "
             "vectors of different sizes cannot be mixed, so re-create it deliberately"
         )
     if dense.distance != models.Distance.COSINE:
-        raise CollectionMismatch(f"collection '{COLLECTION}' does not use cosine distance")
+        raise CollectionMismatch(f"collection '{collection}' does not use cosine distance")
     sparse = (params.sparse_vectors or {}).get(SPARSE_VECTOR)
     if sparse is None:
         raise CollectionMismatch(
-            f"collection '{COLLECTION}' has no sparse vector '{SPARSE_VECTOR}'"
+            f"collection '{collection}' has no sparse vector '{SPARSE_VECTOR}'"
         )
     if sparse.modifier != models.Modifier.IDF:
         raise CollectionMismatch(f"sparse vector '{SPARSE_VECTOR}' does not apply IDF")
 
 
-def ensure_documents_collection(client: QdrantClient) -> EnsureResult:
+def ensure_documents_collection(client: QdrantClient, collection: str = COLLECTION) -> EnsureResult:
     """Create the collection and its payload indexes if missing; verify them if present.
 
-    Safe to run again. A collection with a different shape is never touched: the function raises
+    Safe to run again. `collection` is only ever changed by the owner-run Qdrant check, which uses a
+    throwaway name. A collection with a different shape is never touched: the function raises
     CollectionMismatch. If Qdrant cannot be reached it raises VectorStoreUnavailable, and if it
     refuses the key or the certificate, StoreRejected.
     """
 
     def work() -> EnsureResult:
-        created = not client.collection_exists(COLLECTION)
+        created = not client.collection_exists(collection)
         if created:
             client.create_collection(
-                COLLECTION,
+                collection,
                 vectors_config={
                     DENSE_VECTOR: models.VectorParams(
                         size=DIMENSIONS, distance=models.Distance.COSINE
@@ -212,8 +213,8 @@ def ensure_documents_collection(client: QdrantClient) -> EnsureResult:
             )
             existing: dict[str, models.PayloadIndexInfo] = {}
         else:
-            info = client.get_collection(COLLECTION)
-            _check_shape(info)
+            info = client.get_collection(collection)
+            _check_shape(info, collection)
             existing = dict(info.payload_schema or {})
         indexes_created: list[str] = []
         for name, schema in PAYLOAD_INDEXES:
@@ -225,7 +226,7 @@ def ensure_documents_collection(client: QdrantClient) -> EnsureResult:
             with warnings.catch_warnings():
                 # In-memory mode keeps no indexes and says so; the message is not news here.
                 warnings.filterwarnings("ignore", message="Payload indexes have no effect")
-                client.create_payload_index(COLLECTION, name, field_schema=schema)
+                client.create_payload_index(collection, name, field_schema=schema)
             indexes_created.append(name)
         return EnsureResult(created=created, indexes_created=indexes_created)
 
