@@ -59,6 +59,7 @@ SPEC = {
         "grounded": ("BOOLEAN", False),
         "source_removed": ("BOOLEAN", True),
         "created_at": ("TIMESTAMPTZ", True),
+        "history_excluded": ("BOOLEAN", True),  # migration 0005 [P]
     },
     "audit_log": {
         "id": ("TEXT", True),
@@ -124,6 +125,7 @@ DEFAULTS = {
     ("sessions", "status"): "'active'",
     ("messages", "citations"): "'[]'",
     ("messages", "source_removed"): "FALSE",
+    ("messages", "history_excluded"): "FALSE",
     ("messages", "created_at"): "CURRENT_TIMESTAMP",
     ("audit_log", "details"): "'{}'",
     ("audit_log", "created_at"): "CURRENT_TIMESTAMP",
@@ -202,7 +204,7 @@ def count(conn, table, where="1 = 1", args=()):
 # ---- the migrations themselves --------------------------------------------------------
 
 
-def test_the_four_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
+def test_the_five_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
     quiet = lambda line: None  # noqa: E731
     applied = run(url, MIGRATIONS, log=quiet)
@@ -211,9 +213,10 @@ def test_the_four_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
         "0002_sessions_messages.sql",
         "0003_audit_allowlist_feedback_review.sql",
         "0004_users_active.sql",
+        "0005_messages_history_excluded.sql",
     ]
     assert run(url, MIGRATIONS, log=quiet) == []  # nothing left to apply
-    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4]
+    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5]
 
 
 def test_the_sql_stays_portable_between_postgres_and_sqlite():
@@ -245,9 +248,37 @@ def test_migration_0004_adds_the_active_flag_and_existing_users_stay_active(tmp_
     )
     conn.commit()
     conn.close()
-    assert run(url, MIGRATIONS, log=lambda line: None) == ["0004_users_active.sql"]
+    assert run(url, MIGRATIONS, log=lambda line: None) == [
+        "0004_users_active.sql",
+        "0005_messages_history_excluded.sql",
+    ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT is_active FROM users").fetchall() == [(1,)]
+    conn.close()
+
+
+def test_migration_0005_adds_the_history_flag_and_existing_messages_stay_in_history(tmp_path):
+    path = tmp_path / "upgrade5.db"
+    old = tmp_path / "old5"
+    old.mkdir()
+    for migration in load_migrations(MIGRATIONS)[:4]:
+        (old / migration.filename).write_text(migration.sql, encoding="utf-8")
+    url = f"sqlite:///{path}"
+    run(url, old, log=lambda line: None)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO users (id, username, email, password_hash) VALUES ('u', 'a', 'a@e.test', 'h')"
+    )
+    conn.execute("INSERT INTO sessions (id, user_id) VALUES ('s', 'u')")
+    conn.execute(
+        "INSERT INTO messages (id, session_id, seq, role, content) "
+        "VALUES ('m', 's', 1, 'user', 'x')"
+    )
+    conn.commit()
+    conn.close()
+    assert run(url, MIGRATIONS, log=lambda line: None) == ["0005_messages_history_excluded.sql"]
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT history_excluded FROM messages").fetchall() == [(0,)]
     conn.close()
 
 

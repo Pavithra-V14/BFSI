@@ -31,6 +31,12 @@ class Database:
             raise ValueError("kind must be sqlite or postgres")
         self.raw = connection
         self.kind = kind
+        self._depth = 0  # how many transaction() blocks are open (see transaction)
+
+    @property
+    def in_transaction(self) -> bool:
+        """True while a transaction() block is open."""
+        return self._depth > 0
 
     def _sql(self, sql: str) -> str:
         if self.kind == "postgres":
@@ -54,15 +60,28 @@ class Database:
         write=True takes the write lock at once on SQLite (BEGIN IMMEDIATE), so two writers that
         must not interleave are serialised. On Postgres the caller takes a table lock where it
         needs one (see app.accounts.users.set_role).
+
+        A block opened inside another one joins it: the outer block alone commits or rolls back
+        (so a helper can wrap its own reads and still be called from a larger transaction).
         """
+        if self._depth > 0:
+            self._depth += 1
+            try:
+                yield self
+            finally:
+                self._depth -= 1
+            return
         if self.kind == "sqlite":
             self.raw.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        self._depth = 1
         try:
             yield self
         except BaseException:
+            self._depth = 0
             self._end("rollback")
             raise
         else:
+            self._depth = 0
             self._end("commit")
 
     def _end(self, how: str) -> None:

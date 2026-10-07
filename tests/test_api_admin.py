@@ -38,7 +38,11 @@ def test_the_role_change_writes_an_audit_row_naming_the_admin_and_the_target(env
     admin_id = env.rows("SELECT id FROM users WHERE username = 'boss'")[0][0]
     user_id = env.make_user("asha_rao")
     change(env, token, user_id, "staff")
-    assert (admin_id, user_id, {"from": "customer", "to": "staff"}) in audit_rows(env)
+    assert (
+        admin_id,
+        user_id,
+        {"from": "customer", "sessions_reset": 0, "to": "staff"},
+    ) in audit_rows(env)
 
 
 @pytest.mark.parametrize("role", ["customer", "staff"])

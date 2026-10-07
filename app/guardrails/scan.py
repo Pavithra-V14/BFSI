@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Any, Literal, overload
+from typing import Any, ClassVar, Literal, overload
 
 from app.guardrails import messages
 from app.guardrails.allowlist import AllowList
@@ -35,6 +35,7 @@ from app.guardrails.limits import (
     is_too_short,
 )
 from app.guardrails.masking import Masker
+from app.guardrails.minted import MintedText, mint
 
 
 @dataclass(frozen=True)
@@ -53,21 +54,22 @@ class ModelCopy:
 
 
 @dataclass(frozen=True)
-class StoredQuery:
+class StoredQuery(MintedText):
     """Pass 2: the question re-masked with ONLY the entries of the documents that survived
-    retrieval. The one copy that may be stored, logged or cached."""
+    retrieval. The one copy that may be stored, logged or cached. Only `mask_for_storage` can make
+    one: calling the class, `dataclasses.replace`, a subclass or a copy are all refused."""
 
-    text: str
     counts: dict[str, int] = field(default_factory=dict)
+    refusal: ClassVar[str] = "a StoredQuery can only be made by mask_for_storage"
 
 
 @dataclass(frozen=True)
-class StoredAnswer:
+class StoredAnswer(MintedText):
     """The answer text masked the same way as a StoredQuery (the same function makes both), the
     only form of an assistant message that the chat store accepts."""
 
-    text: str
     counts: dict[str, int] = field(default_factory=dict)
+    refusal: ClassVar[str] = "a StoredAnswer can only be made by mask_for_storage"
 
 
 @overload
@@ -106,7 +108,7 @@ def mask_for_storage(
         raise ValueError("kind must be 'query' or 'answer'")
     result = masker.mask(raw_query.strip(), allow.terms(set(doc_ids)))
     made = StoredQuery if kind == "query" else StoredAnswer
-    return made(result.text, dict(result.counts))
+    return mint(made, text=result.text, counts=dict(result.counts))
 
 
 @dataclass

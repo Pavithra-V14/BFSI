@@ -32,6 +32,14 @@ class AllowList:
         wanted = [self._by_doc[d] for d in doc_ids if d in self._by_doc]
         return frozenset().union(*wanted) if wanted else frozenset()
 
+    def terms_by_doc(self) -> dict[str, tuple[str, ...]]:
+        """Every approved term with the ids of the documents that approve it (sorted)."""
+        found: dict[str, set[str]] = {}
+        for doc_id, terms in self._by_doc.items():
+            for term in terms:
+                found.setdefault(term, set()).add(doc_id)
+        return {term: tuple(sorted(docs)) for term, docs in found.items()}
+
     def __len__(self) -> int:
         return sum(len(terms) for terms in self._by_doc.values())
 

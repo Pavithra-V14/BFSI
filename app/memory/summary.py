@@ -11,7 +11,11 @@ What comes back is untrusted model text. Before it is saved it is:
 3. scanned with the injection patterns (the wider chunk list). On a hit the OLD summary is kept,
    the boundary does not move, and an alert event is emitted (pattern names only, never text);
 4. clipped to the summary limit (150 tokens).
-A failed call, an empty reply or a hit all mean the same: nothing changes, the turns stay out of
+The result is a `StoredSummary`, a type only this function can make (see `app.guardrails.minted`);
+`save_summary` accepts nothing else.
+ANY exception while folding (a provider error, a timeout, a bug in masking) is a failed fold,
+never a failed turn: `summary_fold_failed` is emitted with the exception's type name only. A
+failed call, an empty reply or a hit all mean the same: nothing changes, the turns stay out of
 this turn's history, and the next turn tries again.
 """
 
@@ -21,14 +25,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.gateway.errors import GatewayError
 from app.guardrails.context import neutralise
 from app.guardrails.injection import scan_chunk
 from app.guardrails.masking import Masker
+from app.guardrails.minted import mint
 from app.guardrails.plain_text import to_plain_text
 from app.guardrails.prompts import get_prompt
 from app.memory.buffer import Turn
 from app.memory.config import MemoryConfig
+from app.memory.stored_summary import StoredSummary
 from app.memory.tokens import clip_to_tokens
 
 Event = Callable[[str, dict[str, Any]], None]
@@ -38,7 +43,7 @@ SUMMARY_OUTPUT_ALLOWANCE = 60  # output room above the summary limit (formatting
 @dataclass(frozen=True)
 class FoldResult:
     ok: bool
-    summary: str | None = None
+    summary: StoredSummary | None = None
     reason: str | None = None  # provider_failed | empty | injection_pattern
 
 
@@ -67,23 +72,24 @@ async def fold_summary(
         if on_event:
             on_event(name, fields)
 
-    messages = [{"role": "user", "content": assemble_summary(current_summary, turns)}]
     try:
+        messages = [{"role": "user", "content": assemble_summary(current_summary, turns)}]
         result = await gateway.complete(
             messages,
             tier="decide",
             max_tokens=config.summary_tokens + SUMMARY_OUTPUT_ALLOWANCE,
             max_wait_s=0.0,
         )
-    except GatewayError as error:
+        text = to_plain_text(getattr(result, "text", "") or "")
+        text = masker.mask(text).text
+    except Exception as error:  # a failed fold, not a failed turn (CancelledError still passes)
         emit("summary_fold_failed", reason=type(error).__name__)
         return FoldResult(False, None, "provider_failed")
-    text = to_plain_text(getattr(result, "text", "") or "")
-    text = masker.mask(text).text
     if not text.strip():
         return FoldResult(False, None, "empty")
     hits = scan_chunk(text)
     if hits:
         emit("summary_rejected_injection", patterns=list(hits))
         return FoldResult(False, None, "injection_pattern")
-    return FoldResult(True, clip_to_tokens(text, config.summary_tokens, counter), None)
+    clipped = clip_to_tokens(text, config.summary_tokens, counter)
+    return FoldResult(True, mint(StoredSummary, text=clipped), None)

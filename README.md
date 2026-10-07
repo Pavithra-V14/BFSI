@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 7 built, awaiting the owner's approval (next is Phase 8)
+Current phase: Phase 7 hardened (round 2, the last), awaiting the owner's approval (next is Phase 8)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -386,43 +386,69 @@ Short-term memory only (no memory across sessions). The code is in `app/memory/`
 functions the pipeline (Phase 8) and the chat API (Phase 10) will call. Nothing here is a web route.
 
 - **Sessions and messages** (`store.py`): every function takes the user id, and a session that
-  belongs to someone else gives the same "not found" as one that does not exist. Message text is
-  accepted only as `StoredQuery` (a user message) or `StoredAnswer` (an assistant message), made by
-  `mask_for_storage`; a plain string is refused. Two messages never share a number (the database's
-  unique constraint decides and a collision is retried).
+  belongs to someone else gives the same "not found" as one that does not exist; a closed session
+  gives it too when you try to write to it. Message text is accepted only as `StoredQuery` (a user
+  message) or `StoredAnswer` (an assistant message), and a summary only as `StoredSummary`. Those
+  three types can only be made by `mask_for_storage` and by the summary function: calling the class,
+  copying it or building a look-alike is refused (tests use `tests/stored.py`, which nothing in the
+  application may import). A fixed reply (a greeting, the unclear-turn ending, a refusal) is stored
+  with `add_fixed_reply`, always ungrounded. A question that tripped the injection scan or was
+  refused is stored with `history_excluded` and never feeds history. Two messages never share a
+  number (the database's unique constraint decides and a collision is retried). Every read is inside
+  a transaction block and a time given to the package must carry a time zone.
 - **History** (`buffer.py`, `summary.py`, `history.py`): the rewrite step gets a running summary
   (at most 150 tokens) plus the newest turns word for word within `MEMORY_BUFFER_TOKENS` (default
-  400, a starting value). Only grounded answers whose source is still there feed it; each is clipped
-  to about 80 tokens. When turns no longer fit, one decide-tier call folds them into the summary. The
-  reply is made plain text, masked, scanned for instruction-like text and clipped; on a hit the old
-  summary stays and an alert event is emitted. The generator never sees any of this.
+  400, a starting value). Only grounded answers whose source is still there feed it; each whole
+  history line is clipped to about 80 tokens. When turns no longer fit, one decide-tier call folds
+  the oldest of them (at most 1,500 tokens, a starting value) into the summary; the rest waits for
+  the next turn. The reply is made plain text, masked, scanned for instruction-like text and clipped;
+  on a hit the old summary stays and an alert event is emitted. Any error in the fold, of any kind,
+  is only a failed fold: the turn goes on. A summary is not saved if a folded message was flagged
+  "source removed" while the model worked. No database transaction is open while the model is
+  called. Everything placed in the rewrite prompt has its angle brackets replaced. The generator
+  never sees any of this.
 - **Facts and unclear turns** (`facts.py`, `unclear.py`): `session_facts` holds the product line,
-  topic and approved names found by plain matching (no model call) and the count of unclear turns in
-  a row. That count is never put in a prompt. Two in a row end with a fixed message and one
+  topic and approved names (each with the documents that approve it) found by plain matching (no
+  model call), checked when written and again when read for a prompt, and the count of unclear turns
+  in a row. That count is never put in a prompt. Two in a row end with a fixed message and one
   `two_unclear_turns` row in the review queue.
 - **Retention** (`retention.py`): chats not used for 90 days (counted from the last activity) are
-  deleted, with one audit row of counts. To see what would go, in your own terminal:
+  deleted, with one audit row of counts (none when nothing was deleted; a chat resumed while the
+  sweep runs is kept). To see what would go, in your own terminal:
   `uv run python -m app.memory.retention --dry-run` (it needs `DATABASE_URL` in the shell and only
   counts). Without `--dry-run` it deletes. Scheduling it is a deployment step (Phase 15).
 - **Deleting a document** (`documents.py`, called by the Phase 5 delete): a summary that rests on
-  the deleted document is cleared, with one audit row of counts.
+  the deleted document is cleared, and the document is removed from the names kept in session
+  facts (a name another document also approves stays); one audit row of counts.
+- **A role change** (`roles.py`, called by `set_role` in the same transaction): the user's
+  sessions are closed and their summaries and facts cleared; the messages stay in the transcript.
 
 **Known limitations (recorded in Phase 7)**
 - **Phase 8 (pipeline).** Use `facts_for_prompt` / `render_facts` for anything that goes into a
   prompt; use `prepare_history` before the rewrite; store messages only through the masked types;
-  decide "unclear" from the Jev vague flag and call `record_turn`; connect the alert events
-  (`summary_rejected_injection`, `summary_fold_failed`) to the alert path. When the summary call
+  decide "unclear" from the Jev vague flag and call `record_turn`; store a question that tripped the
+  injection scan or was refused with `history_excluded=True`; store greetings, the unclear ending and
+  refusals with `add_fixed_reply`; connect the alert events (`summary_rejected_injection`,
+  `summary_fold_failed`) to the alert path. **One turn at a time per session:** two requests in one
+  session (two browser tabs) get different message numbers but their rows can interleave, so the
+  pipeline must refuse or queue a second question while one is being answered. When the summary call
   fails, the turns that no longer fit are left out of that turn's history and tried again on the
   next turn.
 - **Phase 10 (chat API).** The routes call these functions with the signed-in user's id; a wrong
-  session id must give the same answer as a missing one at the HTTP level too (404 both ways).
+  session id must give the same answer as a missing one at the HTTP level too (404 both ways). Same
+  rule as Phase 8: one turn at a time per session. **Deleting a user account** must first run the
+  review-text clearing (`app.db.chats.clear_review_details_for_session`) for each of the user's
+  sessions, because the database cascade removes the messages but cannot erase the text copied into
+  review items.
 - **Phase 12 (observability).** The two summary events are plain callbacks until the alert path
   exists. The retention sweep is one transaction; a very large backlog should be swept in smaller
   batches.
 - **Phase 15 (deployment).** Schedule the retention command (daily is enough).
 - **Phase 16 (baseline run).** Sweep the buffer size (200, 400, 800, 1,200) on the multi-turn set;
-  the 150 and 80 token limits and the fixed "unclear" message wording are starting values. Session
-  facts (topic, names) are not cleared when a document is deleted, only the summary is.
+  the 150, 80 and 1,500 token limits and the fixed "unclear" message wording are starting values.
+  `product_line` and `topic` in session facts are not cleared when a document is deleted (only the
+  names are); the stored text of "source removed" answers and the approved names inside stored
+  questions stay in the transcript, and the pipeline must not show or reuse them.
 - **Postgres.** `tests/test_postgres_memory.py` covers every new query but was written without a
   Postgres on this machine; its first run is the first CI run.
 

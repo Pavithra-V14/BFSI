@@ -181,7 +181,9 @@ def assemble_answer(prompt: Prompt, context_block: str, question: str) -> str:
 
 def assemble_rewrite(prompt: Prompt, summary: str, recent: str, message: str) -> str:
     """The rewrite prompt: the static instructions, then the running summary and the recent turns,
-    then the latest message (all masked text)."""
+    then the latest message (all masked text). Like a chunk, each is neutralised (angle brackets
+    replaced), so history or a question cannot forge a delimiter or a chat-template marker."""
+    summary, recent, message = neutralise(summary), neutralise(recent), neutralise(message)
     return (
         f"{prompt.render()}\n\nSUMMARY OF THE CONVERSATION SO FAR\n{summary or '(none)'}"
         f"\n\nRECENT TURNS\n{recent or '(none)'}\n\nLATEST MESSAGE\n{message}"

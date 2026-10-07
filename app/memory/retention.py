@@ -27,6 +27,7 @@ from app.accounts.tokens import utc_text
 from app.db.chats import delete_session
 from app.db.connection import Database, connect
 from app.memory.config import RETENTION_DAYS
+from app.memory.store import require_aware
 
 
 @dataclass(frozen=True)
@@ -63,23 +64,36 @@ def count_messages(db: Database, session_ids: list[str]) -> int:
 def sweep(
     db: Database, *, now: datetime, actor: str, dry_run: bool = False, days: int = RETENTION_DAYS
 ) -> SweepResult:
+    require_aware(now)
+    limit = cutoff(now, days)
     with db.transaction(write=not dry_run):
         ids = expired_session_ids(db, now, days)
-        messages = count_messages(db, ids)
-        if dry_run or not ids:
-            return SweepResult(len(ids), messages, dry_run)
-        deleted = 0
+        if dry_run:
+            return SweepResult(len(ids), count_messages(db, ids), True)
+        deleted = messages = 0
+        lock = " FOR UPDATE" if db.kind == "postgres" else ""
         for session_id in ids:
+            # Re-checked under the lock, at the moment of deleting: a chat that was resumed after
+            # the list was read has a newer last_active_at and stays.
+            still_old = db.query_one(
+                f"SELECT 1 FROM sessions WHERE id = ? AND last_active_at < ?{lock}",
+                (session_id, limit),
+            )
+            if still_old is None:
+                continue
+            count = count_messages(db, [session_id])
             if delete_session(db.raw, session_id):
                 deleted += 1
-        write_audit(
-            db,
-            actor=actor,
-            action="retention_sweep",
-            target="sessions",
-            details={"sessions": deleted, "messages": messages, "days": days},
-            now=now,
-        )
+                messages += count
+        if deleted:  # no audit row when nothing was deleted
+            write_audit(
+                db,
+                actor=actor,
+                action="retention_sweep",
+                target="sessions",
+                details={"sessions": deleted, "messages": messages, "days": days},
+                now=now,
+            )
     return SweepResult(deleted, messages, False)
 
 

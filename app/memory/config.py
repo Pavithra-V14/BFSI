@@ -24,6 +24,7 @@ class MemoryConfig:
     buffer_tokens: int = 400  # [T] verbatim buffer; swept at the baseline run
     summary_tokens: int = 150  # spec 8.2: the summary is at most this long
     answer_clip_tokens: int = 80  # spec 8.2: each past assistant answer is clipped to this
+    fold_input_tokens: int = 1500  # [T] most history one summary call may be given
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> MemoryConfig:

@@ -17,6 +17,7 @@ from app.accounts.audit import write_audit
 from app.accounts.tokens import utc_text
 from app.db.connection import Database
 from app.db.identity import normalise_email, normalise_username
+from app.memory.roles import reset_sessions_for_role_change
 
 ROLES = ("customer", "staff", "admin")
 ASSIGNABLE_ROLES = ("customer", "staff")  # admins are made only by the owner's command
@@ -163,12 +164,15 @@ def set_role(
         if target.role == new_role:
             return target.role, new_role
         db.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, target.id))
+        # Sessions, summaries and facts can rest on documents only the old role could see: end them
+        # in the same transaction (the user starts a fresh session).
+        sessions_reset = reset_sessions_for_role_change(db, target.id)
         write_audit(
             db,
             actor=actor.id,
             action="role_change",
             target=target.id,
-            details={"from": target.role, "to": new_role},
+            details={"from": target.role, "to": new_role, "sessions_reset": sessions_reset},
             now=now,
         )
     return target.role, new_role

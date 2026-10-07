@@ -117,7 +117,7 @@ def test_an_admin_can_make_a_customer_staff_and_it_is_audited(db):
         boss.id,
         "role_change",
         member.id,
-        {"from": "customer", "to": "staff"},
+        {"from": "customer", "sessions_reset": 0, "to": "staff"},
     )
 
 

@@ -22,12 +22,12 @@ import pytest
 
 from app.db.connection import connect
 from app.db.migrate import run
-from app.guardrails.scan import StoredAnswer, StoredQuery
 from app.memory import retention, store
-from app.memory.documents import clear_summaries_for_document
-from app.memory.facts import update_facts
+from app.memory.documents import clear_memory_for_document
+from app.memory.facts import Entity, update_facts
 from app.memory.messages import UNCLEAR_END
 from app.memory.unclear import record_turn
+from tests.stored import stored_answer, stored_query, stored_summary
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL")
@@ -73,18 +73,30 @@ def new_user(db):
     return user_id
 
 
+def save(db, user, session, text, upto, expected_upto=None, folded=()):
+    return store.save_summary(
+        db,
+        user,
+        session,
+        stored_summary(text),
+        upto,
+        expected_upto=expected_upto,
+        folded_ids=list(folded),
+    )
+
+
 def talk(db, user, session, count=1, citations=None, when=NOW):
     made = []
     for n in range(count):
         made.append(
-            store.add_user_message(db, user, session, StoredQuery(f"question {n} here"), now=when)
+            store.add_user_message(db, user, session, stored_query(f"question {n} here"), now=when)
         )
         made.append(
             store.add_assistant_message(
                 db,
                 user,
                 session,
-                StoredAnswer(f"answer {n} here"),
+                stored_answer(f"answer {n} here"),
                 citations=citations or [],
                 grounded=True,
                 now=when,
@@ -147,7 +159,7 @@ def test_two_connections_that_pick_the_same_number_collide_on_the_constraint_and
         def write(database, text):
             try:
                 message = store.add_user_message(
-                    database, user, session, StoredQuery(text), now=NOW
+                    database, user, session, stored_query(text), now=NOW
                 )
                 results.append(message.seq)
             except Exception as error:  # reported below
@@ -180,7 +192,7 @@ def test_free_running_writers_never_share_a_number(pg_url):
         try:
             for n in range(count):
                 store.add_user_message(
-                    database, user, session, StoredQuery(f"message number {n}"), now=NOW
+                    database, user, session, stored_query(f"message number {n}"), now=NOW
                 )
         except Exception as error:
             errors.append(error)
@@ -203,9 +215,9 @@ def test_the_summary_compare_and_set_and_the_boundary_lookup(db):
     user = new_user(db)
     session = store.create_session(db, user, now=NOW)
     made = talk(db, user, session, count=3)
-    assert store.save_summary(db, user, session, "first", made[1].id, expected_upto=None)
-    assert not store.save_summary(db, user, session, "stale", made[3].id, expected_upto=None)
-    assert store.save_summary(db, user, session, "second", made[3].id, expected_upto=made[1].id)
+    assert save(db, user, session, "first", made[1].id, expected_upto=None)
+    assert not save(db, user, session, "stale", made[3].id, expected_upto=None)
+    assert save(db, user, session, "second", made[3].id, expected_upto=made[1].id)
     state = store.load_session(db, user, session)
     assert state.summary_text == "second"
     assert [m.id for m in state.messages] == [made[4].id, made[5].id]  # only after the boundary
@@ -214,7 +226,9 @@ def test_the_summary_compare_and_set_and_the_boundary_lookup(db):
 def test_the_facts_and_the_unclear_count_use_a_row_lock_and_the_review_queue(db):
     user = new_user(db)
     session = store.create_session(db, user, now=NOW)
-    update_facts(db, user, session, product_line="Health insurance", entities=["irdai"])
+    update_facts(
+        db, user, session, product_line="Health insurance", entities=[Entity("irdai", ("doc-a",))]
+    )
     assert record_turn(db, user, session, unclear=True, now=NOW).count == 1
     ended = record_turn(db, user, session, unclear=True, now=NOW)
     assert ended.ended and ended.message == UNCLEAR_END
@@ -222,7 +236,10 @@ def test_the_facts_and_the_unclear_count_use_a_row_lock_and_the_review_queue(db)
     assert len(rows) == 1 and rows[0][:3] == ("two_unclear_turns", "open", session)
     assert json.loads(rows[0][3]) == {"unclear_turns": 2}
     facts = store.load_session(db, user, session).facts
-    assert facts == {"entities": ["irdai"], "product_line": "Health insurance"}
+    assert facts == {
+        "entities": [{"name": "irdai", "doc_ids": ["doc-a"]}],
+        "product_line": "Health insurance",
+    }
 
 
 def test_a_user_deletes_their_own_chat(db):
@@ -265,23 +282,188 @@ def test_summaries_built_from_a_document_are_found_with_like_and_a_subselect(db)
     built, other, later = (store.create_session(db, user, now=NOW) for _ in range(3))
     for session, doc in ((built, "doc-x"), (other, "doc-y")):
         made = talk(db, user, session, citations=[{"doc_id": doc}])
-        store.save_summary(db, user, session, "A summary.", made[1].id, expected_upto=None)
+        save(db, user, session, "A summary.", made[1].id, expected_upto=None)
     made = talk(db, user, later, count=2, citations=[])
     extra = store.add_assistant_message(
         db,
         user,
         later,
-        StoredAnswer("late"),
+        stored_answer("late"),
         citations=[{"doc_id": "doc-x"}],
         grounded=True,
         now=NOW,
     )
-    store.save_summary(db, user, later, "A summary.", made[1].id, expected_upto=None)
+    save(db, user, later, "A summary.", made[1].id, expected_upto=None)
     assert extra.seq > 4  # cited only after the boundary
-    assert clear_summaries_for_document(db, "doc-x", actor="cli:test", now=NOW) == 1
+    assert clear_memory_for_document(db, "doc-x", actor="cli:test", now=NOW).summaries == 1
     summaries = {r[0]: r[1] for r in db.query_all("SELECT id, summary_text FROM sessions")}
     assert summaries[built] is None and summaries[other] == "A summary."
     assert summaries[later] == "A summary."
     rows = db.query_all("SELECT action, target, details FROM audit_log")
-    assert rows == [("summary_clear", "doc-x", json.dumps({"sessions": 1}, sort_keys=True))]
-    assert clear_summaries_for_document(db, "doc-x", actor="cli:test", now=NOW) == 0
+    assert rows == [
+        ("memory_clear", "doc-x", json.dumps({"entities": 0, "summaries": 1}, sort_keys=True))
+    ]
+    assert clear_memory_for_document(db, "doc-x", actor="cli:test", now=NOW).summaries == 0
+
+
+# ---- the Phase 7 hardening queries -------------------------------------------------------------
+
+
+def idle(db):
+    from psycopg.pq import TransactionStatus
+
+    return db.raw.info.transaction_status == TransactionStatus.IDLE
+
+
+def test_no_read_leaves_a_transaction_open_on_postgres(db):
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    talk(db, user, session)
+    for read in (
+        lambda: store.list_sessions(db, user),
+        lambda: store.load_session(db, user, session),
+        lambda: store.owned_session(db, user, session),
+        lambda: store._next_seq(db, session),
+    ):
+        read()
+        assert idle(db)  # autocommit is off: a read outside transaction() would leave this open
+    with pytest.raises(store.SessionNotFound):
+        store.load_session(db, user, str(uuid.uuid4()))
+    assert idle(db)
+
+
+def test_no_transaction_is_open_while_the_model_is_called(db):
+    import asyncio
+
+    from app.guardrails.masking import Masker
+    from app.memory.config import MemoryConfig
+    from app.memory.history import prepare_history
+    from tests.helpers import WordCounter
+
+    class Quiet:
+        def analyze(self, **kwargs):
+            return []
+
+    class Gateway:
+        def __init__(self, fail):
+            self.fail, self.seen = fail, []
+
+        async def complete(self, messages, *, tier, max_tokens, max_wait_s):
+            self.seen.append(idle(db))
+            if self.fail:
+                raise RuntimeError("down")
+            return type("Result", (), {"text": "A summary of the chat."})()
+
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    talk(db, user, session, count=8)
+    for gateway in (Gateway(fail=True), Gateway(fail=False)):
+        asyncio.run(
+            prepare_history(
+                db,
+                gateway,
+                user_id=user,
+                session_id=session,
+                config=MemoryConfig(buffer_tokens=15),
+                counter=WordCounter(),
+                masker=Masker(analyzer=Quiet()),
+            )
+        )
+        assert gateway.seen == [True]  # no transaction while the model worked
+        assert idle(db)  # and none left behind afterwards
+
+
+def test_a_save_is_refused_when_a_folded_message_was_flagged_and_the_boundary_must_match(db):
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    other = store.create_session(db, user, now=NOW)
+    made = talk(db, user, session)
+    foreign = talk(db, user, other)
+    with pytest.raises(ValueError, match="not in this session"):
+        save(db, user, session, "A summary.", foreign[0].id)
+    db.execute("UPDATE messages SET source_removed = ? WHERE id = ?", (True, made[1].id))
+    db.raw.commit()
+    assert not save(db, user, session, "A summary.", made[1].id, folded=[made[1].id])  # FOR UPDATE
+    assert save(db, user, session, "A summary.", made[1].id, folded=[made[0].id])
+
+
+def test_a_closed_session_refuses_writes_and_a_role_change_ends_the_users_sessions(db):
+    from app.accounts.users import create_admin, create_customer, set_role
+
+    boss = create_admin(
+        db, username="boss", email="boss@example.test", password_hash="h", now=NOW, actor="cli"
+    )
+    member = create_customer(
+        db, username="asha", email="asha@example.test", password_hash="h", now=NOW
+    )
+    session = store.create_session(db, member.id, now=NOW)
+    made = talk(db, member.id, session)
+    save(db, member.id, session, "A summary.", made[1].id)
+    update_facts(db, member.id, session, topic="claims", entities=[Entity("irdai", ("doc-a",))])
+    assert set_role(db, actor=boss, target_id=member.id, new_role="staff", now=NOW)
+    state = store.load_session(db, member.id, session)
+    assert state.info.status == "closed"
+    assert (state.summary_text, state.summary_upto_message_id, state.facts) == (None, None, {})
+    with pytest.raises(store.SessionNotFound):
+        store.add_user_message(db, member.id, session, stored_query("one more question"), now=NOW)
+    with pytest.raises(store.SessionNotFound):
+        save(db, member.id, session, "A summary.", made[1].id)
+
+
+def test_the_facts_entities_of_a_deleted_document_are_found_with_like_and_removed(db):
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    update_facts(
+        db,
+        user,
+        session,
+        topic="claims",
+        entities=[Entity("irdai", ("doc-x", "doc-y")), Entity("rahul sharma", ("doc-x",))],
+    )
+    cleared = clear_memory_for_document(db, "doc-x", actor="cli:test", now=NOW)
+    assert (cleared.summaries, cleared.entities) == (0, 1)
+    facts = store.load_session(db, user, session).facts
+    assert facts["entities"] == [{"name": "irdai", "doc_ids": ["doc-y"]}]
+    assert facts["topic"] == "claims"
+    assert clear_memory_for_document(db, "doc-x", actor="cli:test", now=NOW).entities == 0
+
+
+def test_the_sweep_rechecks_the_last_active_time_under_a_row_lock(db, monkeypatch):
+    user = new_user(db)
+    stale = aged(db, user, 120)
+    real = retention.expired_session_ids
+
+    def read_then_resume(database, moment, days=retention.RETENTION_DAYS):
+        ids = real(database, moment, days)
+        store.add_user_message(database, user, stale, stored_query("I am back here"), now=NOW)
+        return ids
+
+    monkeypatch.setattr(retention, "expired_session_ids", read_then_resume)
+    result = retention.sweep(db, now=NOW, actor="cli:test")
+    assert (result.sessions, result.messages) == (0, 0)
+    assert db.query_one("SELECT COUNT(*) FROM sessions")[0] == 1
+    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 0
+
+
+def test_last_active_never_moves_backwards_with_greatest_and_a_naive_time_is_refused(db):
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    newer = NOW + timedelta(hours=1)
+    store.add_user_message(db, user, session, stored_query("a newer question"), now=newer)
+    late = store.list_sessions(db, user)[0].last_active_at
+    older = NOW - timedelta(days=1)
+    store.add_user_message(db, user, session, stored_query("a slow older one"), now=older)
+    assert store.list_sessions(db, user)[0].last_active_at == late
+    with pytest.raises(ValueError, match="timezone-aware"):
+        store.create_session(db, user, now=datetime(2026, 10, 7, 12, 0))
+
+
+def test_a_history_excluded_question_and_a_fixed_reply_round_trip(db):
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    flagged = stored_query("a flagged question")
+    store.add_user_message(db, user, session, flagged, now=NOW, history_excluded=True)
+    store.add_fixed_reply(db, user, session, stored_answer("Hello! How can I help?"), now=NOW)
+    state = store.load_session(db, user, session)
+    assert [m.history_excluded for m in state.messages] == [True, False]
+    assert state.messages[1].grounded is False and state.messages[1].citations == ()
