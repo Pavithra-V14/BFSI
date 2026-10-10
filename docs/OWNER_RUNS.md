@@ -72,11 +72,11 @@ never set.)
 | 5 | Create the first admin | Phase 4 | DONE |
 | 6 | Run the API locally and check it | Phase 4 | DONE |
 | 7 | Real-Qdrant check on a throw-away collection | Phase 5 | DONE |
-| 8 | Apply migration 0005 | Phase 7 | PENDING (not reported applied) |
+| 8 | Apply migration 0005 | Phase 7 | PENDING (stays pending until you tell me it is applied) |
 | 9 | Gateway smoke test with real keys | Phase 2 | PENDING |
-| 10 | Phase 5 real ingest (steps a to h) | Phase 5 | PENDING |
+| 10 | Phase 5 real ingest (steps a to h, and i: the staff-only copy) | Phase 5 | PENDING |
 | 11 | The IsEmpty filter on real chunks | Phases 3 and 5 | PENDING |
-| 12 | Pipeline smoke, one real question per role | Phase 8 | PENDING |
+| 12 | Pipeline smoke, one real question per role (12b: the role-isolation test) | Phase 8 | PENDING |
 | 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
@@ -237,8 +237,8 @@ was done and I did not note the day: please write it in.
 
 ## Run 8. Apply migration 0005: PENDING
 
-(I have not been told it is applied. If you already did it, write the date here and mark it
-done: ______.)
+(It stays PENDING until you tell me it is applied; then I will mark it done with the date you
+give: ______.)
 
 - **Verifies:** Phase 7 (adds `messages.history_excluded`: a blocked, reworded or refused
   question must never feed the history).
@@ -457,6 +457,23 @@ It asks you to type the id.
 6. Put the real key back (`$env:GEMINI_API_KEYS = Read-Secret "GEMINI_API_KEYS"`), run the same
    ingest again: `new 22 ...`, exit 0, and `status` shows `failed pages waiting ... : 0`.
 
+### (i) The staff-only copy, for the role-isolation test (Run 12b uses it)
+
+A second copy of the eCAS sample, stored under another id and visible to staff only. Do this
+after (g), with the same variables. It adds a document; it does not change the others.
+
+    uv run python -m app.ingest ingest spec/samples/company/finserv_mutual_fund_ecas_and_servicing.pdf `
+      --doc-id ecas-staff-only --doc-type policy --access-role staff --product-line finserv
+
+- **You should see:** the same lines as the finserv ingest in (g), with the new id:
+  `ecas-staff-only: new 21, changed 0, unchanged 0, removed 0, version 1`. Exit code 0. It is
+  quick and makes few model calls (the captions, summaries and labels are in `originals/.cache`
+  from (g)).
+- **Then:** `uv run python -m app.ingest status --doc-id ecas-staff-only` shows
+  `chunks: active 21, held back 0, rejected 0, inactive 0 (stored 21)`.
+- **If it differs:** `new` is not 21: send the line. A provider limit: run the command again.
+- **Do not delete it yet:** Run 12b needs it, and deletes it itself.
+
 - **If a step differs:** stop and copy the lines printed (they hold no secrets).
 - **Send back (whole run):** for each document the `new/changed/unchanged/removed/version` line,
   the `status` lines (counts only), the exit codes, and anything that differed. Never document
@@ -489,9 +506,10 @@ It asks you to type the id.
       uv run python -m app.ingest status --doc-id insurance-flexi-property
       uv run python -m app.ingest status --doc-id banking-rtl-facility
       uv run python -m app.ingest status --doc-id finserv-mf-ecas
+      uv run python -m app.ingest status --doc-id ecas-staff-only
 
-- **You should see:** for each: `active` equals `stored` (19, 22 and 21 for the three samples)
-  and `held back 0, rejected 0, inactive 0`.
+- **You should see:** for each: `active` equals `stored` (19, 22, 21 and 21 for the three
+  samples and the staff-only copy) and `held back 0, rejected 0, inactive 0`.
 - **The second half is in Run 12:** each real question must return `citations=` of at least 1,
   and the `retrieve` line must show candidates above 0. If `status` says `active 19` and Run 12
   returns nothing for a question the document answers, the filter and the program disagree:
@@ -579,6 +597,120 @@ It asks you to type the id.
 - **Safe to repeat:** yes. It writes nothing to Qdrant; its SQLite file is deleted.
 - **To test Jina alone:** run the customer command once with `COHERE_API_KEY` removed
   (`Remove-Item Env:COHERE_API_KEY`) and look at the `rerank` line's model.
+
+### Run 12b. The role-isolation test (a staff-only document is hidden from a customer)
+
+- **Verifies:** Phases 5 and 8 on real data: a document with `--access-role staff` is never
+  retrieved, cited or answered from for a customer, and is for staff; and when it is deleted both
+  roles refuse again. The three main questions above cannot show this (all three samples are
+  customer documents).
+- **Before it:** Run 10 with step (i) (the staff-only copy `ecas-staff-only` is ingested, 21
+  active chunks), and the three main questions of Run 12 done (they need `finserv-mf-ecas`).
+- **Needs:** the variables of Run 10 (for `ingest`, `status` and `delete`) and of Run 12 (for
+  the smoke runs), set in the same window.
+- **Why the customer copy goes first:** the staff-only copy holds the same text as
+  `finserv-mf-ecas`, which a customer may see. While both exist a customer would be answered
+  from the customer copy and the test would prove nothing. So the customer copy is deleted for
+  the test and put back at the end. (The ids are only labels: the program separates the two
+  copies by id and role.)
+- **The question** is one only the eCAS text can answer. It is not in the insurance or banking
+  samples: *Which folio is pending nomination opt-in or opt-out?*
+
+**Step 1. Take the customer copy away.**
+
+    uv run python -m app.ingest delete --doc-id finserv-mf-ecas
+
+It asks you to type the id.
+
+- **You should see:** `finserv-mf-ecas: removed 21 chunk(s), N allow-list entr(ies); 0 chat
+  message(s) flagged 'source removed'`. Then
+  `uv run python -m app.ingest status --doc-id finserv-mf-ecas` shows `stored 0` and
+  `allow-list entries: none`; `status --doc-id ecas-staff-only` still shows `active 21`.
+
+**Step 2. Ask as a customer: it must refuse.**
+
+    uv run python scripts/pipeline_smoke.py --run --role customer --question "Which folio is pending nomination opt-in or opt-out?"
+
+- **You should see:** the stage lines up to and including `retrieve OK` and `rerank OK`, then
+  `context_guard OK`, then straight to `persist OK` and `respond OK` (no `confidence`,
+  `generate` or `output_guard` line: nothing was generated), then
+
+      RESULT               REFUSAL   reason=no_context citations=0 warnings=0 degraded=None cached=False confidence=None tokens=NNN seconds=NN.N
+      done: the pipeline did not answer
+
+  Exit code **1** (a refusal is "did not answer": that is the expected result here).
+- **The review row:** a no-reliable-context refusal is queued for review, and the `persist OK`
+  line is where that row is written. The smoke script writes it to its throw-away database,
+  which is deleted when the script ends, so the row itself cannot be seen in your real
+  database. The only sign you can check is `persist OK` together with `reason=no_context`. If
+  you want the row visible (a `review rows: N` line, counts only), ask for it as a small change
+  to the script in a later round: I have not added it.
+- **If it differs:**
+  - `RESULT ANSWER` with `citations=1` or more: a customer was answered. The script does not
+    print which document the citation is from, so stop, keep the output, and tell your advisor:
+    it is either another sample that mentions the same folio (unlikely) or a real isolation
+    failure. Do not go on.
+  - `reason=` something else (`out_of_domain`, `unclear`): the question was judged before
+    retrieval; send the line.
+  - `RESULT UNAVAILABLE`: a provider or store failed; run again.
+
+**Step 3. Ask the same as staff: it must answer, with a citation.**
+
+    uv run python scripts/pipeline_smoke.py --run --role staff --question "Which folio is pending nomination opt-in or opt-out?"
+
+- **You should see:** every stage line as in the main Run 12 list (`triage` through `respond`),
+  then
+
+      RESULT               ANSWER    reason=None citations=1 warnings=0 degraded=None cached=False confidence=None tokens=NNN seconds=NN.N
+      done: the pipeline answered
+
+  `citations` is 1 or more. Exit code 0. (The answer text is not printed.)
+- **If it differs:** `REFUSAL reason=no_context` as staff means the staff copy is not being
+  found: run `status --doc-id ecas-staff-only` (it must say `active 21`) and send both outputs.
+  `warnings=` above 0 or `confidence=low`: the answer was labelled; send the numbers.
+
+**Step 4. Delete the staff-only copy with the delete command.**
+
+    uv run python -m app.ingest delete --doc-id ecas-staff-only
+
+It asks you to type the id.
+
+- **You should see:** `ecas-staff-only: removed 21 chunk(s), N allow-list entr(ies); 0 chat
+  message(s) flagged 'source removed'`. Then
+  `uv run python -m app.ingest status --doc-id ecas-staff-only` shows
+  `chunks: active 0, held back 0, rejected 0, inactive 0 (stored 0)`,
+  `allow-list entries: none`, and the marker `no`.
+
+**Step 5. Ask both roles again: both must refuse.**
+
+    uv run python scripts/pipeline_smoke.py --run --role customer --question "Which folio is pending nomination opt-in or opt-out?"
+    uv run python scripts/pipeline_smoke.py --run --role staff --question "Which folio is pending nomination opt-in or opt-out?"
+
+- **You should see (both):** the same shape as Step 2: `context_guard OK`, `persist OK`,
+  `RESULT REFUSAL reason=no_context citations=0 ...`, `done: the pipeline did not answer`, exit
+  code 1.
+- **If it differs:** an `ANSWER` for staff after the delete means a deleted chunk is still
+  retrieved: stop and send the output (this would be a deletion or filter fault).
+
+**Step 6. Put the customer copy back.**
+
+    uv run python -m app.ingest ingest spec/samples/company/finserv_mutual_fund_ecas_and_servicing.pdf `
+      --doc-id finserv-mf-ecas --doc-type policy --access-role customer --product-line finserv
+
+- **You should see:** `finserv-mf-ecas: new 21, changed 0, unchanged 0, removed 0, version 1`,
+  exit code 0 (quick: the answers are cached). Then `status --doc-id finserv-mf-ecas` shows
+  `active 21`.
+
+- **Send back:** for each smoke command only its role, the `RESULT` line, and the exit code;
+  for each ingest, delete and status the counts lines. Never the question's answer text.
+- **Clear:** the variables, as in Run 10 and Run 12.
+- **Real calls:** four smoke commands in all (Step 2, Step 3 and the two of Step 5). Each
+  refusal makes a Jev decision, an embedding and a rerank (about 3 calls); the staff answer
+  makes about 4: roughly 13 calls. Steps 1, 4 and 6 are ingest and delete commands: the
+  re-ingest in Step 6 is nearly free (cached). Free tiers: as in Runs 10 and 12.
+- **Safe to repeat:** yes, from Step 1. If you stop in the middle, `status` on the two ids tells
+  you where you are; always finish with Step 6 so that the customer copy is back before
+  Run 13.
 
 ## Run 13. Pipeline smoke with Langfuse
 
