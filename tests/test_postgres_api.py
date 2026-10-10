@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.accounts import users
+from app.accounts.tokens import utc_text
 from app.api.rollout import Rollout
 from app.db import entities, feedback, review_queue
 from app.db.connection import connect
@@ -33,6 +34,7 @@ pytestmark = [
 ]
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+STAMP = utc_text(NOW)  # the same text form the routes write (app.accounts.tokens.utc_text)
 
 
 @pytest.fixture
@@ -183,7 +185,7 @@ def test_one_thumbs_down_item_per_answer_is_enforced_and_the_insert_is_a_no_op_t
     for _ in range(2):
         with db.transaction(write=True):
             feedback.add_thumbs_down_item(
-                db, message_id=answer.id, session_id=session_id, question="q", stamp="2026-10-08"
+                db, message_id=answer.id, session_id=session_id, question="q", stamp=STAMP
             )
     count = db.query_one("SELECT COUNT(*) FROM review_queue WHERE kind = 'thumbs_down'")
     assert count == (1,)
@@ -214,10 +216,10 @@ def test_two_requests_at_the_same_moment_leave_one_thumb_and_one_item(url):
             barrier.wait(10)
             with conn.transaction(write=True):
                 feedback.upsert_rating(
-                    conn, message_id=answer.id, user_id=user, rating=rating, stamp="2026-10-08"
+                    conn, message_id=answer.id, user_id=user, rating=rating, stamp=STAMP
                 )
                 feedback.add_thumbs_down_item(
-                    conn, message_id=answer.id, session_id=session_id, question="q", stamp="s"
+                    conn, message_id=answer.id, session_id=session_id, question="q", stamp=STAMP
                 )
         except Exception as error:  # a lost race would show here
             errors.append(type(error).__name__)

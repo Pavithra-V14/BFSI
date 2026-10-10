@@ -494,6 +494,12 @@ def test_a_double_click_leaves_one_thumb_and_one_review_item(env):
         assert response.status_code == 200
     assert env.rows("SELECT rating FROM feedback_entries") == [("down",)]
     assert env.rows("SELECT COUNT(*) FROM review_queue WHERE kind = 'thumbs_down'") == [(1,)]
+    # the times the routes write are real ISO timestamps (Postgres rejects anything else)
+    from datetime import datetime
+
+    for sql in ("SELECT created_at FROM feedback_entries", "SELECT created_at FROM review_queue"):
+        for (stamp,) in env.rows(sql):
+            assert datetime.fromisoformat(str(stamp)).tzinfo is not None
 
 
 def test_a_thumb_that_another_request_already_stored_is_changed_not_a_500(env):
