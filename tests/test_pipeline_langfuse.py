@@ -5,6 +5,7 @@ everything the sink would send; no real network is used."""
 import ast
 import asyncio
 import json
+import secrets
 import threading
 import time
 import uuid
@@ -37,9 +38,11 @@ from tests.ingest_fixtures import para, parsed, title
 from tests.pipeline_rig import FakeGateway, NameAnalyzer, PipelineRig
 
 ROOT = Path(__file__).resolve().parents[1]
-USER_KEY = "k3Vq9XbZr7LmT2yWc8HdN5sFj1UaPe6GoQiR4tYxBzE"
-JWT_KEY = "Mw5Tn8Rb2Kc7Vh4Qy9Lx3Zs6Df1Gj0PaUeIoNtBrCqH"
-AUDIT_KEY = "Xb4Lp9Ts2Wn7Cq5Fh8Dv3Gk6Mz1Ry0AeJuSoNtHiBjQ"
+# Fake keys are made at test time, never typed out: a key-shaped literal in the source is what
+# secret scanners flag. Each run gets new ones, which is also why no test may depend on a value.
+USER_KEY = secrets.token_urlsafe(32)
+JWT_KEY = secrets.token_urlsafe(32)
+AUDIT_KEY = secrets.token_urlsafe(32)
 # Made-up Langfuse-looking keys, put together here so that no real-looking key is spelled out whole.
 PUBLIC = "pk-" + "lf-8d2f7a64-31bc-4f0e-9a55-6c1d7e3b2a90"
 SECRET = "sk-" + "lf-5b1c9e37-72ad-4d68-8e14-0f3a6b9c2d71"
@@ -374,7 +377,7 @@ def test_a_span_field_that_is_not_on_the_allow_list_is_never_sent(rig, monkeypat
 def test_clean_lets_numbers_flags_and_identifiers_through_and_stops_every_sentence():
     assert clean(3) == 3 and clean(True) is True and clean(0.5) == 0.5 and clean(None) is None
     assert clean("fp123") == "fp123" and clean("doc-a") == "doc-a" and clean("2.1") == "2.1"
-    assert clean("463a3d0a3f520161e1f9edcc7149746670b6dac90bc4a3cb6a267da329ef82d3") is not None
+    assert clean("0123456789abcdef" * 4) is not None  # a 64-character hash
     assert clean(["a", "b"]) == ["a", "b"]
     for text in (
         "What is the waiting period for illness claims?",

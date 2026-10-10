@@ -3,3 +3,12 @@
 # so that the fake fragment is cut from a variable and is no longer typed out.
 60c09165f2cc1ed67cc403dbad6de32b51e2e0a2:tests/test_gateway_round2.py:generic-api-key:661
 bb18ef1ecdaa9282dde6e798d444d8cb6890c2ca:tests/test_gateway_round3.py:generic-api-key:513
+
+# Phase 8 (commit 52cdc7b): made-up keys of the Langfuse sink tests, typed out whole in the first
+# version. They were test-only strings, never real keys. The source now makes them at test time
+# (secrets.token_urlsafe), but the old commit stays in the history, so the fingerprints stay here.
+# Lines 41 and 42 were reported by CI; line 40 (USER_KEY) is the same kind of literal in the same
+# commit and is listed with them.
+52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:40
+52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:41
+52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:42
