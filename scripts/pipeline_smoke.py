@@ -17,14 +17,25 @@ Run it in your own terminal:
     uv run python scripts/pipeline_smoke.py --run --question "your question" --role staff
     uv run python scripts/pipeline_smoke.py --run --with-cache
     uv run python scripts/pipeline_smoke.py --run --langfuse
+    uv run python scripts/pipeline_smoke.py --run --load-env
 With --langfuse the trace of this one question (span records only: stage names, timings, models,
 key fingerprints, token counts, flags; never the question, the answer or any text) is sent to YOUR
 Langfuse with your own keys, and the script prints only "SENT", or the exception type if it failed.
 It needs LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST and LANGFUSE_USER_HASH_KEY.
-Nothing happens without --run. With --run it reads your .env file itself, only the variables that
-.env.example lists and that this script needs, only into this process, and never prints a value. A
-variable already set in your shell wins over the file. The masker (the name model) loads first; that
-takes about a minute on a small machine and the script says how long it took.
+
+What it touches, in plain words:
+- Your real Qdrant is READ (searches, a read-back of cited chunks, the distinct values). It never
+  writes to Qdrant: no point, no payload, no collection is created or changed.
+- Your real Upstash is not touched unless you add --with-cache (then it reads and may write one
+  cached answer, exactly as the live service would).
+- Real model providers are called with your own keys: this is the point of the script.
+
+Nothing happens without --run. By default it uses only the variables already set in your shell
+(settings come from the shell, as for the API). With --load-env it also reads your .env file itself,
+only the variables that .env.example lists and that this script needs, only into this process, and
+never prints a value; a variable already set in your shell wins over the file. The masker (the name
+model) loads first; that takes about a minute on a small machine and the script says how long it
+took.
 """
 
 from __future__ import annotations
@@ -205,9 +216,13 @@ def main(
     parser.add_argument("--role", default="customer", choices=("customer", "staff", "admin"))
     parser.add_argument("--with-cache", action="store_true")
     parser.add_argument("--langfuse", action="store_true")
+    parser.add_argument("--load-env", action="store_true")
     args = parser.parse_args(argv)
     environ = os.environ if environ is None else environ
-    print(load_owner_env(environ, env_path, example_path))
+    if args.load_env:  # opt-in: otherwise only what is already set in the shell is used
+        print(load_owner_env(environ, env_path, example_path))
+    else:
+        print("using the variables already set in this shell (add --load-env to read your .env)")
     print("NOT PRINTED: the question, the answer, any citation text, any key or value.")
     workdir = tempfile.TemporaryDirectory(prefix="pipeline-smoke-")
     db = None

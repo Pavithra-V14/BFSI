@@ -12,7 +12,8 @@ Write (15): only a grounded, verified answer with no warning, no low-confidence 
 and
 not a mock, and only if the corpus version is still the one the request started with (an ingest
 during
-the request must not leave a stale entry).
+the request must not leave a stale entry). The cached text is exactly the string that is stored in
+the transcript: the output of `mask_for_storage` with the surviving documents' approved terms.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 
 from app.cache.store import HIT, MISS, ChunkRef, exact_key
 from app.guardrails.prompts import prompt_set_version
+from app.guardrails.scan import mask_for_storage
 from app.pipeline.state import PipelineState
 from app.pipeline.trace import Span
 from app.store_errors import call_vector
@@ -109,7 +111,19 @@ async def write(ctx: PipelineState, span: Span) -> None:
     if not refs:
         span.status = "skipped"
         return
-    payload = {"answer": ctx.verdict.text, "citations": ctx.result.citations if ctx.result else []}
+    try:  # exactly the string that is stored: pass-2 masking with the surviving documents' terms
+        text = mask_for_storage(
+            ctx.verdict.text,
+            masker=ctx.deps.masker.masker,
+            allow=ctx.allow,
+            doc_ids={c.doc_id for c in ctx.kept},
+            kind="answer",
+        ).text
+    except Exception as error:  # never cache a copy that was not masked
+        ctx.emit("cache_write_skipped", reason=f"masking_{type(error).__name__}")
+        span.status = "skipped"
+        return
+    payload = {"answer": text, "citations": ctx.result.citations if ctx.result else []}
     stored = await asyncio.to_thread(
         cache.put_entry, ctx.cache_key, payload, refs, corpus_version=ctx.corpus_start
     )

@@ -84,7 +84,7 @@ _PHRASE = re.compile(
 STAGES = frozenset(
     "authenticate local_scan triage injection_decision rewrite domain_gate cache_lookup embed "
     "retrieve rerank context_guard confidence generate output_guard cache_write persist "
-    "respond".split()
+    "respond summary_fold".split()
 )
 SPAN_EXTRA = frozenset(
     "candidates filters reranker kept cache stored schema_retry action detector out_of_scope "

@@ -17,6 +17,7 @@ rewrite keeps the original question and the pipeline goes on.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.gateway.decisions import extract_json
@@ -32,6 +33,49 @@ from app.pipeline.state import PersistPlan, PipelineState, Result
 from app.pipeline.trace import Span
 
 MAX_REWRITE_TOKENS = MAX_QUERY_TOKENS * 2
+
+
+class _FoldRecorder:
+    """Passes the summary fold's gateway call through and remembers what it cost (the Phase 7 fold
+    returns only the summary). The fold's text is never kept here, only the counts."""
+
+    def __init__(self, gateway: Any) -> None:
+        self._gateway = gateway
+        self._calls: list[tuple[Any, str | None, float]] = []
+
+    async def complete(self, *args: Any, **kwargs: Any) -> Any:
+        began = time.perf_counter()
+        try:
+            result = await self._gateway.complete(*args, **kwargs)
+        except Exception as error:
+            self._calls.append((None, type(error).__name__, time.perf_counter() - began))
+            raise
+        self._calls.append((result, None, time.perf_counter() - began))
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._gateway, name)
+
+    def finish(self, ctx: PipelineState) -> None:
+        for result, error, seconds in self._calls:
+            span = Span(
+                "summary_fold",
+                started_ms=round((ctx.deps.clock() - ctx.started) * 1000 - seconds * 1000, 1),
+                duration_ms=round(seconds * 1000, 1),
+            )
+            if result is None:
+                span.status, span.error_code = "error", error
+            else:
+                span.decider = getattr(result, "decider", None)
+                span.model = getattr(result, "model", None)
+                span.provider = getattr(result, "provider", None)
+                span.key_fingerprint = getattr(result, "key_fingerprint", None)
+                span.input_tokens = int(getattr(result, "input_tokens", 0) or 0)
+                span.output_tokens = int(getattr(result, "output_tokens", 0) or 0)
+                span.cost_billed = getattr(result, "cost_billed", None)
+                span.shadow_cost = float(getattr(result, "shadow_cost", 0.0) or 0.0)
+            ctx.trace.finish(span)
+        self._calls = []
 
 
 def needs_rewrite(ctx: PipelineState) -> bool:
@@ -72,16 +116,20 @@ async def rewrite_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
         return
     summary, recent = "", ""
     if ctx.session_state is not None and not ctx.first_message:
-        history = await prepare_history(
-            ctx.db,
-            ctx.deps.gateway,
-            user_id=ctx.request.user_id,
-            session_id=ctx.session_state.info.id,
-            config=ctx.deps.memory,
-            counter=ctx.deps.counter,
-            masker=ctx.deps.masker.masker,
-            on_event=ctx.deps.on_event,
-        )
+        recorder = _FoldRecorder(ctx.deps.gateway)
+        try:
+            history = await prepare_history(
+                ctx.db,
+                recorder,
+                user_id=ctx.request.user_id,
+                session_id=ctx.session_state.info.id,
+                config=ctx.deps.memory,
+                counter=ctx.deps.counter,
+                masker=ctx.deps.masker.masker,
+                on_event=ctx.deps.on_event,
+            )
+        finally:  # the fold is a model call of its own: a span, and its tokens are charged
+            recorder.finish(ctx)
         summary, recent = history.summary, history.recent
         facts = render_facts(ctx.session_state.facts)
         if facts:
@@ -102,6 +150,7 @@ async def rewrite_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
         span.status = "error"
         span.error_code = type(error).__name__
         ctx.emit("rewrite_failed", reason=type(error).__name__)
+        ctx.rewrite_failed = ctx.history_used
         return
     span.decider = completion.decider
     span.model = completion.model
@@ -114,6 +163,7 @@ async def rewrite_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
     data = parse_rewrite(getattr(completion, "parsed", None) or completion.text)
     if data is None:
         ctx.emit("rewrite_unreadable")
+        ctx.rewrite_failed = ctx.history_used
         return
     standalone = _clean(ctx, data.get("standalone_question"))
     if standalone and scan_query(standalone).strong:  # a rewrite that attacks us is ignored

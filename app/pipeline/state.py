@@ -18,7 +18,7 @@ from typing import Any
 from app.guardrails.context import ContextChunk
 from app.guardrails.scan import ModelCopy, ScanResult
 from app.pipeline.config import PipelineConfig
-from app.pipeline.locks import SessionLocks
+from app.pipeline.locks import SessionLocks, WriteGuard
 from app.pipeline.startup import MaskerHolder
 from app.pipeline.trace import Trace
 
@@ -54,6 +54,9 @@ class Result:
     timings_ms: dict[str, float] = field(default_factory=dict)
     tokens: int = 0
     audit: dict[str, Any] = field(default_factory=dict)  # audit-grade ids and hashes, no text
+    # True when a transcript write that timed out is still running in its thread on the request's
+    # database connection: the caller (Phase 10) must not close that connection yet.
+    db_busy: bool = False
 
 
 @dataclass
@@ -128,16 +131,17 @@ class PipelineState:
     allow: Any = None  # guardrails.allowlist.AllowList for the visible roles
     session_state: Any = None  # memory.store.SessionState, or None for a new session
     first_message: bool = True
-    scan: ScanResult | None = None
-    pass1: ModelCopy | None = None  # for models only
+    scan: ScanResult | None = field(default=None, repr=False)
+    pass1: ModelCopy | None = field(default=None, repr=False)  # for models only
 
     # stage 3-6
     triage: Triage = field(default_factory=Triage)
-    question: ModelCopy | None = (
-        None  # the question the rest of the pipeline uses (maybe rewritten)
-    )
+    question: ModelCopy | None = field(
+        default=None, repr=False
+    )  # the question the rest of the pipeline uses (maybe rewritten)
     rewritten: bool = False
-    history_used: bool = False
+    history_used: bool = False  # a follow-up that needed its history (the domain gate is skipped)
+    rewrite_failed: bool = False  # that follow-up's rewrite failed: low confidence, no soft filters
     domain_checked: bool = False
 
     # stage 7
@@ -147,27 +151,29 @@ class PipelineState:
 
     # stage 8-12
     query_vector: list[float] | None = None
-    candidates: list[ContextChunk] = field(default_factory=list)
-    payloads: dict[str, dict[str, Any]] = field(default_factory=dict)  # chunk id -> payload
+    candidates: list[ContextChunk] = field(default_factory=list, repr=False)  # chunk text
     filters_applied: list[str] = field(default_factory=list)
+    soft_applied: dict[str, str] = field(default_factory=dict)  # the soft filters of the search
+    soft_retried: bool = False  # the search was repeated once without the soft filters
     reranker: str | None = None
     degraded: list[str] = field(default_factory=list)
-    kept: list[ContextChunk] = field(default_factory=list)
-    labels: dict[str, str] = field(default_factory=dict)
-    block: str = ""
+    kept: list[ContextChunk] = field(default_factory=list, repr=False)  # chunk text
+    labels: dict[str, str] = field(default_factory=dict, repr=False)
+    block: str = field(default="", repr=False)  # the chunk text of the prompt
     best_score: float | None = None
     low_confidence: bool = False
 
     # stage 13-15
-    generation: Any = None
-    verdict: Any = None
-    answer_text: str = ""
+    generation: Any = field(default=None, repr=False)  # the model's answer
+    verdict: Any = field(default=None, repr=False)  # the checked answer
+    answer_text: str = field(default="", repr=False)
     disclaimer_shown: bool = False
     cacheable: bool = False
 
     # stage 16-17
-    plan: PersistPlan | None = None
-    result: Result | None = None
+    plan: PersistPlan | None = field(default=None, repr=False)  # the text to store
+    result: Result | None = field(default=None, repr=False)  # the answer text
+    writes: WriteGuard = field(default_factory=WriteGuard, repr=False)
     tokens: int = 0
     exited: str | None = None  # the stage that ended the request early, for the trace
 

@@ -27,6 +27,8 @@ import json
 import threading
 import uuid
 from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -66,6 +68,7 @@ class PendingTurn:
     done: set[str] = field(default_factory=set)
     ended: bool = False
     assistant_message_id: str | None = None
+    attempts: int = 0  # failed tries while the database itself was reachable (see `flush`)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -236,27 +239,94 @@ class PersistQueue:
             self._jobs.append(job)
             return dropped
 
-    def flush(self, db: Any, now: datetime) -> int:
-        """Try the queued turns, oldest first; stop at the first failure. Returns how many were
-        written."""
+    def _remove(self, job: PendingTurn) -> None:
+        with self._mutex:
+            try:
+                self._jobs.remove(job)
+            except ValueError:  # already written or dropped by someone else
+                pass
+
+    def flush(
+        self,
+        db: Any,
+        now: datetime,
+        *,
+        max_attempts: int = 5,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> int:
+        """Try the queued turns, oldest first. Returns how many were written.
+
+        - The database does not answer (a probe query fails): stop, nothing is counted, the jobs
+          stay for the next request. An outage never costs a job an attempt.
+        - The database answers but this job still fails (its session is gone, a bad row): count
+          the attempt, carry on with the next job, and set a job aside ("dead letter", an alert
+          event with the exception type name only) after `max_attempts`, so that it cannot block
+          the queue.
+        - Within one session the order is kept: once a job of a session failed in this pass, the
+          later jobs of that session wait for the next pass.
+        """
         written = 0
-        while True:
-            with self._mutex:
-                job = self._jobs[0] if self._jobs else None
-            if job is None:
-                return written
+        blocked: set[tuple[str, str | None]] = set()
+        with self._mutex:
+            pending = list(self._jobs)
+        for job in pending:
+            key = (job.user_id, job.session_id)
+            if key in blocked:
+                continue
             try:
                 write_turn(db, job, now)
-            except Exception:
-                return written
-            with self._mutex:
-                if self._jobs and self._jobs[0] is job:
-                    self._jobs.popleft()
+            except Exception as error:
+                try:
+                    db.query_one("SELECT 1")
+                except Exception:  # an outage: stop here and keep every job
+                    return written
+                job.attempts += 1
+                if job.session_id is not None:
+                    blocked.add(key)
+                if job.attempts >= max_attempts:
+                    self._remove(job)
+                    if on_event:
+                        on_event("persist_job_dead_lettered", {"reason": type(error).__name__})
+                continue
+            self._remove(job)
             written += 1
+        return written
 
     def __len__(self) -> int:
         with self._mutex:
             return len(self._jobs)
+
+
+_WRITER = ThreadPoolExecutor(max_workers=8, thread_name_prefix="persist")
+
+
+def _queue(ctx: PipelineState, job: PendingTurn, reason: str, span: Span) -> None:
+    """Put a turn that could not be written into the bounded queue, with the alert events."""
+    dropped = ctx.deps.queue.add(job)
+    span.status = "error"
+    span.error_code = reason
+    ctx.emit("persist_queued", reason=reason, queued=len(ctx.deps.queue))
+    if dropped:
+        ctx.emit("persist_queue_overflow")
+
+
+def queue_unwritten(ctx: PipelineState, reason: str) -> None:
+    """A turn whose persist stage never ran or never started (no time left, the 30 s budget ended
+    while the answer was being finished): make its masked copy and queue it, do not lose it. Does
+    nothing when the stage already made the copy (the raw question is gone) or there is no plan."""
+    if ctx.plan is None or ctx.raw_query is None:
+        return
+    try:
+        job = build_job(ctx)
+    except Exception as error:  # cannot make the masked copy: store nothing (fail closed)
+        ctx.drop_raw()
+        ctx.emit("persist_masking_failed", reason=type(error).__name__)
+        return
+    ctx.drop_raw()
+    dropped = ctx.deps.queue.add(job)
+    ctx.emit("persist_queued", reason=reason, queued=len(ctx.deps.queue))
+    if dropped:
+        ctx.emit("persist_queue_overflow")
 
 
 async def persist_stage(ctx: PipelineState, span: Span, timeout_s: float) -> None:
@@ -274,17 +344,19 @@ async def persist_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
         return
     ctx.drop_raw()  # the raw question is not needed any more
     now = ctx.deps.now()
+    # The write runs in a worker thread that a timeout cannot stop. It is tracked so that the
+    # session stays locked until it has ended (the answer is still returned at once).
+    future = _WRITER.submit(write_turn, ctx.db, job, now)
+    ctx.writes.track(future)
     try:
-        ended = await asyncio.wait_for(
-            asyncio.to_thread(write_turn, ctx.db, job, now), timeout=max(timeout_s, 0.1)
+        ended = await asyncio.wait_for(  # a little under the node's own limit, so this one fires
+            asyncio.wrap_future(future), timeout=max(timeout_s * 0.9, 0.05)
         )
+    except asyncio.CancelledError:  # the 30 s budget ended or the caller went away: do not lose it
+        _queue(ctx, job, "cancelled", span)
+        raise
     except Exception as error:  # Postgres down, a timeout, a bad row: queue it
-        dropped = ctx.deps.queue.add(job)
-        span.status = "error"
-        span.error_code = type(error).__name__
-        ctx.emit("persist_queued", reason=type(error).__name__, queued=len(ctx.deps.queue))
-        if dropped:
-            ctx.emit("persist_queue_overflow")
+        _queue(ctx, job, type(error).__name__, span)
         return
     if ctx.result is not None:
         ctx.result.session_id = job.session_id

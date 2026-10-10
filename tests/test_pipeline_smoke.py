@@ -44,7 +44,10 @@ def test_with_run_it_prints_stage_names_and_counts_and_never_text_or_values(tmp_
         return rig.deps, rig.db, rig.new_user(role)
 
     code = pipeline_smoke.main(
-        ["--run", "--question", QUESTION], env_path=env, environ=environ, make_setup=setup
+        ["--run", "--load-env", "--question", QUESTION],
+        env_path=env,
+        environ=environ,
+        make_setup=setup,
     )
     out = capsys.readouterr().out
     assert code == 0
@@ -68,6 +71,40 @@ def test_with_run_it_prints_stage_names_and_counts_and_never_text_or_values(tmp_
     assert "waiting period" not in out.lower()  # neither the question nor the answer
     assert "30 days" not in out and "clause" not in out.lower()
     holder["rig"].close()
+
+
+def test_without_load_env_the_env_file_is_never_read(tmp_path, capsys, monkeypatch):
+    """The .env file is read only with the opt-in flag; otherwise only the shell is used."""
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the .env file must not be read without --load-env")
+
+    monkeypatch.setattr(pipeline_smoke, "load_owner_env", forbidden)
+    monkeypatch.setattr(pipeline_smoke, "load_env_file", forbidden)
+    environ: dict[str, str] = {}
+    holder = {}
+
+    def setup(environ_, workdir, with_cache, role):
+        (tmp_path / "rig").mkdir()
+        rig = PipelineRig(tmp_path / "rig")
+        holder["rig"] = rig
+        return rig.deps, rig.db, rig.new_user(role)
+
+    code = pipeline_smoke.main(
+        ["--run", "--question", QUESTION],
+        env_path=tmp_path / "sample.env",
+        environ=environ,
+        make_setup=setup,
+    )
+    out = capsys.readouterr().out
+    assert code == 0 and "already set in this shell" in out and "--load-env" in out
+    holder["rig"].close()
+
+
+def test_the_documentation_says_what_it_reads_and_that_qdrant_is_never_written():
+    doc = " ".join((pipeline_smoke.__doc__ or "").split())
+    assert "never writes to Qdrant" in doc and "READ" in doc
+    assert "--load-env" in doc and "not touched unless you add --with-cache" in doc
 
 
 def test_the_line_printer_hides_anything_that_looks_like_text(capsys):

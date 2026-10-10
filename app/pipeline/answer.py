@@ -74,7 +74,8 @@ def context_stage(ctx: PipelineState) -> None:
 def confidence_stage(ctx: PipelineState) -> None:
     """Stage 12. Low confidence is a flag, not an exit: the answer is generated and labelled."""
     ctx.best_score = max((c.score for c in ctx.kept), default=0.0)
-    ctx.low_confidence = ctx.best_score < ctx.deps.config.low_confidence_score
+    # a follow-up whose rewrite failed was answered from its bare text: always low confidence
+    ctx.low_confidence = ctx.best_score < ctx.deps.config.low_confidence_score or ctx.rewrite_failed
     ctx.trace.record(best_score=round(ctx.best_score, 3), low_confidence=ctx.low_confidence)
 
 
@@ -93,15 +94,17 @@ async def generate_stage(ctx: PipelineState, span: Span, timeout_s: float) -> No
     ctx.trace.record(prompt_answer=get_prompt("answer").short_hash, prompt_set=prompt_set_version())
     attempts = 1 + cfg.generator_retries
     min_start = cfg.limits_for("generate")[1]
+    node_deadline = ctx.deps.clock() + timeout_s  # the node's own limit, not only the 30 s budget
     for attempt in range(attempts):
-        if attempt and ctx.time_left() < min_start:
+        left = min(node_deadline - ctx.deps.clock(), ctx.time_left())
+        if attempt and left < min_start:
             break  # a retry that cannot finish is not started
         try:
             generation = await ctx.deps.gateway.complete(
                 [{"role": "user", "content": prompt}],
                 tier="answer",
                 json_mode=True,
-                timeout_s=min(timeout_s, max(ctx.time_left(), 0.1)),
+                timeout_s=max(left, 0.1),
             )
         except Exception as error:
             span.error_code = type(error).__name__

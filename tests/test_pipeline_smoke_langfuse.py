@@ -45,7 +45,7 @@ def run_smoke(tmp_path, values, make_sink=None, argv=None):
         return rig.deps, rig.db, rig.new_user(role)
 
     code = pipeline_smoke.main(
-        argv or ["--run", "--langfuse", "--question", QUESTION],
+        argv or ["--run", "--load-env", "--langfuse", "--question", QUESTION],
         env_path=path,
         environ={},
         make_setup=setup,

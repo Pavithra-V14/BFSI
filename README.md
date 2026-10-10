@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 8 built, awaiting the owner's approval (next is Phase 9)
+Current phase: Phase 8 built and committed; hardening round 2 written, awaiting the owner's "commit" (next is Phase 9)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -465,19 +465,36 @@ web route of its own (the chat API is Phase 10).
 - **Retrieval** (`retrieval.py`): one Qdrant call runs the dense and the sparse search and fuses them
   (RRF, k = 60, 25 candidates). The user's role limits the documents (customer sees `customer`; staff
   `customer` and `staff`; admin all three) and only active chunks are searched, on both branches. A
-  confident product line or clause type narrows the search; if that finds nothing it is repeated
-  without. Rerank keeps the top 5.
+  confident product line or clause type narrows the search; if that finds nothing, or nothing is above
+  the relevance floor after the rerank, it is repeated once without (same role and active filters, and
+  only if the time left allows it). The values offered to the triage are those of documents the role
+  may see. Rerank keeps the top 5.
 - **Answers** (`answer.py`): the generator gets the instructions, the labelled chunks and the
   question, never the chat history. A failed number or citation check still returns the answer, with a
   warning and the unchecked numbers marked. Low confidence (best score under 0.40) answers with a
   statement that it may be wrong and goes to the review queue; no usable chunk gives the fixed refusal.
 - **Time**: 30 seconds for the whole request. Each step gets the smaller of its own limit and the time
-  left, and a step that cannot finish is not started.
+  left, and a step is skipped when less than its minimum is left (the minimums are `[P]` in spec 4.5;
+  the answer model needs 6 s). The database and counter calls of the first two steps have their own
+  0.4 s slices: a slow rate limiter or budget counter lets the request through with an alert, an
+  allow-list that cannot be loaded masks with an empty one (masking is never skipped), and a slow
+  Upstash or Qdrant look-up in triage is dropped after its slice.
+- **A follow-up that needed history** is never refused as out of domain by the first triage, even if
+  its rewrite failed or timed out; then it is answered from its bare text as in-domain, with low
+  confidence (it says it may be incorrect, goes to the review queue, is never cached) and with the
+  soft filters off. A vague first message has no history and is still judged by the gate.
+- **Tokens**: the tokens every model call really used (including the summary fold, which has its own
+  span) are charged once from the trace in a `finally`, so a timeout, an error or a cancellation still
+  charges what was spent.
 - **Safety** (`safety.py`, `startup.py`, `locks.py`): LangChain / LangSmith tracing is switched off in
   code and the graph is compiled with no checkpointer (the state holds the raw question); the masker
   loads in the background and until it is ready the answer is "starting up"; one turn at a time per
-  session; a failed dependency gives "temporarily unavailable", never an ungrounded answer; if
-  Postgres fails the answer is returned and the masked turn is queued in memory.
+  session (the session stays locked until a transcript write that timed out has really ended, and the
+  result says `db_busy` while it runs); a failed dependency gives "temporarily unavailable", never an
+  ungrounded answer; if Postgres fails the answer is returned and the masked turn is queued in
+  memory (also when the 30 s ended first). A queued turn that keeps failing while the database
+  answers is set aside after 5 tries with an alert, so it cannot block the others. The text in the
+  cache is exactly the text that is stored (the pass-2 masked string).
 - **Result** (`state.Result`): kind (answer, reply, refusal, reword, unavailable, starting_up, busy,
   rate_limited, over_budget, session_not_found), text, citations, warnings, confidence, degraded
   notices, whether the disclaimer was added, per-stage timings, tokens and an audit dict of ids and
@@ -485,8 +502,10 @@ web route of its own (the chat API is Phase 10).
 - **A real-service check you can run yourself**, in your own terminal (it asks one question through
   all 17 stages and prints names, timings and counts only, never the question, the answer or a key):
   `uv run python scripts/pipeline_smoke.py --run` (add `--role staff`, `--question "..."` or
-  `--with-cache`). It uses your real keys and Qdrant, a throw-away SQLite file for the chat tables,
-  and never opens your real database. Nothing happens without `--run`.
+  `--with-cache`). It uses your real keys, a throw-away SQLite file for the chat tables, and never
+  opens your real database. It READS your real Qdrant and never writes to it; Upstash is touched only
+  with `--with-cache`. Nothing happens without `--run`. It uses the variables already in your shell;
+  add `--load-env` to let it read your `.env` file itself (only the names it needs, never printed).
 - **Langfuse sink** (`app/pipeline/langfuse_sink.py`, **[P]**). Off by default. It turns on only when
   `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` and `LANGFUSE_USER_HASH_KEY` are all
   set to real values (the last must be its own key, not `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`).
@@ -509,7 +528,12 @@ web route of its own (the chat API is Phase 10).
   `starting_up` and `unavailable` to 503, `busy` to 409, `rate_limited` to 429 with `retry_after`,
   `over_budget` to 429, `session_not_found` to 404 (the same for a missing and a foreign session).
   The correlation id is returned internally and is not shown to users. The lock and the persist queue
-  live in one process (one Render instance); several instances would need a shared lock.
+  live in one process (one Render instance); several instances would need a shared lock. **Close the
+  request's database connection only when `Result.db_busy` is false**: a transcript write that timed
+  out keeps using it until it ends (give such a request a connection that is closed when the write
+  has finished, or use a pool). A first turn that had to be queued has no session id yet, so the user
+  is not told one and the next message starts another session: the route should say so, or the
+  client should retry the same message.
 - **Phase 12 (observability).** The Langfuse sink exists (Phase 8); Phase 12 builds dashboards,
   retention and evaluation on top and may later decide whether masked text is sent. The alert
   events are plain callbacks: `stage_failed`, `persist_queued`, `persist_queue_overflow`,
@@ -517,10 +541,19 @@ web route of its own (the chat API is Phase 10).
   `cache_write_skipped`, `vector_store_rejected`, `triage_failed`, `triage_probability_invalid`,
   `rewrite_failed`, `rewrite_unreadable`, `rewrite_rejected_injection`, `rerank_failed`,
   `allowlist_unavailable`, `session_unavailable`, `request_budget_exhausted`, `graph_failed`,
-  `tracing_switched_off`, `summary_rejected_injection`, `summary_fold_failed`, `budget_charge_failed`.
+  `tracing_switched_off`, `summary_rejected_injection`, `summary_fold_failed`, `budget_charge_failed`,
+  and since round 2 `rate_limit_unavailable`, `budget_check_unavailable`, `persist_flush_skipped`,
+  `persist_job_dead_lettered`, `soft_retry_skipped`, `soft_retry_failed`, `filter_values_unavailable`.
+  A turn queued while its session was still unwritten loses its Langfuse session link, and the
+  Langfuse payload schema (path, event and field names, the 207 answer) cannot be checked offline:
+  your own `pipeline_smoke.py --run --langfuse` is the check.
 - **Phase 14 (testing completion).** Masking runs on the event loop thread and takes about 20 ms; load
-  tests must show whether that matters. A step that times out leaves its worker thread running until
-  it ends (the answer is already returned).
+  tests must show whether that matters. Masking and the building of the stored copy run on the event
+  loop, so their time limits cannot interrupt them. A step that times out leaves its worker thread
+  running until it ends (the answer is already returned; the threads never change the request, and
+  the session lock waits for a transcript write). The cache look-up (1 s) covers three round trips
+  (version, entry, read-back from Qdrant), so on a slow day it is skipped; its version check and its
+  write are not one atomic step (the read-time verification covers the gap). Measure both under load.
 - **Phase 15 (deployment).** The persist queue is lost if the host restarts. Deploy `prompts/` next to
   `app/`.
 - **Phase 16 (baseline run).** Every number in spec 4.5 is a starting value: the 0.30 and 0.50 floors,

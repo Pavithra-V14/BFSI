@@ -12,6 +12,8 @@ timeout, on cancellation and on any error. A session id is only ever held once.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
+from typing import Any
 
 
 class SessionLocks:
@@ -34,3 +36,46 @@ class SessionLocks:
     def held(self) -> int:
         with self._mutex:
             return len(self._held)
+
+
+class WriteGuard:
+    """Tracks the transcript write of ONE request that runs in a worker thread.
+
+    A timed-out write keeps running in its thread. The session must stay locked until it ends, or
+    the next turn of the same session could interleave with it. `release_when_idle` calls the
+    release at once when no write runs, otherwise when the last tracked write ends (from the
+    worker thread).
+    """
+
+    def __init__(self) -> None:
+        self._mutex = threading.Lock()
+        self._running = 0
+        self._then: Callable[[], None] | None = None
+
+    def track(self, future: Any) -> None:
+        """Register a `concurrent.futures.Future`. Its completion, or its cancellation before it
+        started, ends the write."""
+        with self._mutex:
+            self._running += 1
+        future.add_done_callback(self._ended)
+
+    def _ended(self, _future: Any) -> None:
+        then = None
+        with self._mutex:
+            self._running -= 1
+            if self._running == 0 and self._then is not None:
+                then, self._then = self._then, None
+        if then is not None:
+            then()
+
+    def release_when_idle(self, release: Callable[[], None]) -> None:
+        with self._mutex:
+            if self._running > 0:
+                self._then = release
+                return
+        release()
+
+    @property
+    def running(self) -> int:
+        with self._mutex:
+            return self._running

@@ -249,9 +249,20 @@ def test_a_filtered_search_that_finds_nothing_is_repeated_once_without_the_soft_
 
 def test_the_choice_questions_offer_the_distinct_values_stored_in_qdrant(two_lines):
     rig, spy = two_lines
-    run(rig.ask("premium rule", role="customer"))
+    run(rig.ask("premium rule", role="staff"))
     options = rig.gateway.calls_of("decide")[0]["options"]
     assert options["product_line"] == ["health", "motor", "travel"]
+
+
+def test_the_values_offered_are_only_those_of_documents_the_role_may_see(two_lines):
+    """A customer is never offered a product line that only staff documents carry (round 2)."""
+    rig, spy = two_lines
+    run(rig.ask("premium rule", role="customer"))
+    run(rig.ask("premium rule", role="staff"))
+    run(rig.ask("premium rule", role="customer"))
+    offered = [c["options"]["product_line"] for c in rig.gateway.calls_of("decide")]
+    assert offered[0] == ["health", "motor"] and offered[2] == ["health", "motor"]
+    assert offered[1] == ["health", "motor", "travel"]  # the staff list is its own cache entry
 
 
 def test_the_values_are_refreshed_when_the_corpus_version_changes_and_not_before(two_lines):
@@ -283,7 +294,11 @@ def test_distinct_values_fall_back_to_a_scroll_when_facet_is_not_available(two_l
         raise NotImplementedError("local mode")
 
     client.facet = no_facet
-    assert distinct_values(client, COLLECTION, "product_line") == ["health", "motor", "travel"]
+    assert distinct_values(client, COLLECTION, "product_line", ["customer", "staff"]) == [
+        "health",
+        "motor",
+        "travel",
+    ]
 
 
 def test_only_active_values_are_offered(two_lines):
@@ -292,10 +307,9 @@ def test_only_active_values_are_offered(two_lines):
         rig.rig.qdrant.set_payload(
             COLLECTION, payload={"effective_to": "2026-10-02T00:00:00+00:00"}, points=[point_id]
         )
-    assert distinct_values(rig.deps.qdrant._inner, COLLECTION, "product_line") == [
-        "health",
-        "motor",
-    ]
+    assert distinct_values(
+        rig.deps.qdrant._inner, COLLECTION, "product_line", ["customer", "staff"]
+    ) == ["health", "motor"]
 
 
 def test_the_hard_filter_is_built_from_the_roles_and_the_active_condition():

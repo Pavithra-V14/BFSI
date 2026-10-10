@@ -61,7 +61,7 @@ ORDER = (
     "respond",
 )
 ALWAYS_RUN = {"cache_write", "persist", "respond"}  # they run after a result exists
-SKIPPABLE = {"triage", "rewrite", "cache_lookup", "rerank", "cache_write", "persist"}
+SKIPPABLE = {"triage", "rewrite", "cache_lookup", "rerank", "cache_write", "persist"}  # + fallback
 
 
 class GraphState(TypedDict):
@@ -94,7 +94,10 @@ def make_node(name: str, fn: Stage, fallback: Callable[[PipelineState], None] | 
             outcome = fn(ctx, span, limit)
             if asyncio.iscoroutine(outcome):
                 await asyncio.wait_for(outcome, timeout=limit)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # the 30 s budget or the caller: keep what was spent
+            span.status, span.error_code = "timeout", "cancelled"
+            span.duration_ms = round((ctx.deps.clock() - began) * 1000, 1)
+            ctx.trace.finish(span)
             raise
         except TimeoutError:
             span.status, failure = "timeout", "timeout"
@@ -121,10 +124,28 @@ def make_node(name: str, fn: Stage, fallback: Callable[[PipelineState], None] | 
 
 # ---- the stages that are not in their own module
 # ---------------------------------------------------------
+async def _within(
+    ctx: PipelineState,
+    deadline: float,
+    fn: Callable[..., Any],
+    *args: Any,
+    slice_s: float | None = None,
+) -> Any:
+    """Run a blocking call in a thread with its OWN time slice: the smaller of the slice (the
+    configured one unless given) and what is left of the node. A slice that runs out is a
+    `TimeoutError` for the caller to turn into a fallback. The thread cannot be stopped, so `fn`
+    must not change the request state: the caller assigns the returned value, and a result that
+    arrives late is simply dropped."""
+    left = deadline - ctx.deps.clock()
+    own = ctx.deps.config.slice_seconds if slice_s is None else slice_s
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=min(own, max(left, 0.05)))
+
+
 async def authenticate(ctx: PipelineState, span: Span, limit: float) -> None:
     """Stage 1: the role's visible `access_role` values, the per-user rate limit and the daily
-    budget.
-    (The route has already checked the token; Phase 10.)"""
+    budget. (The route has already checked the token; Phase 10.) A rate-limit or budget check that
+    fails or is too slow lets the request through with an alert: a broken counter is not a reason
+    to refuse a customer; a check that answers "no" is."""
     try:
         ctx.visible_roles = visible_roles(ctx.request.role)
     except UnknownRole:
@@ -135,65 +156,87 @@ async def authenticate(ctx: PipelineState, span: Span, limit: float) -> None:
     if usage is None:
         span.status = "skipped"
         return
-    rate = await asyncio.to_thread(usage.check_rate, ctx.request.user_id)
-    if not rate.allowed:
-        ctx.exited = "authenticate"
-        ctx.result = Result(
-            "rate_limited",
-            messages.RATE_LIMITED,
-            reason="rate_limited",
-            retry_after=rate.retry_after,
+    deadline = ctx.deps.clock() + limit
+    try:
+        rate = await _within(ctx, deadline, usage.check_rate, ctx.request.user_id)
+    except Exception as error:  # includes the slice running out
+        ctx.emit("rate_limit_unavailable", reason=type(error).__name__)
+    else:
+        if not rate.allowed:
+            ctx.exited = "authenticate"
+            ctx.result = Result(
+                "rate_limited",
+                messages.RATE_LIMITED,
+                reason="rate_limited",
+                retry_after=rate.retry_after,
+            )
+            return
+    try:
+        budget = await _within(
+            ctx,
+            deadline,
+            usage.check_budget,
+            ctx.request.user_id,
+            ctx.request.role,
+            ctx.deps.config.estimated_request_tokens,
         )
-        return
-    budget = await asyncio.to_thread(
-        usage.check_budget,
-        ctx.request.user_id,
-        ctx.request.role,
-        ctx.deps.config.estimated_request_tokens,
-    )
-    if not budget.allowed:
-        ctx.exited = "authenticate"
-        ctx.result = Result("over_budget", messages.OVER_BUDGET, reason="over_budget")
+    except Exception as error:
+        ctx.emit("budget_check_unavailable", reason=type(error).__name__)
+    else:
+        if not budget.allowed:
+            ctx.exited = "authenticate"
+            ctx.result = Result("over_budget", messages.OVER_BUDGET, reason="over_budget")
 
 
 def _flush_queue(ctx: PipelineState) -> None:
     """Try the turns that could not be written earlier (best effort, before anything else)."""
     try:
         if len(ctx.deps.queue):
-            ctx.deps.queue.flush(ctx.db, ctx.deps.now())
+            ctx.deps.queue.flush(
+                ctx.db,
+                ctx.deps.now(),
+                max_attempts=ctx.deps.config.persist_max_attempts,
+                on_event=ctx.deps.on_event,
+            )
     except Exception:  # Postgres is still down: they stay queued
         pass
 
 
-def _load_context(ctx: PipelineState) -> None:
-    """The allow-list of the visible roles and, for an existing session, its state."""
+async def local_scan_stage(ctx: PipelineState, span: Span, limit: float) -> None:
+    """Stage 2: limits, greeting, injection regex, masking (no model). The queue flush, the
+    allow-list load and the session load are the database calls; each has its own time slice and
+    a failure of any of them never skips the masking."""
+    deadline = ctx.deps.clock() + limit
+    if len(ctx.deps.queue):
+        try:
+            await _within(ctx, deadline, _flush_queue, ctx)
+        except Exception as error:  # too slow: the jobs stay queued for the next request
+            ctx.emit("persist_flush_skipped", reason=type(error).__name__)
     try:
-        ctx.allow = load_allowlist(ctx.db, ctx.visible_roles)
-    except Exception as error:  # Postgres down: mask with no approved terms (stricter, not looser)
+        ctx.allow = await _within(ctx, deadline, load_allowlist, ctx.db, ctx.visible_roles)
+    except (
+        Exception
+    ) as error:  # Postgres down: mask with an EMPTY allow-list (stricter, not looser)
         ctx.allow = AllowList()
         ctx.emit("allowlist_unavailable", reason=type(error).__name__)
     ctx.session_state = None
     if ctx.request.session_id is None:
         ctx.first_message = True
-        return
-    state = load_session(ctx.db, ctx.request.user_id, ctx.request.session_id)  # may raise
-    ctx.session_state = state
-    ctx.first_message = not state.messages and not state.summary_text
-
-
-async def local_scan_stage(ctx: PipelineState, span: Span, limit: float) -> None:
-    """Stage 2: limits, greeting, injection regex, masking (no model, no network)."""
-    await asyncio.to_thread(_flush_queue, ctx)
-    try:
-        await asyncio.to_thread(_load_context, ctx)
-    except SessionNotFound:
-        ctx.exited = "local_scan"
-        ctx.result = Result("session_not_found", messages.SESSION_NOT_FOUND, reason="not_found")
-        return
-    except Exception as error:  # Postgres down for a resume: go on without the history
-        ctx.session_state = None
-        ctx.first_message = False
-        ctx.emit("session_unavailable", reason=type(error).__name__)
+    else:
+        try:
+            state = await _within(
+                ctx, deadline, load_session, ctx.db, ctx.request.user_id, ctx.request.session_id
+            )
+        except SessionNotFound:
+            ctx.exited = "local_scan"
+            ctx.result = Result("session_not_found", messages.SESSION_NOT_FOUND, reason="not_found")
+            return
+        except Exception as error:  # Postgres down for a resume: go on without the history
+            ctx.first_message = False
+            ctx.emit("session_unavailable", reason=type(error).__name__)
+        else:
+            ctx.session_state = state
+            ctx.first_message = not state.messages and not state.summary_text
     try:
         scan = local_scan(
             ctx.raw_query or "",
@@ -202,8 +245,8 @@ async def local_scan_stage(ctx: PipelineState, span: Span, limit: float) -> None
             counter=ctx.deps.counter,
             allow_terms=ctx.allow.terms(),
         )
-    except Exception as error:  # fail closed: a masker error refuses the question
-        raise StageError("local_scan", "masker_failed") from error
+    except Exception:  # fail closed: a masker error refuses the question
+        raise StageError("local_scan", "masker_failed") from None  # no text in the chain
     ctx.scan = scan
     span.add(tokens=scan.tokens, **{f"t_{k}": v for k, v in scan.timings_ms.items()})
     if scan.action == "refuse":
@@ -224,14 +267,24 @@ async def triage_stage(ctx: PipelineState, span: Span, limit: float) -> None:
     """Stage 3: one Jev call; the choice questions use the distinct values stored in Qdrant."""
     values: dict[str, list[str]] = {name: [] for name in retrieval.SOFT_FIELDS}
     cache = ctx.deps.cache
-    try:
-        version = await asyncio.to_thread(cache.corpus_version) if cache is not None else None
-        values = await asyncio.to_thread(
-            ctx.values.get, ctx.deps.qdrant, ctx.deps.collection, version, ctx.deps.clock()
+    deadline = ctx.deps.clock() + limit
+    cfg = ctx.deps.config
+    try:  # each lookup has its own slice: a slow Upstash or Qdrant must not eat the Jev call
+        version = await _within(ctx, deadline, cache.corpus_version) if cache is not None else None
+        values = await _within(
+            ctx,
+            deadline,
+            ctx.values.get,
+            ctx.deps.qdrant,
+            ctx.deps.collection,
+            version,
+            ctx.deps.clock(),
+            ctx.visible_roles,  # a role is only offered the values of documents it may see
+            slice_s=cfg.values_seconds,
         )
     except Exception as error:
         ctx.emit("filter_values_unavailable", reason=type(error).__name__)
-    ctx.triage = await triage.run_triage(ctx, span, limit, values)
+    ctx.triage = await triage.run_triage(ctx, span, max(deadline - ctx.deps.clock(), 0.1), values)
     span.add(decider=ctx.triage.decider, triage_failed=ctx.triage.failed)
     ctx.trace.record(
         decider=ctx.triage.decider,
@@ -261,17 +314,27 @@ def injection_stage(ctx: PipelineState, span: Span, limit: float) -> None:
         ctx.plan = PersistPlan("fixed_reply", guard_messages.REWORD, history_excluded=True)
 
 
+def rewrite_fallback(ctx: PipelineState) -> None:
+    """The rewrite node failed, timed out or had no time. If this was a follow-up that needed its
+    history, it is treated like a failed triage: in-domain (the gate is skipped), soft filters off,
+    low confidence. The original question goes on unchanged."""
+    if rewrite.needs_rewrite(ctx) and ctx.session_state is not None and not ctx.first_message:
+        ctx.history_used = True
+        ctx.rewrite_failed = True
+
+
 def domain_stage(ctx: PipelineState, span: Span, limit: float) -> None:
     """Stage 6: out-of-domain is refused (and queued) only on a real decision of a decider; a failed
-    call, the keyword rules, or a follow-up that was rewritten from history never refuse."""
+    call, the keyword rules, or a follow-up that needed history (whether or not its rewrite worked)
+    never refuse. A vague first message, which has no history, is still judged."""
     cfg = ctx.deps.config
     triage_ = ctx.triage
     probability = triage_.in_domain_probability
     decided = triage_.decider in ("jev", "groq", "gemini", "openrouter") and probability is not None
-    if not decided or ctx.rewritten or ctx.history_used:
+    if not decided or ctx.history_used:
         span.status = "skipped"
         return
-    out_of_scope = 1.0 - probability
+    out_of_scope = 1.0 - probability  # (the gate was passed: not a rewritten follow-up)
     span.add(out_of_scope=round(out_of_scope, 3))
     if out_of_scope >= cfg.out_of_domain_probability:
         ctx.exited = "domain_gate"
@@ -334,7 +397,23 @@ async def retrieve_stage(ctx: PipelineState, span: Span, limit: float) -> None:
 
 
 async def rerank_stage(ctx: PipelineState, span: Span, limit: float) -> None:
+    """Stage 10. If soft filters were applied and nothing is above the relevance floor after the
+    rerank, the search is repeated ONCE without them (spec 7) and reranked again, within what is
+    left of this node's time; with too little time left the first result stands."""
+    cfg = ctx.deps.config
+    began = ctx.deps.clock()
     await retrieval.rerank_candidates(ctx, span, limit)
+    if (
+        not ctx.soft_applied
+        or ctx.soft_retried
+        or retrieval.best_score(ctx.candidates) >= answer.floor_for(ctx)
+    ):
+        return
+    left = min(limit - (ctx.deps.clock() - began), ctx.time_left())
+    if left < cfg.limits_for("retrieve")[1] + cfg.limits_for("rerank")[1]:
+        ctx.emit("soft_retry_skipped", reason="no_time")
+        return
+    await retrieval.retry_without_soft_filters(ctx, span, left)
 
 
 def rerank_fallback(ctx: PipelineState) -> None:
@@ -382,14 +461,7 @@ async def persist_stage(ctx: PipelineState, span: Span, limit: float) -> None:
 
 def persist_fallback(ctx: PipelineState) -> None:
     """The persist stage could not run (no time left): queue the masked turn, do not lose it."""
-    try:
-        job = persist.build_job(ctx)
-        ctx.drop_raw()
-        ctx.deps.queue.add(job)
-        ctx.emit("persist_queued", reason="no_time", queued=len(ctx.deps.queue))
-    except Exception as error:
-        ctx.drop_raw()
-        ctx.emit("persist_masking_failed", reason=type(error).__name__)
+    persist.queue_unwritten(ctx, "no_time")
 
 
 def respond_stage(ctx: PipelineState, span: Span, limit: float) -> None:
@@ -440,7 +512,7 @@ def build_graph(pipeline: Any):
         "local_scan": (local_scan_stage, None),
         "triage": (triage_stage, triage_fallback),
         "injection_decision": (injection_stage, None),
-        "rewrite": (rewrite.rewrite_stage, None),
+        "rewrite": (rewrite.rewrite_stage, rewrite_fallback),
         "domain_gate": (domain_stage, None),
         "cache_lookup": (cache_lookup_stage, cache_lookup_fallback),
         "embed": (embed_stage, None),

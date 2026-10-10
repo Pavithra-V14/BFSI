@@ -166,16 +166,18 @@ def test_the_values_cache_reloads_on_a_new_corpus_version_or_after_its_ttl_witho
             return SimpleNamespace(hits=[SimpleNamespace(value=f"{key}-1")])
 
     cache, client = ValuesCache(ttl=300.0), Client()
-    first = cache.get(client, "documents", 5, now=0.0)
-    cache.get(client, "documents", 5, now=100.0)
+    first = cache.get(client, "documents", 5, now=0.0, roles=("customer",))
+    cache.get(client, "documents", 5, now=100.0, roles=("customer",))
     assert len(loads) == 2 and first["product_line"] == ["product_line-1"]  # one load of two fields
-    cache.get(client, "documents", 6, now=101.0)  # the corpus changed
+    cache.get(client, "documents", 6, now=101.0, roles=("customer",))  # the corpus changed
     assert len(loads) == 4
-    cache.get(client, "documents", None, now=102.0)  # version unknown: reload...
+    cache.get(
+        client, "documents", None, now=102.0, roles=("customer",)
+    )  # version unknown: reload...
     assert len(loads) == 6
-    cache.get(client, "documents", None, now=103.0)  # ...but not on every call
+    cache.get(client, "documents", None, now=103.0, roles=("customer",))  # ...but not on every call
     assert len(loads) == 6
-    cache.get(client, "documents", None, now=1000.0)  # until the ttl passes
+    cache.get(client, "documents", None, now=1000.0, roles=("customer",))  # until the ttl passes
     assert len(loads) == 8
 
 

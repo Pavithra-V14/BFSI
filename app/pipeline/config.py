@@ -22,9 +22,17 @@ NODE_LIMITS: dict[str, tuple[float, float]] = {
     "embed": (6.0, 1.5),
     "retrieve": (4.0, 1.0),
     "rerank": (6.0, 1.5),
-    "generate": (12.0, 4.0),
+    "generate": (12.0, 6.0),
     "persist": (3.0, 0.3),
 }
+
+# The network parts of authenticate and local_scan each get their own slice inside the node's
+# timeout, so that a slow Upstash or Postgres degrades (fails open) instead of using the whole node.
+# [P] (spec 4.5). The slice is also capped by what is left of the node.
+SLICE_SECONDS = 0.4
+# How often a queued transcript is tried while the database is reachable but the job still fails,
+# before it is set aside with an alert so that it cannot block the queue. [P]
+PERSIST_MAX_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,10 @@ class PipelineConfig:
     estimated_request_tokens: int = 3_400  # [T] spec 5.4 capacity note, for the budget pre-check
     generator_retries: int = 1  # invalid generator JSON: one retry, only if time allows
     persist_queue_size: int = 200  # [P] bounded in-process queue for a failed transcript write
+    persist_max_attempts: int = PERSIST_MAX_ATTEMPTS  # [P] then the job is dead-lettered
+    slice_seconds: float = SLICE_SECONDS  # [P] own time slice of a network call in a local node
+    charge_seconds: float = 1.0  # [P] at most this long for the final token charge
+    values_seconds: float = 2.0  # [P] own slice of the soft-filter value lookup in triage
 
     def limits_for(self, node: str) -> tuple[float, float]:
         """(timeout, minimum time left) of a node; a local node gets a small default."""
