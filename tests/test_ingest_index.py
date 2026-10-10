@@ -51,7 +51,7 @@ def test_a_first_ingest_writes_every_chunk_with_the_payload_fields_of_6_4(rig):
         "doc_id", "source", "chunk_id", "clause_ref", "part_index", "content_hash", "doc_version",
         "chunk_version", "effective_date", "effective_to", "page_start", "page_end", "heading_path",
         "clause_type", "product_line", "content_type", "image_ref", "access_role", "ingested_at",
-        "parser", "text", "summary", "quarantine", "quarantine_reason",
+        "parser", "text", "summary", "quarantine", "quarantine_reason", "sparse_version",
     }  # fmt: skip
     for point_id, point in points.items():
         payload = point["payload"]

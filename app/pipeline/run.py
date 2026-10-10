@@ -28,6 +28,7 @@ from app.pipeline.retrieval import ValuesCache
 from app.pipeline.safety import disable_tracing, tracing_enabled
 from app.pipeline.state import Deps, PipelineState, Request, Result
 from app.pipeline.trace import Trace
+from app.vector.documents import sparse_check
 
 
 class Pipeline:
@@ -39,6 +40,25 @@ class Pipeline:
         self.deps = deps
         self.values = ValuesCache()
         self.graph = build_graph(self)
+
+    def check_index(self):
+        """Start-up check (Phase 9, spec 6.6): do the stored sparse vectors come from the same
+        tokenizer version as this code? Counts only. Emits `sparse_version_mismatch` (an alert
+        event, numbers only) when any chunk differs, and `sparse_check_unavailable` when Qdrant
+        could not be asked. Returns the counts, or None. It is a blocking call: the chat API calls
+        it once at start-up (in a thread); it never changes anything."""
+        try:
+            check = sparse_check(self.deps.qdrant, self.deps.collection)
+        except Exception as error:
+            if self.deps.on_event:
+                self.deps.on_event("sparse_check_unavailable", {"reason": type(error).__name__})
+            return None
+        if not check.ok and self.deps.on_event:
+            self.deps.on_event(
+                "sparse_version_mismatch",
+                {"out_of_date": check.out_of_date, "total": check.total},
+            )
+        return check
 
     def _early(self, request: Request, kind: str, text: str, reason: str) -> Result:
         return Result(kind, text, reason=reason, correlation_id=request.correlation_id)

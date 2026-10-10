@@ -110,6 +110,7 @@ class IngestResult:
     failed_pages: list[FailedPage] = field(default_factory=list)
     incomplete: list[str] = field(default_factory=list)
     images_skipped: int = 0
+    sparse_refreshed: int = 0  # unchanged chunks whose sparse vector alone was rewritten
 
     @property
     def complete(self) -> bool:
@@ -246,7 +247,7 @@ def embedding_text(chunk: Chunk) -> str:
 
 
 def _sparse_text(chunk: Chunk) -> str:
-    return " ".join(chunk.heading_path) + "\n" + embedding_text(chunk)
+    return sparse.source_text(chunk.heading_path, chunk.kind, chunk.text, chunk.summary)
 
 
 def build_payload(
@@ -286,7 +287,27 @@ def build_payload(
         "summary": chunk.summary,
         "quarantine": chunk.quarantine,
         "quarantine_reason": chunk.quarantine_reason,
+        "sparse_version": sparse.SPARSE_VERSION,  # the tokenizer version of its sparse vector
     }
+
+
+def refreshed_sparse_vector(payload: dict[str, Any], updates: dict[str, Any]):
+    """The sparse vector of a stored chunk, made again from what is stored (its text, its summary
+    and its heading path, the new one if it moved). None if the payload has no text to make it
+    from. No embedding, no model call: this is the only thing a tokenizer change needs."""
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    heading = updates.get("heading_path", payload.get("heading_path")) or []
+    summary = payload.get("summary")
+    return sparse.document_vector(
+        sparse.source_text(
+            [str(h) for h in heading],
+            payload.get("content_type"),
+            text,
+            summary if isinstance(summary, str) else None,
+        )
+    )
 
 
 def _metadata_updates(request: DocRequest, ident: Identified, payload: dict[str, Any]) -> dict:
@@ -399,9 +420,23 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
         )
 
     refreshed: list[tuple[str, dict]] = []
+    sparse_vectors: list[models.PointVectors] = []
     permission_changed = False
     for ident, stored in plan.unchanged:
         updates = _metadata_updates(request, ident, stored.payload)
+        # An unchanged chunk keeps its dense vector, but its sparse vector is rewritten (no
+        # embedding call) when it was made by an older tokenizer or its heading path moved: the
+        # sparse text includes the heading path.
+        if (
+            stored.payload.get("sparse_version") != sparse.SPARSE_VERSION
+            or "heading_path" in updates
+        ):
+            vector = refreshed_sparse_vector(stored.payload, updates)
+            if vector is not None:
+                sparse_vectors.append(
+                    models.PointVectors(id=stored.id, vector={SPARSE_VECTOR: vector})
+                )
+                updates = {**updates, "sparse_version": sparse.SPARSE_VERSION}
         if updates:
             refreshed.append((stored.id, updates))
             permission_changed = permission_changed or any(
@@ -415,7 +450,7 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
     )
     refreshed = [(point, checked_update(updates, now=now)) for point, updates in refreshed]
 
-    needs_finish = any_change or permission_changed
+    needs_finish = any_change or permission_changed or bool(sparse_vectors)
     redo = not needs_finish and pending.is_pending(ctx.marker_dir, request.doc_id)
     if needs_finish:  # before the first write, so even a crash in between is found next time
         pending.mark(ctx.marker_dir, request.doc_id, now, "ingest")
@@ -423,6 +458,8 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
     def write() -> None:
         for batch in _batches(points, UPSERT_BATCH):
             ctx.qdrant.upsert(ctx.collection, points=batch, wait=True)
+        for batch in _batches(sparse_vectors, UPSERT_BATCH):
+            ctx.qdrant.update_vectors(ctx.collection, points=batch, wait=True)
         for point, updates in refreshed:
             ctx.qdrant.set_payload(ctx.collection, payload=updates, points=[point], wait=True)
         for batch in _batches(removed_ids, UPSERT_BATCH):
@@ -452,6 +489,7 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
         doc_version=doc_version,
         incomplete=incomplete,
         images_skipped=images_skipped,
+        sparse_refreshed=len(sparse_vectors),
     )
     if not (needs_finish or redo):
         return result  # a true no-op: nothing written, bumped, cleared or audited
@@ -468,6 +506,7 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
                 "unchanged": result.unchanged,
                 "removed": result.removed,
                 "doc_version": doc_version,
+                "sparse_refreshed": result.sparse_refreshed,
                 "incomplete": bool(incomplete),
                 "finished_earlier_run": redo,
             },

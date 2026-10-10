@@ -78,6 +78,8 @@ never set.)
 | 11 | The IsEmpty filter on real chunks | Phases 3 and 5 | PENDING |
 | 12 | Pipeline smoke, one real question per role (12b: the role-isolation test) | Phase 8 | PENDING |
 | 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
+| 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
+| 15 | Refresh sparse vectors (only after a tokenizer change) | Phase 9 | WHEN NEEDED |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -399,8 +401,11 @@ Run exactly the same command again.
 
 - **You should see:** `chunks: active 19, held back 0, rejected 0, inactive 0 (stored 19)`,
   `document version: 1`, `unfinished cache step (pending-finish marker): no`,
-  `allow-list entries: approved N, pending M` (about 70 to 110 in all, most approved by
-  themselves), `failed pages waiting in the review queue: 0`.
+  `sparse vectors out of date: 0 of 19` (Phase 9: every chunk was made by the current
+  tokenizer), `allow-list entries: approved N, pending M` (about 70 to 110 in all, most
+  approved by themselves), `failed pages waiting in the review queue: 0`.
+- **If `sparse vectors out of date` is above 0** on a fresh ingest: send the line. After a
+  tokenizer change it is expected: see Run 15.
 - **If it differs:** a marker of `YES` means an earlier run did not finish its cache steps: run
   the `ingest` command again and it clears.
 
@@ -552,6 +557,7 @@ after (g), with the same variables. It adds a document; it does not change the o
 - **You should see**, for each command, one line per stage in this order:
 
       masker                OK        seconds=NN.N
+      sparse vectors out of date: 0 of NN
       authenticate         SKIPPED  ...
       local_scan           OK        ms=..
       triage               OK        ms=.. decider=jev model=... provider=... key=<fp> tokens_in=.. tokens_out=..
@@ -797,6 +803,92 @@ It asks you to type the id.
   approach.
 - **Safe to repeat:** yes; each run adds one trace.
 
+## Run 14. Real-Upstash check of the cache code
+
+- **Verifies:** Phase 9 (the cache code behaves on a real Upstash as it does on the test double:
+  the version seed and bump, entries with a time to live, reverse sets, batched invalidation, a
+  key of the wrong type being a refusal and not an outage, a rate limit, and a refused connection
+  being an outage).
+- **Before it:** nothing but a working Upstash database. It does not need ingested documents. It
+  can be run before or after Runs 9 to 13.
+- **Needs (names only):** `UPSTASH_REDIS_URL` (the `rediss://` address).
+- **What it touches:** only keys that start with its own throw-away prefix
+  `check:<12 hex>:`, made up for each run. It never reads, writes or deletes a real key
+  (`ans:`, `chunk:`, `doc:`, `ctr:`, `rl:`, `corpus:version`), never flushes, and removes its own
+  keys in a `finally`, even when it fails. The prefix is checked before every use.
+- **Commands:**
+
+      $env:UPSTASH_REDIS_URL = Read-Secret "UPSTASH_REDIS_URL"
+      uv run python scripts/cache_check.py --run
+
+- **You should see**, one per line (names, PASS or FAIL, and numbers only):
+
+      using a throw-away key prefix check:<12 hex>:
+      corpus version seeded from the clock (ms)    PASS
+      a bump adds exactly 1                        PASS
+      an entry is stored and read back             PASS
+      the entry has a time to live                 PASS  ttl_seconds=NNNNN
+      it is listed in every reverse set            PASS  sets=3
+      invalidating a chunk removes its entry       PASS  removed=1
+      a large reverse set is removed in batches    PASS  removed=600 left=0
+      a wrong-type reverse set heals, the entry is listed    PASS
+      a refusal does not open the 30 s skip window PASS  events=none
+      a wrong-type counter heals and counts        PASS  count=1
+      the rate limit counts 1, 2 and blocks the 3rd PASS retry_after=NN
+      a refused connection opens the 30 s skip window PASS
+      30 s skip window length                      INFO  seconds=30.0
+      throw-away keys removed                      DONE  removed=NN left=0
+      all checks passed
+
+  Exit code 0. (`events=` may list `cache_error` for the refusal checks: that is expected. The
+  line that matters is that `cache_unavailable` is NOT among them.)
+- **If a line differs:**
+  - Any `FAIL`: send the line. The cache code and the real server disagree on something.
+  - `throw-away keys removed FAILED` or `left=` above 0: remove the keys named
+    `check:<hex>:*` by hand in the Upstash console (Data Browser, search `check:`); they are
+    all under that one prefix and nothing else is.
+  - `error: UPSTASH_REDIS_URL is not set`: set it in this window.
+  - `error: the check stopped (<exception name>)`: the address or the network: send the name.
+- **Send back:** the lines above (they hold no key, address or value).
+- **Clear:** `Remove-Item Env:UPSTASH_REDIS_URL`.
+- **Real calls:** about 2,000 Redis commands (600 entries are made and removed to prove the
+  batches). Upstash's free tier allows 10,000 commands a day: do not run it more than twice a day.
+- **Safe to repeat:** yes. Each run uses a new prefix and cleans up after itself.
+
+## Run 15. Refresh sparse vectors (only after a tokenizer change)
+
+- **Verifies:** Phase 9 (a changed tokenizer is noticed, and only the sparse vectors are rewritten,
+  with no embedding call).
+- **When:** only if `SPARSE_VERSION` in `app/vector/sparse.py` was raised (a Claude session will
+  tell you), or `ingest status` / the smoke script shows `sparse vectors out of date` above 0.
+- **Before it:** Runs 2 and 10 (a collection with chunks). The ingest packages need not be
+  installed for this command beyond the base ones.
+- **Needs (names only):** `DATABASE_URL`, `QDRANT_URL`, `QDRANT_API_KEY`, `UPSTASH_REDIS_URL`.
+  No model key.
+- **Commands:**
+
+      uv run python -m app.ingest status --doc-id insurance-flexi-property
+      uv run python -m app.ingest refresh-sparse
+      uv run python -m app.ingest status --doc-id insurance-flexi-property
+      uv run python -m app.ingest refresh-sparse
+
+  (Add `--doc-id NAME` to `refresh-sparse` for one document; add `--load-env` to use your `.env`.)
+- **You should see:**
+  - first `status`: `sparse vectors out of date: N of M` with N above 0;
+  - `refresh-sparse`: `sparse vectors refreshed: N chunk(s) in D document(s) (checked M); no
+    embedding call was made`. Exit code 0;
+  - second `status`: `sparse vectors out of date: 0 of M`;
+  - the last `refresh-sparse`: `sparse vectors refreshed: 0 chunk(s) in 0 document(s) ...` and
+    `nothing was out of date: no write, no version bump, no audit row`.
+- **If it differs:** `refresh incomplete: run the same command again` (exit 1): the corpus
+  version was not bumped (Upstash): run the same command again; it finishes the bump.
+  `N chunk(s) have no stored text and were left alone`: send the number.
+- **Send back:** the counts lines. Never text.
+- **Clear:** the four variables.
+- **Real calls:** Qdrant reads and vector updates (about one call per 64 chunks) and 1 Redis bump;
+  no model call, no embedding call.
+- **Safe to repeat:** yes; with nothing out of date it does nothing.
+
 ---
 
 # C. Added by later phases
@@ -809,7 +901,7 @@ closed.** Also add the run to the table at the top.
 
 Known candidates, not yet written (the phase that creates the code writes the run):
 
-- Phase 9 (cache hardening): a real-Upstash re-check of the staleness paths.
+- Phase 9 (cache hardening): written above (Runs 14 and 15).
 - Phase 10 (chat API): a local end-to-end chat against real services.
 - Phase 11 (Streamlit): a look at the screens, with the API running.
 - Phase 12 (observability): the Langfuse retention and dashboard check.

@@ -31,6 +31,22 @@ def is_pending(directory: Path, doc_id: str) -> bool:
     return marker_path(directory, doc_id).is_file()
 
 
+def pending_docs(directory: Path) -> list[str]:
+    """The ids of the documents that have an unfinished marker."""
+    if not directory.is_dir():
+        return []
+    return sorted(path.stem for path in directory.glob("*.pending"))
+
+
+def marker_reason(directory: Path, doc_id: str) -> str | None:
+    """The kind of run that set the marker ("ingest", "sparse_refresh", ...), or None."""
+    try:
+        data = json.loads(marker_path(directory, doc_id).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("reason") if isinstance(data, dict) else None
+
+
 def mark(directory: Path, doc_id: str, now: datetime, reason: str) -> None:
     """Set the marker. An existing marker keeps its first time."""
     path = marker_path(directory, doc_id)

@@ -14,6 +14,7 @@ from app.ingest.index import load_existing
 from app.ingest.model import check_doc_id
 from app.ingest.queue import KIND as FAILED_PAGE_KIND
 from app.vector.documents import chunk_is_active
+from app.vector.sparse import SPARSE_VERSION
 
 
 @dataclass
@@ -27,6 +28,7 @@ class DocumentStatus:
     pending_finish: bool = False
     allowlist: dict[str, int] = field(default_factory=dict)  # status -> count
     open_failed_pages: int = 0
+    sparse_out_of_date: int = 0  # sparse vectors made by another tokenizer version
 
     @property
     def stored(self) -> int:
@@ -49,6 +51,8 @@ def document_status(ctx: Any, doc_id: str) -> DocumentStatus:
             status.active += 1
         else:
             status.inactive += 1
+        if payload.get("sparse_version") != SPARSE_VERSION:
+            status.sparse_out_of_date += 1
     status.pending_finish = pending.is_pending(ctx.marker_dir, doc_id)
     for name, count in ctx.db.query_all(
         "SELECT status, COUNT(*) FROM allowlist_entities WHERE doc_id = ? GROUP BY status",
@@ -74,6 +78,7 @@ def describe(status: DocumentStatus) -> list[str]:
         f"document version: {status.doc_version}",
         f"unfinished cache step (pending-finish marker): {'YES' if status.pending_finish else 'no'}"
         "",
+        f"sparse vectors out of date: {status.sparse_out_of_date} of {status.stored}",
         f"allow-list entries: {entries or 'none'}",
         f"failed pages waiting in the review queue: {status.open_failed_pages}",
     ]

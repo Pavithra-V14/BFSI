@@ -17,8 +17,17 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Sequence
 
 from qdrant_client import models
+
+# The version of THIS tokenizer (spec 6.6, 10.3 item 6, Phase 9 [P]). Every stored chunk records the
+# version its sparse vector was made with (`sparse_version` in the payload). If the way text is
+# turned into terms ever changes (the word pattern, the stemmer, the hash, the weights), raise this
+# number: a chunk with an older number is out of step with the questions and gets only its sparse
+# vector rewritten (no embedding call). A test pins the output of the current tokenizer, so a change
+# without a new number fails it.
+SPARSE_VERSION = 1
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _MIN_STEM = 3
@@ -69,6 +78,15 @@ def token_index(token: str) -> int:
 def _vector(counts: Counter[int], weight) -> models.SparseVector:
     indices = sorted(counts)
     return models.SparseVector(indices=indices, values=[weight(counts[i]) for i in indices])
+
+
+def source_text(
+    heading_path: Sequence[str], kind: str | None, text: str, summary: str | None
+) -> str:
+    """The text a chunk's sparse vector is made from: its heading path, then (for a table with a
+    summary) the summary and the text. Ingestion and the refresh both use this one function."""
+    body = f"{summary}\n{text}" if kind == "table" and summary else text
+    return " ".join(heading_path) + "\n" + body
 
 
 def document_vector(text: str) -> models.SparseVector:

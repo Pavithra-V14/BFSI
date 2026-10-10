@@ -53,6 +53,7 @@ from app.ingest.model import (
 from app.ingest.originals import keep_original
 from app.ingest.queue import flag_failed_pages, resolve_failed_pages
 from app.ingest.review import review_chunks, review_entities
+from app.ingest.sparse_refresh import refresh_sparse_vectors
 from app.ingest.status import describe, document_status
 from app.store_errors import StoreRejected, StoreUnavailable
 
@@ -298,6 +299,11 @@ def _ingest(args, env, services_factory, parse: Parse, ner_factory, out, err) ->
         f"{result.doc_id}: new {result.new}, changed {result.changed}, "
         f"unchanged {result.unchanged}, removed {result.removed}, version {result.doc_version}"
     )
+    if result.sparse_refreshed:
+        out(
+            f"sparse vectors rewritten for {result.sparse_refreshed} unchanged chunk(s) "
+            "(no embedding)"
+        )
     if result.status == "unchanged":
         out("nothing changed: no write, no version bump, no audit row")
     if result.status == "finished":
@@ -370,6 +376,35 @@ def _status(args, env, services_factory, out) -> int:
         services.close()
     for line in describe(status):
         out(line)
+    return 0
+
+
+def _refresh_sparse(args, env, services_factory, out, err) -> int:
+    if args.doc_id:
+        check_doc_id(args.doc_id)
+    services = services_factory(env, "cache")
+    try:
+        result = refresh_sparse_vectors(services.ctx, args.doc_id)
+    finally:
+        services.close()
+    out(
+        f"sparse vectors refreshed: {result.chunks_refreshed} chunk(s) in {result.documents} "
+        f"document(s) (checked {result.chunks_checked}); no embedding call was made"
+    )
+    if result.chunks_without_text:
+        out(f"{result.chunks_without_text} chunk(s) have no stored text and were left alone")
+    if result.redone:
+        out(
+            f"finished the corpus-version bump of an earlier refresh "
+            f"({len(result.redone)} marker(s))"
+        )
+    if not result.chunks_refreshed and not result.redone:
+        out("nothing was out of date: no write, no version bump, no audit row")
+    if result.incomplete:
+        for reason in result.incomplete:
+            err(f"  {reason}")
+        err("refresh incomplete: run the same command again to finish it")
+        return 1
     return 0
 
 
@@ -447,6 +482,12 @@ def main(
         "status", parents=[common], help="counts for one document (read-only, no text)"
     )
     status.add_argument("--doc-id", required=True)
+    refresh = commands.add_parser(
+        "refresh-sparse",
+        parents=[common],
+        help="rewrite out-of-date sparse vectors from the stored text (no PDF, no embedding)",
+    )
+    refresh.add_argument("--doc-id", help="only this document (default: every out-of-date chunk)")
     args = parser.parse_args(argv)
     env = os.environ if env is None else env
     try:
@@ -460,6 +501,8 @@ def main(
             return _review(args, env, services_factory, confirm, out, err)
         if args.command == "status":
             return _status(args, env, services_factory, out)
+        if args.command == "refresh-sparse":
+            return _refresh_sparse(args, env, services_factory, out, err)
         return _delete(args, env, services_factory, confirm, out, err)
     except KeyboardInterrupt:
         err("interrupted: no document is left half-activated; run the same command again")

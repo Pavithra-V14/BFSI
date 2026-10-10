@@ -24,6 +24,7 @@ from typing import Any
 from app.cache.store import HIT, MISS, ChunkRef, exact_key
 from app.guardrails.prompts import prompt_set_version
 from app.guardrails.scan import mask_for_storage
+from app.pipeline.roles import role_map_version
 from app.pipeline.state import PipelineState
 from app.pipeline.trace import Span
 from app.store_errors import call_vector
@@ -77,7 +78,13 @@ async def lookup(ctx: PipelineState, span: Span) -> dict[str, Any] | None:
         ctx.cache_status = "unavailable"
         return None
     ctx.corpus_start = version
-    ctx.cache_key = exact_key(ctx.question.text, ctx.request.role, version, prompt_set_version())
+    ctx.cache_key = exact_key(
+        ctx.question.text,
+        ctx.request.role,
+        version,
+        prompt_set_version(),
+        role_map_version(),  # a changed role map makes every earlier entry unreachable
+    )
     found = await asyncio.to_thread(cache.get_entry, ctx.cache_key)
     if found.status == MISS or found.entry is None:
         ctx.cache_status = "unavailable" if found.status not in (HIT, MISS) else "miss"

@@ -128,6 +128,38 @@ def checked_update(payload: Mapping[str, Any], *, now: datetime | None = None) -
     return checked
 
 
+@dataclass(frozen=True)
+class SparseCheck:
+    """How many stored chunks hold a sparse vector made by a different tokenizer version."""
+
+    total: int
+    out_of_date: int
+
+    @property
+    def ok(self) -> bool:
+        return self.out_of_date == 0
+
+
+def sparse_check(client: QdrantClient, collection: str = COLLECTION) -> SparseCheck:
+    """Counts only: all stored chunks, and those whose `sparse_version` is missing or differs from
+    the code's `SPARSE_VERSION`. Used by the status command, the pipeline's start-up check and the
+    smoke script."""
+    from app.vector.sparse import SPARSE_VERSION
+
+    current = models.FieldCondition(
+        key="sparse_version", match=models.MatchValue(value=SPARSE_VERSION)
+    )
+
+    def work() -> SparseCheck:
+        total = client.count(collection, exact=True).count
+        stale = client.count(
+            collection, count_filter=models.Filter(must_not=[current]), exact=True
+        ).count
+        return SparseCheck(int(total), int(stale))
+
+    return call_vector(work)
+
+
 class VectorConfigError(Exception):
     """A setting is wrong. The message names the variable, never a value."""
 

@@ -191,6 +191,16 @@ async def smoke(deps: Deps, db: Database, user_id: str, role: str, question: str
     events: list[str] = []
     deps.on_event = lambda name, fields: events.append(name)
     pipeline = Pipeline(deps)
+    index = await asyncio.to_thread(pipeline.check_index)  # counts only: Phase 9 start-up check
+    if index is None:
+        print("sparse vectors out of date: unknown")
+    else:
+        print(f"sparse vectors out of date: {index.out_of_date} of {index.total}")
+        if not index.ok:
+            print(
+                "warning: some sparse vectors were made by another tokenizer version; run "
+                "`uv run python -m app.ingest refresh-sparse` (no embedding call)"
+            )
     result = await pipeline.answer(Request(user_id=user_id, role=role, query=question), db)
     for span in spans:
         line(

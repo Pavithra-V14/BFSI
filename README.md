@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 8 closed (commits 52cdc7b and 317de83); next is Phase 9, only when the owner asks
+Current phase: Phase 9 built, awaiting the owner's "commit" and approval (next is Phase 10)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -563,6 +563,43 @@ web route of its own (the chat API is Phase 10).
   3,400-token budget estimate. Also to review there: the keyword rules of the no-LLM triage, whether a
   bare follow-up should be checked for domain, the adjacent clause for neighbour context, and the
   optional small caches.
+
+## Cache hardening and staleness (Phase 9)
+The exact answer cache (`app/cache/store.py`, `app/pipeline/cache_stage.py`) is now covered by a test
+for every staleness rule of spec 10.3, and four things were added or fixed:
+
+- **The role map is part of the key.** The cache key holds a short hash of the role-to-visible-roles
+  map (`app/pipeline/roles.py`). If that map ever changes, every older entry becomes unreachable at
+  once (and reachable again if the map is restored).
+- **A refusal is not an outage.** Only a connection problem opens the 30 s skip window. A refused
+  command (a key of the wrong type) is one alert (`cache_error`); it no longer switches the cache off
+  for 30 s or lets the rate limiter let everyone through. A wrong-type counter or reverse-set key is
+  removed and made again. An entry is never written unless every reverse set accepted it, and a huge
+  reverse set is removed in batches of 500.
+- **The tokenizer version of the sparse index.** Every chunk records `sparse_version`. If the
+  tokenizer ever changes (raise `SPARSE_VERSION` in `app/vector/sparse.py`; a test fails until you do),
+  run `uv run python -m app.ingest refresh-sparse` (add `--doc-id NAME` for one document). It rewrites
+  only the sparse vectors from the stored text: no PDF, no embedding call, one cache-version bump at
+  the end. `ingest status` shows `sparse vectors out of date: N of M`; the smoke script and the
+  pipeline's start-up check (`Pipeline.check_index()`, an alert event `sparse_version_mismatch`) warn
+  with counts. A repeat `ingest` of a document also refreshes its stale unchanged chunks.
+- **A real-Upstash check you can run yourself:** `uv run python scripts/cache_check.py --run`. It runs
+  the real cache code against your Upstash under one unique throw-away key prefix, never touches a real
+  key, never flushes, removes its own keys in a `finally`, and prints names and counts only. See
+  `docs/OWNER_RUNS.md` (Run 14).
+- **Decided, not built:** the semantic cache (revisit after Phase 12 shows the exact cache's hit rate:
+  a semantic hit can serve a wrong answer to a near-identical question that differs in a number) and
+  the two small caches (query embeddings, triage results).
+
+**Known limitations (recorded in Phase 9)**
+- **Phase 10.** The chat API must call `Pipeline.check_index()` once at start-up (it makes one Qdrant
+  count call; run it in a thread) and show the alert.
+- **Phase 12.** New alert events: `cache_error`, `sparse_version_mismatch`,
+  `sparse_check_unavailable`. The cache hit rate (exact) and the stale-answer incident count are
+  measured there; the semantic-cache decision waits for them.
+- **Phase 14.** A very large corpus makes the start-up check's two count calls slower (they are exact
+  counts); the refresh is sequential, document by document. Load tests should include a refresh.
+- **Phase 15.** The refresh and the cache check run on the admin machine only.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

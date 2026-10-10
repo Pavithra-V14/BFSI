@@ -148,10 +148,19 @@ def normalise_query(masked_query: str) -> str:
     return " ".join(unicodedata.normalize("NFC", masked_query).casefold().split())
 
 
-def exact_key(masked_query: str, role: str, corpus_version: int, prompt_version: str) -> str:
-    """Spec 10.1: a hash of the normalised masked query, the role, the corpus version and the
-    prompt version. The key holds no query text, and a change in any part gives a new key."""
+def exact_key(
+    masked_query: str,
+    role: str,
+    corpus_version: int,
+    prompt_version: str,
+    role_map_version: str = "",
+) -> str:
+    """Spec 10.1: a hash of the normalised masked query, the role, the corpus version, the prompt
+    version and (Phase 9, spec 10.3 item 7) a short hash of the role-to-visible-roles map. The key
+    holds no query text, and a change in any part gives a new key."""
     parts = [normalise_query(masked_query), role, int(corpus_version), prompt_version]
+    if role_map_version:  # the pipeline always passes it; an empty one keeps older callers' keys
+        parts.append(role_map_version)
     digest = hashlib.sha256(
         json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -168,6 +177,18 @@ def doc_set_key(doc_id: str) -> str:
 
 _FAILED = object()
 
+# What counts as "Upstash cannot be reached" (opens the skip window). Any other RedisError means the
+# server answered with a refusal for one command (for example WRONGTYPE) and does not.
+_CONNECTION_ERRORS = (
+    redis.exceptions.ConnectionError,
+    redis.exceptions.TimeoutError,
+    redis.exceptions.BusyLoadingError,
+    redis.exceptions.ClusterDownError,
+    OSError,
+)
+
+INVALIDATE_BATCH = 500  # entries removed per command: a huge reverse set is never one DEL
+
 
 def _positive_int(value: object, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -183,6 +204,7 @@ class CacheStore:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        namespace: str = "",
     ) -> None:
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise CacheConfigError("CACHE_TTL_SECONDS must be a positive whole number")
@@ -192,8 +214,15 @@ class CacheStore:
         self._clock = clock
         self._wall_clock = wall_clock
         self._skip_until = 0.0  # while the clock is before this, Upstash is not called
+        # A prefix put before every key this store touches. Empty in production. The owner-run
+        # `scripts/cache_check.py` uses a unique throw-away one, so that it runs the real code on
+        # the real server without ever touching a real key family.
+        self._ns = namespace
 
     # ---- plumbing -------------------------------------------------------------------
+
+    def _k(self, key: str) -> str:
+        return f"{self._ns}{key}"
 
     def _emit(self, name: str, **fields: Any) -> None:
         log.warning("cache event %s %s", name, fields)
@@ -218,9 +247,22 @@ class CacheStore:
             return _FAILED
         try:
             value = work()
-        except (redis.exceptions.RedisError, OSError) as error:
+        except _CONNECTION_ERRORS as error:
+            # Upstash cannot be reached: leave it alone for a while (a dead cache costs one timeout)
             self._skip_until = self._clock() + UNAVAILABLE_SKIP_SECONDS
             self._emit("cache_unavailable", operation=operation, error=type(error).__name__)
+            if staleness:
+                self._emit(
+                    "cache_staleness_write_failed",
+                    operation=operation,
+                    error=type(error).__name__,
+                )
+            return _FAILED
+        except redis.exceptions.RedisError as error:
+            # Upstash answered, and said no to THIS command (a key of the wrong type, a refused
+            # command). That is one bad key, not an outage: no skip window, so the other calls (and
+            # the rate limiter) carry on, and an alert names the operation.
+            self._emit("cache_error", operation=operation, error=type(error).__name__)
             if staleness:
                 self._emit(
                     "cache_staleness_write_failed",
@@ -240,7 +282,7 @@ class CacheStore:
         increment run as one atomic unit, so a key that vanishes cannot be re-created by the
         increment at 1 in between."""
         pipe = self._client.pipeline(transaction=True)
-        pipe.set(CORPUS_VERSION_KEY, int(self._wall_clock() * 1000), nx=True)
+        pipe.set(self._k(CORPUS_VERSION_KEY), int(self._wall_clock() * 1000), nx=True)
         return pipe
 
     def corpus_version(self) -> int | None:
@@ -252,7 +294,7 @@ class CacheStore:
 
         def work() -> Any:
             pipe = self._version_pipeline()
-            pipe.get(CORPUS_VERSION_KEY)
+            pipe.get(self._k(CORPUS_VERSION_KEY))
             return pipe.execute()[-1]
 
         value = self._run("corpus_version", work)
@@ -274,7 +316,7 @@ class CacheStore:
 
         def work() -> Any:
             pipe = self._version_pipeline()
-            pipe.incr(CORPUS_VERSION_KEY)
+            pipe.incr(self._k(CORPUS_VERSION_KEY))
             return pipe.execute()[-1]
 
         value = self._run("bump_corpus_version", work, staleness=True)
@@ -283,7 +325,7 @@ class CacheStore:
     # ---- entries and reverse sets (10.3 item 2) -------------------------------------
 
     def get_entry(self, key: str) -> Lookup:
-        raw = self._run("get_entry", lambda: self._client.get(key))
+        raw = self._run("get_entry", lambda: self._client.get(self._k(key)))
         if raw is _FAILED:
             return Lookup(UNAVAILABLE)
         if raw is None:
@@ -292,7 +334,7 @@ class CacheStore:
             entry = json.loads(raw)
         except ValueError:
             self._emit("cache_corrupt", operation="get_entry")
-            self._run("delete_corrupt", lambda: self._client.delete(key))
+            self._run("delete_corrupt", lambda: self._client.delete(self._k(key)))
             return Lookup(MISS)
         return Lookup(HIT, entry) if isinstance(entry, dict) else Lookup(MISS)
 
@@ -321,25 +363,64 @@ class CacheStore:
             "corpus_version": corpus_version,
         }
         reverse_ttl = self.ttl_seconds + REVERSE_SET_MARGIN_SECONDS
+        set_keys = sorted(
+            {self._k(chunk_set_key(c.chunk_id)) for c in chunks}
+            | {self._k(doc_set_key(c.doc_id)) for c in chunks}
+        )
 
-        def work() -> None:
+        def register() -> list[str]:
+            """SADD the entry into every reverse set; returns the keys that refused (WRONGTYPE)."""
             pipe = self._client.pipeline(transaction=False)
-            for set_key in sorted(
-                {chunk_set_key(c.chunk_id) for c in chunks}
-                | {doc_set_key(c.doc_id) for c in chunks}
-            ):
+            for set_key in set_keys:
                 pipe.sadd(set_key, key)
                 pipe.expire(set_key, reverse_ttl)
-            pipe.set(key, json.dumps(entry, ensure_ascii=False), ex=self.ttl_seconds)  # last
-            pipe.execute()
+            results = pipe.execute(raise_on_error=False)
+            return [
+                set_key
+                for set_key, outcome in zip(set_keys, results[0::2], strict=True)
+                if isinstance(outcome, Exception)
+            ]
 
-        return self._run("put_entry", work) is not _FAILED
+        def work() -> bool:
+            refused = register()
+            if refused:
+                # A reverse set key that holds the wrong type can never have been made by this
+                # code. Remove it and try once more; if it still refuses, the entry is NOT written:
+                # an entry that no invalidation can find must never exist.
+                for set_key in refused:
+                    self._client.delete(set_key)
+                refused = register()
+            if refused:
+                return False
+            # the entry last, once every reverse set names it
+            pipe = self._client.pipeline(transaction=False)
+            pipe.set(self._k(key), json.dumps(entry, ensure_ascii=False), ex=self.ttl_seconds)
+            pipe.execute()
+            return True
+
+        value = self._run("put_entry", work)
+        if value is True:
+            return True
+        if value is False:
+            self._emit("cache_error", operation="put_entry", error="ReverseSetRefused")
+        return False
 
     def _invalidate(self, operation: str, set_key: str) -> int | None:
+        """Remove the entries listed in a reverse set, in batches of INVALIDATE_BATCH (a reverse
+        set can hold thousands: never one command, never the whole set in memory). The set key is
+        removed last, so a run that stops half way is finished by running it again."""
+
         def work() -> int:
-            members = list(self._client.smembers(set_key))
-            removed = int(self._client.delete(*members)) if members else 0
-            self._client.delete(set_key)
+            removed = 0
+            batch: list[str] = []
+            for member in self._client.sscan_iter(self._k(set_key), count=INVALIDATE_BATCH):
+                batch.append(self._k(member))
+                if len(batch) >= INVALIDATE_BATCH:
+                    removed += int(self._client.delete(*batch))
+                    batch = []
+            if batch:
+                removed += int(self._client.delete(*batch))
+            self._client.delete(self._k(set_key))
             return removed
 
         value = self._run(operation, work, staleness=True)
@@ -370,7 +451,7 @@ class CacheStore:
         """
         _positive_int(window_seconds, "window_seconds")
         _positive_int(amount, "amount")
-        key = f"{COUNTER_PREFIX}{name}"
+        key = self._k(f"{COUNTER_PREFIX}{name}")
 
         def work() -> int:
             # One round trip, no MULTI/EXEC: each command is atomic by itself, and a managed
@@ -383,13 +464,28 @@ class CacheStore:
                 self._client.expire(key, window_seconds)
             return int(count)
 
-        value = self._run("incr_counter", work)
+        def healed() -> int:
+            try:
+                return work()
+            except redis.exceptions.ResponseError as error:
+                # A counter key of the wrong type (WRONGTYPE) can never have been made by this
+                # code: start it again, so that this one subject keeps being counted instead of
+                # being let through uncounted for ever.
+                if "WRONGTYPE" not in str(error).upper():
+                    raise
+                self._client.delete(key)
+                self._emit("cache_error", operation="incr_counter", error="WrongTypeHealed")
+                return work()
+
+        value = self._run("incr_counter", healed)
         return None if value is _FAILED else value
 
     def read_counter(self, name: str) -> int | None:
         """The current value of a counter (0 if it does not exist), or None if unavailable.
         Reads only: it never starts a window or changes a count."""
-        raw = self._run("read_counter", lambda: self._client.get(f"{COUNTER_PREFIX}{name}"))
+        raw = self._run(
+            "read_counter", lambda: self._client.get(self._k(f"{COUNTER_PREFIX}{name}"))
+        )
         if raw is _FAILED:
             return None
         try:
@@ -418,6 +514,8 @@ class CacheStore:
             return RateDecision(True, None, limit, None, available=False)
         if count <= limit:
             return RateDecision(True, count, limit, None)
-        remaining = self._run("rate_limit_ttl", lambda: self._client.ttl(f"{COUNTER_PREFIX}{key}"))
+        remaining = self._run(
+            "rate_limit_ttl", lambda: self._client.ttl(self._k(f"{COUNTER_PREFIX}{key}"))
+        )
         retry_after = None if remaining is _FAILED or remaining < 0 else int(remaining)
         return RateDecision(False, count, limit, retry_after)

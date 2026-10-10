@@ -608,6 +608,7 @@ class RecordingPipeline:
         self.client = client
         self.fail_at = fail_at
         self.commands = []
+        self.refuse = set()  # command numbers that answer with a refusal (not a dropped line)
 
     def __getattr__(self, name):
         def add(*args, **kwargs):
@@ -616,23 +617,48 @@ class RecordingPipeline:
 
         return add
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
+        results = []
         for index, (name, args, kwargs) in enumerate(self.commands):
             if index == self.fail_at:
                 raise redis.exceptions.ConnectionError("connection dropped")
-            getattr(self.client, name)(*args, **kwargs)
-        return []
+            try:
+                if index in self.refuse:
+                    raise redis.exceptions.ResponseError("WRONGTYPE refused")
+                results.append(getattr(self.client, name)(*args, **kwargs))
+            except redis.exceptions.ResponseError as error:
+                if raise_on_error:
+                    raise
+                results.append(error)
+        return results
 
 
 class PipelineClient:
-    def __init__(self, client, fail_at=None):
+    """Hands out recording pipelines. `fail_at` drops the line at that command of pipeline number
+    `fail_in` (0 = the one that registers the reverse sets, 1 = the one that writes the entry)."""
+
+    def __init__(self, client, fail_at=None, fail_in=0):
         self.client = client
         self.fail_at = fail_at
-        self.last = None
+        self.fail_in = fail_in
+        self.pipelines = []
+
+    @property
+    def last(self):
+        return self.pipelines[-1]
+
+    @property
+    def commands(self):
+        return [command for pipe in self.pipelines for command in pipe.commands]
 
     def pipeline(self, *args, **kwargs):
-        self.last = RecordingPipeline(self.client, self.fail_at)
-        return self.last
+        number = len(self.pipelines)
+        pipe = RecordingPipeline(self.client, self.fail_at if number == self.fail_in else None)
+        self.pipelines.append(pipe)
+        return pipe
+
+    def __getattr__(self, name):  # every other command goes straight to the real client
+        return getattr(self.client, name)
 
 
 def test_put_entry_writes_every_reverse_set_before_the_entry(client):
@@ -640,15 +666,15 @@ def test_put_entry_writes_every_reverse_set_before_the_entry(client):
     store = CacheStore(wrapper, wall_clock=lambda: NOW)
     key = exact_key("q", "customer", 1, "p")
     assert store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1) is True
-    names = [name for name, _, _ in wrapper.last.commands]
+    names = [name for name, _, _ in wrapper.commands]
     assert names[-1] == "set"  # the entry is written last
     assert names.count("set") == 1 and set(names[:-1]) == {"sadd", "expire"}
     assert names[:-1].count("sadd") == 5  # chunk-a, chunk-b, chunk-c, doc-1, doc-2
 
 
-@pytest.mark.parametrize("fail_at", range(0, 11))
+@pytest.mark.parametrize("fail_at", range(0, 10))
 def test_a_drop_at_any_point_never_leaves_an_entry_that_no_invalidation_can_find(client, fail_at):
-    wrapper = PipelineClient(client, fail_at=fail_at)
+    wrapper = PipelineClient(client, fail_at=fail_at)  # while the reverse sets are registered
     store = CacheStore(wrapper, wall_clock=lambda: NOW, clock=FakeClock())
     key = exact_key("q", "customer", 1, "p")
     assert store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1) is False
@@ -659,7 +685,7 @@ def test_a_drop_at_any_point_never_leaves_an_entry_that_no_invalidation_can_find
 
 
 def test_a_drop_after_everything_but_the_last_command_is_the_worst_case_and_is_safe(client):
-    wrapper = PipelineClient(client, fail_at=10)  # the SET is command 10 (0-based)
+    wrapper = PipelineClient(client, fail_at=0, fail_in=1)  # the SET: the entry's own pipeline
     store = CacheStore(wrapper, wall_clock=lambda: NOW, clock=FakeClock())
     key = exact_key("q", "customer", 1, "p")
     store.put_entry(key, {"a": 1}, CHUNKS, corpus_version=1)
