@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 7 hardened (round 2, the last), awaiting the owner's approval (next is Phase 8)
+Current phase: Phase 8 built, awaiting the owner's approval (next is Phase 9)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -451,6 +451,83 @@ functions the pipeline (Phase 8) and the chat API (Phase 10) will call. Nothing 
   questions stay in the transcript, and the pipeline must not show or reuse them.
 - **Postgres.** `tests/test_postgres_memory.py` covers every new query but was written without a
   Postgres on this machine; its first run is the first CI run.
+
+## Retrieval and the query pipeline (Phase 8)
+The code is in `app/pipeline/`. One call, `Pipeline(deps).answer(request, db)`, takes a question
+from a signed-in user and runs the 17 stages of the workflow diagram as a LangGraph graph. It has no
+web route of its own (the chat API is Phase 10).
+
+- **The stages** (`graph.py`): rate limit and budget; local scan (limits, greeting, injection regex,
+  masking); Jev triage; injection decision; rewrite (only when needed); domain gate; exact cache
+  lookup; embed; hybrid retrieval; rerank; context guard; confidence; generate; output guard; cache
+  write; persist; respond. Early exits (a greeting, a block, an out-of-domain question, a cache hit,
+  no reliable context) skip the rest and are stored.
+- **Retrieval** (`retrieval.py`): one Qdrant call runs the dense and the sparse search and fuses them
+  (RRF, k = 60, 25 candidates). The user's role limits the documents (customer sees `customer`; staff
+  `customer` and `staff`; admin all three) and only active chunks are searched, on both branches. A
+  confident product line or clause type narrows the search; if that finds nothing it is repeated
+  without. Rerank keeps the top 5.
+- **Answers** (`answer.py`): the generator gets the instructions, the labelled chunks and the
+  question, never the chat history. A failed number or citation check still returns the answer, with a
+  warning and the unchecked numbers marked. Low confidence (best score under 0.40) answers with a
+  statement that it may be wrong and goes to the review queue; no usable chunk gives the fixed refusal.
+- **Time**: 30 seconds for the whole request. Each step gets the smaller of its own limit and the time
+  left, and a step that cannot finish is not started.
+- **Safety** (`safety.py`, `startup.py`, `locks.py`): LangChain / LangSmith tracing is switched off in
+  code and the graph is compiled with no checkpointer (the state holds the raw question); the masker
+  loads in the background and until it is ready the answer is "starting up"; one turn at a time per
+  session; a failed dependency gives "temporarily unavailable", never an ungrounded answer; if
+  Postgres fails the answer is returned and the masked turn is queued in memory.
+- **Result** (`state.Result`): kind (answer, reply, refusal, reword, unavailable, starting_up, busy,
+  rate_limited, over_budget, session_not_found), text, citations, warnings, confidence, degraded
+  notices, whether the disclaimer was added, per-stage timings, tokens and an audit dict of ids and
+  hashes (no text).
+- **A real-service check you can run yourself**, in your own terminal (it asks one question through
+  all 17 stages and prints names, timings and counts only, never the question, the answer or a key):
+  `uv run python scripts/pipeline_smoke.py --run` (add `--role staff`, `--question "..."` or
+  `--with-cache`). It uses your real keys and Qdrant, a throw-away SQLite file for the chat tables,
+  and never opens your real database. Nothing happens without `--run`.
+- **Langfuse sink** (`app/pipeline/langfuse_sink.py`, **[P]**). Off by default. It turns on only when
+  `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` and `LANGFUSE_USER_HASH_KEY` are all
+  set to real values (the last must be its own key, not `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`).
+  It sends span records only: stage names, timings, decider, model, key fingerprint, token counts,
+  costs, flags, prompt hashes, corpus version, and errors as exception type names. It never sends the
+  question, the answer, chunk text, history, summary, username or email; the user and session appear
+  only as keyed hashes. It uses Langfuse's plain ingestion API over httpx, not the SDK (the SDK can
+  capture inputs and outputs automatically). A Langfuse failure or slowness cannot touch an answer:
+  background batches, a 3 s timeout, a bounded queue of 200 that drops when full, sent after the answer
+  is final. Alert events: `langfuse_failed`, `langfuse_dropped`, `langfuse_disabled` (type names only,
+  at most one a minute). To try it yourself: `uv run python scripts/pipeline_smoke.py --run --langfuse`
+  sends one real trace and prints only `SENT`, or the exception type that stopped it.
+
+**Known limitations (recorded in Phase 8)**
+- **Phase 9 (cache hardening).** A hit is verified (chunk hashes, active, role) and an entry is written
+  only under the rules of spec 10.2, but the role and permission version bumps, the sparse-index
+  refresh and the other staleness scenarios are Phase 9. The semantic cache is not built.
+- **Phase 10 (chat API).** The route must check the token, build the `Deps` and the per-request
+  database connection, start the masker holder at start-up, and map the result kinds to answers:
+  `starting_up` and `unavailable` to 503, `busy` to 409, `rate_limited` to 429 with `retry_after`,
+  `over_budget` to 429, `session_not_found` to 404 (the same for a missing and a foreign session).
+  The correlation id is returned internally and is not shown to users. The lock and the persist queue
+  live in one process (one Render instance); several instances would need a shared lock.
+- **Phase 12 (observability).** The Langfuse sink exists (Phase 8); Phase 12 builds dashboards,
+  retention and evaluation on top and may later decide whether masked text is sent. The alert
+  events are plain callbacks: `stage_failed`, `persist_queued`, `persist_queue_overflow`,
+  `persist_masking_failed`, `masker_load_failed`, `masker_unavailable`, `cache_entry_discarded`,
+  `cache_write_skipped`, `vector_store_rejected`, `triage_failed`, `triage_probability_invalid`,
+  `rewrite_failed`, `rewrite_unreadable`, `rewrite_rejected_injection`, `rerank_failed`,
+  `allowlist_unavailable`, `session_unavailable`, `request_budget_exhausted`, `graph_failed`,
+  `tracing_switched_off`, `summary_rejected_injection`, `summary_fold_failed`, `budget_charge_failed`.
+- **Phase 14 (testing completion).** Masking runs on the event loop thread and takes about 20 ms; load
+  tests must show whether that matters. A step that times out leaves its worker thread running until
+  it ends (the answer is already returned).
+- **Phase 15 (deployment).** The persist queue is lost if the host restarts. Deploy `prompts/` next to
+  `app/`.
+- **Phase 16 (baseline run).** Every number in spec 4.5 is a starting value: the 0.30 and 0.50 floors,
+  0.40 low confidence, 0.60 out of domain, 0.80 soft filters, 0.50 history, the node timeouts and the
+  3,400-token budget estimate. Also to review there: the keyword rules of the no-LLM triage, whether a
+  bare follow-up should be checked for domain, the adjacent clause for neighbour context, and the
+  optional small caches.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

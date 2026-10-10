@@ -26,3 +26,7 @@ argon2-cffi==25.1.0
 presidio-analyzer==2.2.364
 spacy==3.8.16
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# Phase 8: the query pipeline is a LangGraph graph (spec 4). The graph is compiled with no
+# checkpointer and LangChain / LangSmith tracing is switched off in code (the state holds the raw
+# question). Its dependencies are light (about 27 MB, no torch or numpy); they are resolved at install time.
+langgraph==1.2.14
