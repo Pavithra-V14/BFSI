@@ -183,16 +183,17 @@ def test_the_entry_has_the_ttl_and_the_reverse_sets_outlive_it(store, client):
 
 def test_the_ttl_is_configurable_and_validated(client):
     short = CacheStore(client, ttl_seconds=120)
-    short.put_entry("ans:k", {}, [], corpus_version=0)
+    short.put_entry("ans:k", {}, CHUNKS[:1], corpus_version=0)
     assert 0 < client.ttl("ans:k") <= 120
     for bad in (0, -5, True, "86400", 1.5):
         with pytest.raises(CacheConfigError, match="CACHE_TTL_SECONDS"):
             CacheStore(client, ttl_seconds=bad)
 
 
-def test_an_entry_with_no_chunks_is_still_stored(store):
-    assert store.put_entry("ans:plain", {"answer": "x"}, [], corpus_version=1)
-    assert store.get_entry("ans:plain").status == HIT
+def test_an_entry_with_no_chunks_is_refused(store, client):
+    """An entry that cites nothing could never be found by a chunk invalidation (Phase 9)."""
+    assert store.put_entry("ans:plain", {"answer": "x"}, [], corpus_version=1) is False
+    assert store.get_entry("ans:plain").status == MISS and not client.exists("ans:plain")
 
 
 def test_invalidating_a_chunk_removes_only_entries_that_cited_it(store, client):
@@ -741,11 +742,11 @@ def test_the_same_store_recovers_when_upstash_comes_back(client, events, clock):
         clock=clock,
         wall_clock=lambda: NOW,
     )
-    assert store.put_entry("ans:k", {"answer": "x"}, [], corpus_version=1) is False
+    assert store.put_entry("ans:k", {"answer": "x"}, CHUNKS[:1], corpus_version=1) is False
     flaky.down = False  # Upstash is back, but the store keeps away until the window ends
     assert store.get_entry("ans:k").status == UNAVAILABLE
     clock.advance(31)
-    assert store.put_entry("ans:k", {"answer": "x"}, [], corpus_version=1) is True
+    assert store.put_entry("ans:k", {"answer": "x"}, CHUNKS[:1], corpus_version=1) is True
     found = store.get_entry("ans:k")
     assert found.status == HIT and found.entry["payload"] == {"answer": "x"}
     assert store.corpus_version() == NOW_MS  # the version works again too

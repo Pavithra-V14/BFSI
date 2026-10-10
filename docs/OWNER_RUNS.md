@@ -79,7 +79,7 @@ never set.)
 | 12 | Pipeline smoke, one real question per role (12b: the role-isolation test) | Phase 8 | PENDING |
 | 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
 | 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
-| 15 | Refresh sparse vectors (only after a tokenizer change) | Phase 9 | WHEN NEEDED |
+| 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -337,6 +337,13 @@ give: ______.)
       $env:OPENROUTER_API_KEYS = Read-Secret "OPENROUTER_API_KEYS"
       $env:JEV_OPENROUTER_API_KEY = Read-Secret "JEV_OPENROUTER_API_KEY"
 
+- **A preflight (Phase 9):** `ingest`, `delete`, `review` and `refresh-sparse` first check that
+  Upstash accepts the commands a cache update needs. If it does not, they stop at once with
+  `error: cache unavailable, nothing was changed; ...` and exit code 1. Nothing was written, no
+  model call was paid for: check `UPSTASH_REDIS_URL` and the Upstash dashboard (the daily request
+  quota too: the free tier allows 10,000 commands a day), then run the same command again. If a
+  run instead ends with `ingest incomplete`, Upstash failed after the check: run the same command
+  again, and until you do an answer that cited the document can still be served.
 - **Rules that always hold:** use only the three sample documents (a customer-specific document
   is refused: its text would go to a model provider). `--doc-id` is a short name you choose and
   keep. Every command is safe to run again: a run that stops never leaves a half-activated
@@ -880,8 +887,12 @@ It asks you to type the id.
   - second `status`: `sparse vectors out of date: 0 of M`;
   - the last `refresh-sparse`: `sparse vectors refreshed: 0 chunk(s) in 0 document(s) ...` and
     `nothing was out of date: no write, no version bump, no audit row`.
-- **If it differs:** `refresh incomplete: run the same command again` (exit 1): the corpus
+- **If it differs:** `error: cache unavailable, nothing was changed; ...` (exit 1): Upstash did
+  not accept the check before the first write: nothing was written; fix Upstash and run it again.
+  `refresh incomplete: run the same command again` (exit 1): the corpus
   version was not bumped (Upstash): run the same command again; it finishes the bump.
+  `N document(s) have an unfinished ingest, delete or review waiting`: run that command again
+  to finish it (the refresh left its marker alone).
   `N chunk(s) have no stored text and were left alone`: send the number.
 - **Send back:** the counts lines. Never text.
 - **Clear:** the four variables.

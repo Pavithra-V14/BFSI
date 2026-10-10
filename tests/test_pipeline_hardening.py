@@ -889,7 +889,9 @@ def test_a_hanging_postgres_at_persist_returns_the_answer_and_queues_the_turn(ri
         result, elapsed = run(timed(rig.ask(QUESTION)))
     finally:
         gate.set()
-    assert result.kind == "answer" and elapsed < 3.0
+    # (the hanging write waits up to 10 s: any bound well under that proves it was not waited
+    # for, and a loaded machine must not make the test flaky)
+    assert result.kind == "answer" and elapsed < 6.0
     assert len(rig.deps.queue) == 1
     persist = next(s for s in rig.spans if s.stage == "persist")
     assert persist.status == "error" and persist.error_code == "TimeoutError"

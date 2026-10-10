@@ -20,7 +20,26 @@ from pathlib import Path
 
 from app.accounts.tokens import utc_text
 from app.cache.store import CacheStore
-from app.ingest.model import check_doc_id
+from app.ingest.model import IngestError, check_doc_id
+
+
+class CacheUnavailable(IngestError):
+    """Upstash does not accept the staleness commands, so nothing was started."""
+
+
+def require_cache(cache: CacheStore) -> None:
+    """The preflight of ingest, delete, review approval and the sparse refresh (Phase 9 [P]).
+
+    Called BEFORE the first write. If Upstash does not accept the commands a staleness write needs
+    (the version bump, the invalidations), the run refuses to start, so that no chunk is changed
+    while the cache cannot be told about it. A residual window remains: Upstash can fail between
+    this check and the bump; then the run reports "incomplete", keeps its marker, and a repeat
+    finishes it (see the README limitations)."""
+    if not cache.preflight():
+        raise CacheUnavailable(
+            "cache unavailable, nothing was changed; check the Upstash address and dashboard "
+            "(its quota too), then run the same command again"
+        )
 
 
 def marker_path(directory: Path, doc_id: str) -> Path:

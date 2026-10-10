@@ -63,23 +63,136 @@ def test_every_chunk_records_the_tokenizer_version_it_was_made_with(rig):
     assert (check.total, check.out_of_date, check.ok) == (3, 0, True)
 
 
+def fullwidth(text):
+    """ASCII letters and digits written as full-width characters (NFKC folds them back)."""
+    return "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in text)
+
+
+BASIC = (
+    "Insured claims: waiting-period premiums apply after 30 days; "
+    "hospitalisation expenses & Policy-holders"
+)
+# every suffix rule of the stemmer, a short word, a word with digits, and "ss" words
+STEMMER = (
+    "Charges ended; policies denied; classes missed; payments continued; abilities rapidly; "
+    "accordingly renewed quickly; stories boxes; filings; hospitalisation; settlements; "
+    "cat dogs; abc123s; glass kisses"
+)
+# accents, the German sharp s, an apostrophe, an underscore, a currency sign, full-width text
+UNICODE = (
+    "Caf\u00e9 r\u00e9sum\u00e9 na\u00efve " + fullwidth("Fullwidth ABC 123") + " x_y don't "
+    "O\u2019Brien\u2019s 100% \u20b95,000 policy-holders Stra\u00dfe"
+)
+REPEATED = "claims claims claims waiting period period"
+
+
+def golden_snapshot():
+    """Everything the sparse index depends on, in one JSON-able value."""
+
+    def vector(v):
+        return [list(v.indices), [round(x, 6) for x in v.values]]
+
+    return {
+        "tokens": {name: sparse.tokenize(text) for name, text in
+                   {"basic": BASIC, "stemmer": STEMMER, "unicode": UNICODE}.items()},
+        "document": {name: vector(sparse.document_vector(text)) for name, text in
+                     {"basic": BASIC, "stemmer": STEMMER, "unicode": UNICODE,
+                      "repeated": REPEATED}.items()},
+        "query": {name: vector(sparse.query_vector(text)) for name, text in
+                  {"basic": BASIC, "repeated": REPEATED}.items()},
+        "source_text": [
+            sparse.source_text(["Part A", "Section 2"], "table", "Row one two", "A short summary"),
+            sparse.source_text(["Part A"], "text", "Plain clause text", None),
+            sparse.source_text([], "table", "Only text", ""),
+            sparse.source_text(["Part A"], "image_caption", "A caption", "ignored summary"),
+        ],
+    }  # fmt: skip
+
+
+def golden_digest():
+    import hashlib
+    import json
+
+    text = json.dumps(golden_snapshot(), sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# One digest per tokenizer version. When the tokenizer changes: raise SPARSE_VERSION, ADD a new
+# entry with the new digest and KEEP the old ones. Changing an old digest in place defeats the
+# test and should be refused in review.
+GOLDEN_HISTORY = {1: "9034a307d71f29cbcb7307c10bd110c37b4608c373fe81867942e9292196b888"}
+
+
 def test_the_tokenizer_output_is_pinned_so_a_change_must_raise_the_version():
-    """If this fails you changed how text becomes terms (the word pattern, the stemmer, the hash or
-    the weights). Raise SPARSE_VERSION in app/vector/sparse.py, then update the numbers here."""
-    text = (
-        "Insured claims: waiting-period premiums apply after 30 days; "
-        "hospitalisation expenses & Policy-holders"
+    """If this fails you changed how text becomes terms (the word pattern, the stemmer, the hash,
+    the weights, the query weights or the text a vector is made from). Raise SPARSE_VERSION in
+    app/vector/sparse.py and add the new digest to GOLDEN_HISTORY."""
+    assert set(GOLDEN_HISTORY) == set(range(1, sparse.SPARSE_VERSION + 1)), (
+        "SPARSE_VERSION and GOLDEN_HISTORY must list the same versions"
     )
-    assert sparse.tokenize(text) == [
+    assert golden_digest() == GOLDEN_HISTORY[sparse.SPARSE_VERSION], (
+        "the tokenizer's output changed but SPARSE_VERSION did not (or the digest is new)"
+    )
+
+
+def test_the_pin_fails_when_the_output_changes_and_the_version_stays_the_same(monkeypatch):
+    """The pin itself is tested: change the stemmer, the hash, a weight or the text a vector is
+    made from, and the digest no longer matches the one recorded for this version."""
+    assert golden_digest() == GOLDEN_HISTORY[sparse.SPARSE_VERSION]
+    monkeypatch.setattr(sparse, "_SUFFIXES", tuple(x for x in sparse._SUFFIXES if x[0] != "s"))
+    assert golden_digest() != GOLDEN_HISTORY[sparse.SPARSE_VERSION]  # a stemmer rule
+    monkeypatch.undo()
+    monkeypatch.setattr(sparse, "token_index", lambda token: hash(token) % (2**32))
+    assert golden_digest() != GOLDEN_HISTORY[sparse.SPARSE_VERSION]  # the hash
+    monkeypatch.undo()
+    real_query = sparse.query_vector
+    monkeypatch.setattr(
+        sparse,
+        "query_vector",
+        lambda text: models.SparseVector(
+            indices=real_query(text).indices, values=[2.0] * len(real_query(text).indices)
+        ),
+    )
+    assert golden_digest() != GOLDEN_HISTORY[sparse.SPARSE_VERSION]  # the query weights
+    monkeypatch.undo()
+    real_source = sparse.source_text
+    monkeypatch.setattr(
+        sparse, "source_text", lambda h, k, t, summary: real_source(h, k, t, summary) + " "
+    )
+    assert golden_digest() != GOLDEN_HISTORY[sparse.SPARSE_VERSION]  # the composition
+
+
+def test_the_readable_pins_of_the_tokenizer():
+    """The same facts as the digest, written out so that a failure says what moved."""
+    assert sparse.tokenize(BASIC) == [
         "insur", "claim", "wait", "period", "premium", "app", "after", "30", "day",
         "hospitalisate", "expens", "policy", "holder",
     ]  # fmt: skip
-    vector = sparse.document_vector(text)
-    assert list(vector.indices) == [
-        5739172, 230524523, 612279868, 784663210, 1776422902, 2917938051, 2954857290,
-        3235027667, 3313285705, 3568969632, 3955836924, 4056971995, 4133949730,
+    assert sparse.tokenize(STEMMER) == [
+        "charg", "end", "policy", "deny", "class", "miss", "pay", "continu", "ability",
+        "rapid", "accord", "renew", "quick", "story", "box", "fil", "hospitalisate", "settle",
+        "cat", "dog", "abc123s", "glass", "kiss",
     ]  # fmt: skip
-    assert list(vector.values) == [1.0] * 13
+    assert sparse.tokenize(UNICODE) == [
+        "caf\u00e9", "r\u00e9sum\u00e9", "na\u00efve", "fullwidth", "abc", "123", "x", "y",
+        "don", "t", "o", "brien", "s", "100", "5", "000", "policy", "holder", "stra\u00dfe",
+    ]  # fmt: skip
+    document = sparse.document_vector(REPEATED)
+    query = sparse.query_vector(REPEATED)
+    assert list(document.indices) == list(query.indices) == [230524523, 1776422902, 2954857290]
+    assert [round(x, 6) for x in document.values] == [1.693147, 1.0, 2.098612]  # 1 + ln(count)
+    assert list(query.values) == [1.0, 1.0, 1.0]  # each distinct term once
+    assert (
+        sparse.source_text(["Part A", "Section 2"], "table", "Row one two", "A short summary")
+        == "Part A Section 2\nA short summary\nRow one two"
+    )
+    assert sparse.source_text(["Part A"], "text", "Plain clause text", None) == (
+        "Part A\nPlain clause text"
+    )
+    assert sparse.source_text([], "table", "Only text", "") == "\nOnly text"
+    assert sparse.source_text(["Part A"], "image_caption", "A caption", "ignored") == (
+        "Part A\nA caption"
+    )  # only a table uses its summary
     assert sparse.SPARSE_VERSION == 1
 
 
@@ -172,23 +285,50 @@ class Down:
         raise redis.exceptions.ConnectionError("refused")
 
 
-def test_a_refresh_whose_bump_failed_keeps_its_marker_and_a_repeat_finishes_it(rig):
+def test_a_refresh_refuses_to_start_when_upstash_does_not_accept_staleness_writes(rig):
     rig.ingest(parsed(*sample_elements()))
     make_stale(rig)
+    before = {i: sparse_of(rig, i) for i in rig.points()}
     working = rig.cache._client
     rig.cache._client = Down()
+    with pytest.raises(pending.CacheUnavailable, match="nothing was changed"):
+        refresh_sparse_vectors(rig.ctx)
+    assert {i: sparse_of(rig, i) for i in rig.points()} == before  # no vector was written
+    assert not pending.is_pending(rig.ctx.marker_dir, "doc-a")
+    rig.cache._client = working
+    rig.cache._skip_until = 0.0
+    assert refresh_sparse_vectors(rig.ctx).complete  # the same command again
+
+
+def test_a_refresh_whose_bump_failed_keeps_its_marker_and_a_repeat_finishes_it(rig):
+    """The residual window: the preflight passed and the bump then failed."""
+    rig.ingest(parsed(*sample_elements()))
+    make_stale(rig)
+    rig.cache.bump_corpus_version = lambda: None
     failed = refresh_sparse_vectors(rig.ctx)
     assert not failed.complete and failed.chunks_refreshed == 3  # the vectors are written
     assert pending.is_pending(rig.ctx.marker_dir, "doc-a")
     assert pending.marker_reason(rig.ctx.marker_dir, "doc-a") == "sparse_refresh"
-    rig.cache._client = working
-    rig.cache._skip_until = 0.0
+    del rig.cache.bump_corpus_version
     before = rig.corpus_version()
     repeat = refresh_sparse_vectors(rig.ctx)
     assert repeat.complete and repeat.chunks_refreshed == 0 and repeat.redone == ["doc-a"]
     assert rig.corpus_version() == before + 1  # the one bump, at the end
     assert not pending.is_pending(rig.ctx.marker_dir, "doc-a")
     assert refresh_sparse_vectors(rig.ctx).redone == []  # and now it is a no-op
+
+
+@pytest.mark.parametrize("reason", ["ingest", "delete", "review"])
+def test_a_refresh_leaves_the_marker_of_an_unfinished_run_of_another_kind_alone(rig, reason):
+    rig.ingest(parsed(*sample_elements()))
+    make_stale(rig)
+    pending.mark(rig.ctx.marker_dir, "doc-a", rig.moment, reason)  # an unfinished run waits
+    before = rig.corpus_version()
+    result = refresh_sparse_vectors(rig.ctx)
+    assert result.chunks_refreshed == 3 and result.complete and result.foreign == ["doc-a"]
+    assert rig.corpus_version() == before + 1  # the vectors changed, so the version moved
+    assert pending.is_pending(rig.ctx.marker_dir, "doc-a")  # but the marker is NOT ours to clear
+    assert pending.marker_reason(rig.ctx.marker_dir, "doc-a") == reason
 
 
 def test_a_chunk_with_no_stored_text_is_left_alone_and_counted(rig):
@@ -273,12 +413,28 @@ def test_the_refresh_command_can_name_one_document(rig):
     assert code == 0 and "3 chunk(s) in 1 document(s)" in out[0]
 
 
-def test_an_incomplete_refresh_exits_with_1_and_says_to_run_it_again(rig):
+def test_a_refresh_that_cannot_start_exits_with_1_and_says_nothing_was_changed(rig):
     rig.ingest(parsed(*sample_elements()))
     make_stale(rig)
     rig.cache._client = Down()
     code, out, err = run_cli(rig)
+    assert code == 1 and any("cache unavailable, nothing was changed" in line for line in err)
+
+
+def test_an_incomplete_refresh_exits_with_1_and_says_to_run_it_again(rig):
+    rig.ingest(parsed(*sample_elements()))
+    make_stale(rig)
+    rig.cache.bump_corpus_version = lambda: None
+    code, out, err = run_cli(rig)
     assert code == 1 and any("refresh incomplete" in line for line in err)
+
+
+def test_the_command_names_documents_whose_unfinished_run_was_left_alone(rig):
+    rig.ingest(parsed(*sample_elements()))
+    make_stale(rig)
+    pending.mark(rig.ctx.marker_dir, "doc-a", rig.moment, "delete")
+    code, out, _ = run_cli(rig)
+    assert code == 0 and any("unfinished ingest, delete or review" in line for line in out)
 
 
 # ---- the start-up check --------

@@ -77,6 +77,8 @@ def delete_document(ctx: IngestContext, doc_id: str) -> DeleteResult:
         # A repeat finishes what an earlier run left (the marker), and does nothing when there is
         # nothing stored and no unfinished run.
         redo = pending.is_pending(ctx.marker_dir, doc_id)
+        if existing or redo:  # nothing is changed unless the cache can be told
+            pending.require_cache(ctx.cache)
         if existing:
             pending.mark(ctx.marker_dir, doc_id, now, "delete")  # before the first change
             call_vector(

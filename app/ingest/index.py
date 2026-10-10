@@ -365,6 +365,15 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
         # Without captioning, stored image captions are left alone, never treated as removed.
         existing = [e for e in existing if e.payload.get("content_type") != "image_caption"]
     plan = plan_changes(request.doc_id, identified, existing)
+    checked = False
+    if (
+        plan.changed
+        or plan.new
+        or plan.removed
+        or pending.is_pending(ctx.marker_dir, request.doc_id)
+    ):  # before any model call is paid for
+        pending.require_cache(ctx.cache)
+        checked = True
 
     to_write = [i for i, _ in plan.changed] + plan.new
     if ctx.enrich is not None and to_write:
@@ -452,6 +461,8 @@ def _ingest_locked(ctx: IngestContext, request: DocRequest, parsed: ParsedDocume
 
     needs_finish = any_change or permission_changed or bool(sparse_vectors)
     redo = not needs_finish and pending.is_pending(ctx.marker_dir, request.doc_id)
+    if (needs_finish or redo) and not checked:  # a metadata or sparse-only change
+        pending.require_cache(ctx.cache)
     if needs_finish:  # before the first write, so even a crash in between is found next time
         pending.mark(ctx.marker_dir, request.doc_id, now, "ingest")
 

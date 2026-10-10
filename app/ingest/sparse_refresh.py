@@ -41,6 +41,7 @@ class RefreshResult:
     chunks_refreshed: int = 0
     chunks_without_text: int = 0
     redone: list[str] = field(default_factory=list)  # documents whose unfinished marker was redone
+    foreign: list[str] = field(default_factory=list)  # unfinished runs of another kind
     incomplete: list[str] = field(default_factory=list)
 
     @property
@@ -83,6 +84,8 @@ def refresh_sparse_vectors(ctx: IngestContext, doc_id: str | None = None) -> Ref
         doc_ids = [doc_id]
     else:
         doc_ids = _stale_doc_ids(ctx)
+    if doc_ids or pending.pending_docs(ctx.marker_dir):
+        pending.require_cache(ctx.cache)  # before anything is written
     marked: list[str] = []
     for current_doc in doc_ids:
         with document_lock(ctx.lock_dir, current_doc):
@@ -105,7 +108,10 @@ def refresh_sparse_vectors(ctx: IngestContext, doc_id: str | None = None) -> Ref
             if not vectors:
                 continue
             pending.mark(ctx.marker_dir, current_doc, now, REASON)  # before the first write
-            marked.append(current_doc)
+            if pending.marker_reason(ctx.marker_dir, current_doc) == REASON:
+                marked.append(current_doc)
+            else:  # an unfinished ingest, delete or review of this document is waiting:
+                result.foreign.append(current_doc)  # its marker is not ours to clear
 
             def write(vectors=vectors, done=done) -> None:
                 for start in range(0, len(vectors), BATCH):
@@ -132,8 +138,10 @@ def refresh_sparse_vectors(ctx: IngestContext, doc_id: str | None = None) -> Ref
         and pending.marker_reason(ctx.marker_dir, name) == REASON
     ]
     result.redone = leftover
-    if marked or leftover:
-        if ctx.cache.bump_corpus_version() is None:  # ONE bump for the whole refresh
+    if marked or leftover or result.foreign:
+        # ONE bump for the whole refresh, also for a document whose marker belongs to another
+        # kind of run (its vectors changed all the same); only OUR markers are cleared below
+        if ctx.cache.bump_corpus_version() is None:
             result.incomplete.append("the corpus version was not bumped")
         else:
             for name in marked + leftover:

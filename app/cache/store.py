@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -189,6 +190,27 @@ _CONNECTION_ERRORS = (
 
 INVALIDATE_BATCH = 500  # entries removed per command: a huge reverse set is never one DEL
 
+# Refusals that are NOT about one key but about the whole server: they open the skip window like a
+# connection problem, each with its own alert name so that "Upstash is out of quota" is not
+# mistaken for "one key has the wrong type". Matched on the class first, then on the text the
+# server sends (Upstash answers "ERR max daily request limit exceeded").
+_QUOTA_WORDS = ("max daily request limit", "max request limit", "request limit exceeded")
+
+
+def classify_refusal(error: Exception) -> str | None:
+    """The alert name of a server-wide refusal, or None for a refusal of one command (a key of the
+    wrong type, a bad argument), which is not an outage."""
+    text = str(error).lower()
+    if isinstance(error, redis.exceptions.ReadOnlyError) or text.startswith("readonly"):
+        return "cache_read_only"
+    if isinstance(error, redis.exceptions.OutOfMemoryError) or text.startswith("oom "):
+        return "cache_out_of_memory"
+    if any(word in text for word in _QUOTA_WORDS):
+        return "cache_quota_exceeded"
+    if isinstance(error, redis.exceptions.NoPermissionError) or text.startswith("noperm"):
+        return "cache_permission_denied"
+    return None
+
 
 def _positive_int(value: object, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -259,6 +281,19 @@ class CacheStore:
                 )
             return _FAILED
         except redis.exceptions.RedisError as error:
+            outage = classify_refusal(error)
+            if outage is not None:
+                # The server refuses everything (read-only, out of memory, quota, no permission):
+                # an outage with its own alert name. Leave it alone for a while.
+                self._skip_until = self._clock() + UNAVAILABLE_SKIP_SECONDS
+                self._emit(outage, operation=operation, error=type(error).__name__)
+                if staleness:
+                    self._emit(
+                        "cache_staleness_write_failed",
+                        operation=operation,
+                        error=type(error).__name__,
+                    )
+                return _FAILED
             # Upstash answered, and said no to THIS command (a key of the wrong type, a refused
             # command). That is one bad key, not an outage: no skip window, so the other calls (and
             # the rate limiter) carry on, and an alert names the operation.
@@ -273,6 +308,29 @@ class CacheStore:
         if staleness:
             self._skip_until = 0.0
         return value
+
+    def preflight(self) -> bool:
+        """Does Upstash accept the commands a staleness write needs? Ingest, delete and a review
+        approval call this BEFORE their first write and refuse to start when it says no, so that
+        nothing is changed while the cache cannot be told about it (Phase 9 [P]).
+
+        It runs the same kinds of command the bump and the invalidation use (a MULTI/EXEC
+        transaction with SET NX, a read, a scan and a delete) on one throw-away key that expires by
+        itself. It never changes the corpus version and is never skipped because of the skip
+        window. It returns False (and emits the usual alert) when any of them fails.
+        """
+        probe = self._k(f"preflight:{secrets.token_hex(8)}")
+
+        def work() -> bool:
+            pipe = self._client.pipeline(transaction=True)
+            pipe.set(probe, "1", nx=True, ex=30)
+            pipe.get(probe)
+            ok = pipe.execute()[-1] == "1"
+            list(self._client.sscan_iter(probe + ":none", count=1))
+            self._client.delete(probe)
+            return ok
+
+        return self._run("preflight", work, staleness=True) is True
 
     # ---- corpus version (10.3 item 1) ----------------------------------------------
 
@@ -354,6 +412,9 @@ class CacheStore:
         the worst case is a reverse set that names an entry that does not exist (harmless), never
         an entry that no invalidation can find.
         """
+        if not chunks:  # an entry that cites nothing could never be invalidated by a chunk
+            self._emit("cache_error", operation="put_entry", error="EmptyChunkList")
+            return False
         entry = {
             "payload": dict(payload),
             "chunks": [
@@ -369,17 +430,23 @@ class CacheStore:
         )
 
         def register() -> list[str]:
-            """SADD the entry into every reverse set; returns the keys that refused (WRONGTYPE)."""
+            """SADD the entry into every reverse set; returns the keys that hold the wrong type.
+            Any OTHER refusal (out of memory, a quota, no permission ...) is raised as it is: it is
+            not evidence that the key is of the wrong type, and a live set must never be deleted
+            because of it."""
             pipe = self._client.pipeline(transaction=False)
             for set_key in set_keys:
                 pipe.sadd(set_key, key)
                 pipe.expire(set_key, reverse_ttl)
             results = pipe.execute(raise_on_error=False)
-            return [
-                set_key
-                for set_key, outcome in zip(set_keys, results[0::2], strict=True)
-                if isinstance(outcome, Exception)
-            ]
+            wrong: list[str] = []
+            for set_key, outcome in zip(set_keys, results[0::2], strict=True):
+                if not isinstance(outcome, Exception):
+                    continue
+                if "WRONGTYPE" not in str(outcome).upper():
+                    raise outcome
+                wrong.append(set_key)
+            return wrong
 
         def work() -> bool:
             refused = register()
@@ -408,7 +475,13 @@ class CacheStore:
     def _invalidate(self, operation: str, set_key: str) -> int | None:
         """Remove the entries listed in a reverse set, in batches of INVALIDATE_BATCH (a reverse
         set can hold thousands: never one command, never the whole set in memory). The set key is
-        removed last, so a run that stops half way is finished by running it again."""
+        removed last, so a run that stops half way is finished by running it again.
+
+        A race, known and accepted: an entry registered into this set after the scan has passed
+        it, and before the set key is removed, loses its reverse-set record. That is safe only
+        because every caller bumps the corpus version BEFORE invalidating: such an entry sits under
+        a key with the old version and can never be looked up again. Do not call this without a
+        bump first."""
 
         def work() -> int:
             removed = 0

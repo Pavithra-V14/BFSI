@@ -171,7 +171,31 @@ def test_a_huge_reverse_set_is_removed_in_batches_never_in_one_command(client, s
     assert client.keys("ans:*") == [] and not client.exists("chunk:big")
 
 
-def test_an_invalidation_that_stops_half_way_is_finished_by_running_it_again(client, store):
+def test_an_invalidation_that_stops_before_the_set_is_removed_keeps_the_set(client, store):
+    """The set is removed LAST: a failure at that last step leaves it, so a repeat finds it."""
+    members = [f"ans:{n}" for n in range(30)]
+    pipe = client.pipeline(transaction=False)
+    for member in members:
+        pipe.set(member, "1")
+        pipe.sadd("chunk:c", member)
+    pipe.execute()
+    real_delete = client.delete
+    calls = {"n": 0}
+
+    def fail_the_second(*keys):  # the first delete removes the entries, the second the set
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise redis.exceptions.ConnectionError("dropped")
+        return real_delete(*keys)
+
+    client.delete = fail_the_second
+    assert store.invalidate_chunk("c") is None  # not done
+    assert client.exists("chunk:c")  # removing the set first would have lost it here
+    assert client.keys("ans:*") == []  # the entries went in the batch before it
+    assert store.invalidate_chunk("c") == 0 and not client.exists("chunk:c")  # a repeat finishes
+
+
+def test_an_invalidation_that_stops_in_a_batch_is_finished_by_running_it_again(client, store):
     members = [f"ans:{n}" for n in range(30)]
     pipe = client.pipeline(transaction=False)
     for member in members:
@@ -189,8 +213,165 @@ def test_an_invalidation_that_stops_half_way_is_finished_by_running_it_again(cli
 
     client.delete = flaky
     assert store.invalidate_chunk("c") is None  # not done
-    assert client.exists("chunk:c")  # the set is still there: nothing is lost
+    assert client.exists("chunk:c") and len(client.keys("ans:*")) == 30  # nothing half-removed
     assert store.invalidate_chunk("c") == 30 and not client.exists("chunk:c")
+
+
+# ---- refusals that are not outages, and refusals that are ----------------------------
+class OneRefusal:
+    """A client whose commands raise the given error (a refusal of the server)."""
+
+    def __init__(self, error):
+        self.error = error
+        self.calls = 0
+
+    def __getattr__(self, name):
+        def refuse(*args, **kwargs):
+            self.calls += 1
+            raise self.error
+
+        return refuse
+
+    def pipeline(self, *args, **kwargs):
+        self.calls += 1
+        raise self.error
+
+
+OUTAGES = [
+    (
+        redis.exceptions.ReadOnlyError("READONLY You can't write against a read only replica."),
+        "cache_read_only",
+    ),
+    (
+        redis.exceptions.OutOfMemoryError("OOM command not allowed when used memory > maxmemory."),
+        "cache_out_of_memory",
+    ),
+    (
+        redis.exceptions.ResponseError("ERR max daily request limit exceeded"),
+        "cache_quota_exceeded",
+    ),
+    (
+        redis.exceptions.NoPermissionError("NOPERM this user has no permissions to run this"),
+        "cache_permission_denied",
+    ),
+]
+
+
+@pytest.mark.parametrize(("error", "alert"), OUTAGES, ids=[a for _, a in OUTAGES])
+def test_a_server_wide_refusal_is_an_outage_with_its_own_alert_and_opens_the_window(error, alert):
+    events, clock = [], Clock()
+    refusing = OneRefusal(error)
+    store = CacheStore(refusing, clock=clock, on_event=lambda n, f: events.append((n, f)))
+    assert store.get_entry("ans:k").status == "unavailable"
+    assert (alert, {"operation": "get_entry", "error": type(error).__name__}) in events
+    assert "cache_error" not in names(events) and "cache_unavailable" not in names(events)
+    tried = refusing.calls
+    for _ in range(5):  # during the window nothing reaches the server
+        store.get_entry("ans:k")
+    assert refusing.calls == tried
+    # a staleness write is never skipped, and is told apart by its extra alert
+    assert store.bump_corpus_version() is None
+    assert refusing.calls > tried and "cache_staleness_write_failed" in names(events)
+    # and the rate limiter fails open, with the alert (the documented rule, spec 11.1)
+    decision = store.check_rate_limit("chat", "user-1", limit=1, window_seconds=60)
+    assert decision.allowed and not decision.available
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        redis.exceptions.ResponseError("WRONGTYPE Operation against a key holding the wrong kind"),
+        redis.exceptions.ResponseError("ERR syntax error"),
+    ],
+)
+def test_a_refusal_of_one_command_is_not_an_outage(error):
+    events = []
+    store = CacheStore(OneRefusal(error), clock=Clock(), on_event=lambda n, f: events.append(n))
+    assert store.get_entry("ans:k").status == "unavailable"
+    assert events == ["cache_error"] and store._skip_until == 0.0
+
+
+def test_an_out_of_memory_refusal_never_deletes_a_live_reverse_set(client, events):
+    """Only a key that holds the WRONG TYPE is deleted. A refusal for another reason is no proof
+    of that, and a live set that lists many entries must survive it."""
+    for n in range(5):
+        client.sadd("chunk:chunk-a", f"ans:old-{n}")
+    deleted = []
+    real_delete = client.delete
+
+    class RefusingPipeline:
+        def __init__(self):
+            self.commands = []
+
+        def __getattr__(self, name):
+            def add(*args, **kwargs):
+                self.commands.append((name, args, kwargs))
+                return self
+
+            return add
+
+        def execute(self, raise_on_error=True):
+            out = []
+            for name, args, kwargs in self.commands:
+                if name == "sadd":
+                    out.append(redis.exceptions.OutOfMemoryError("OOM command not allowed"))
+                else:
+                    out.append(getattr(client, name)(*args, **kwargs))
+            return out
+
+    class Proxy:
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def pipeline(self, *args, **kwargs):
+            return RefusingPipeline()
+
+        def delete(self, *keys):
+            deleted.extend(keys)
+            return real_delete(*keys)
+
+    store = CacheStore(
+        Proxy(), clock=Clock(), wall_clock=lambda: NOW, on_event=lambda n, f: events.append((n, f))
+    )
+    key = exact_key("q", "customer", 1, "p")
+    assert store.put_entry(key, {"a": 1}, [CHUNK], corpus_version=1) is False
+    assert client.smembers("chunk:chunk-a") == {f"ans:old-{n}" for n in range(5)}  # kept
+    assert "chunk:chunk-a" not in deleted and not client.exists(key)
+    assert "cache_out_of_memory" in names(events) and store._skip_until > 0  # and it is an outage
+
+
+def test_an_entry_with_no_chunks_is_refused_with_an_alert(client, store, events):
+    assert store.put_entry("ans:k", {"a": 1}, [], corpus_version=1) is False
+    assert not client.exists("ans:k")
+    assert ("cache_error", {"operation": "put_entry", "error": "EmptyChunkList"}) in events
+
+
+# ---- the preflight ---------------------------------------------------------------------
+def test_the_preflight_passes_on_a_healthy_server_and_leaves_nothing_behind(client, store):
+    assert store.preflight() is True
+    assert client.keys("*") == []  # its probe key is gone, and the version was not created
+    store.corpus_version()
+    before = client.get("corpus:version")
+    assert store.preflight() is True and client.get("corpus:version") == before  # not bumped
+
+
+def test_the_preflight_fails_on_an_outage_and_on_a_server_wide_refusal():
+    cases = [(redis.exceptions.ConnectionError("refused"), "cache_unavailable"), *OUTAGES]
+    for error, alert in cases:
+        events = []
+        store = CacheStore(
+            OneRefusal(error), clock=Clock(), on_event=lambda n, f, sink=events: sink.append(n)
+        )
+        assert store.preflight() is False
+        assert alert in events and "cache_staleness_write_failed" in events
+
+
+def test_the_preflight_is_never_skipped_because_of_the_window(client):
+    clock = Clock()
+    store = CacheStore(client, clock=clock, wall_clock=lambda: NOW)
+    store._skip_until = clock.now + 1000  # a window is open
+    assert store.preflight() is True  # it asks the server anyway, like every staleness write
+    assert store._skip_until == 0.0  # and success ends the window
 
 
 # ---- the namespace (used only by the owner-run real check) -----------------------------------

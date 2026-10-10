@@ -110,11 +110,16 @@ async def write(ctx: PipelineState, span: Span) -> None:
         return
     cited = set(ctx.verdict.cited_chunk_ids)
     by_id = {c.chunk_id: c for c in ctx.kept}
-    refs = [
-        ChunkRef(c.chunk_id, c.content_hash or "", c.doc_id)
-        for cid in sorted(cited)
-        if (c := by_id.get(cid)) is not None and c.content_hash
-    ]
+    found = [by_id[cid] for cid in sorted(cited) if cid in by_id]
+    unhashed = [c for c in found if not c.content_hash]
+    if unhashed:
+        # A chunk without a content hash cannot be verified at read time or told apart when it
+        # changes. An entry that verifies fewer chunks than the answer cited could go stale
+        # unseen, so nothing is cached; the count is reported (numbers only).
+        ctx.emit("cache_write_skipped", reason="chunk_without_hash", chunks=len(unhashed))
+        span.status = "skipped"
+        return
+    refs = [ChunkRef(c.chunk_id, c.content_hash or "", c.doc_id) for c in found]
     if not refs:
         span.status = "skipped"
         return

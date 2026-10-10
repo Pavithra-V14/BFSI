@@ -398,6 +398,11 @@ def _refresh_sparse(args, env, services_factory, out, err) -> int:
             f"finished the corpus-version bump of an earlier refresh "
             f"({len(result.redone)} marker(s))"
         )
+    if result.foreign:
+        out(
+            f"{len(result.foreign)} document(s) have an unfinished ingest, delete or review "
+            "waiting: run that command again to finish it (its marker was left alone)"
+        )
     if not result.chunks_refreshed and not result.redone:
         out("nothing was out of date: no write, no version bump, no audit row")
     if result.incomplete:

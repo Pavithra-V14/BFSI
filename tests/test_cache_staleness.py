@@ -8,9 +8,13 @@ import redis
 
 from app.ingest import pending
 from app.ingest.delete import delete_document
+from app.ingest.pending import CacheUnavailable
+from app.ingest.review import review_chunks
 from app.pipeline.roles import VISIBLE_ROLES, role_map_version
 from tests.ingest_fixtures import para, parsed, title
 from tests.pipeline_rig import PipelineRig
+from tests.test_ingest_enrich import Tools, enricher_for
+from tests.test_ingest_round2 import poisoned
 
 QUESTION = "What is the waiting period for illness claims?"
 
@@ -159,6 +163,17 @@ def test_an_entry_whose_chunk_was_edited_behind_the_cache_is_discarded_on_read(r
     assert not again.cached and "cache_entry_discarded" in rig.event_names
 
 
+def test_an_answer_that_cites_a_chunk_without_a_content_hash_is_not_cached(rig):
+    """An entry that verifies fewer chunks than the answer cited could go stale unseen."""
+    for point_id in rig.rig.points("doc-a"):
+        rig.rig.qdrant.set_payload("documents", payload={"content_hash": None}, points=[point_id])
+    result = run(rig.ask(QUESTION, user=rig.new_user()))
+    assert result.kind == "answer"
+    assert entries(rig) == []
+    skipped = [f for n, f in rig.events if n == "cache_write_skipped"]
+    assert skipped and skipped[0]["reason"] == "chunk_without_hash" and skipped[0]["chunks"] >= 1
+
+
 # ---- the version is never lost to zero --------
 def test_a_lost_version_restarts_higher_and_old_entries_are_not_reused(rig):
     user = rig.new_user()
@@ -185,22 +200,102 @@ class Down:
         raise redis.exceptions.ConnectionError("connection refused")
 
 
-def test_an_ingest_while_upstash_is_down_is_incomplete_and_a_repeat_finishes_it(rig):
-    old_key = cached_once(rig, rig.new_user())
+def audit_rows(rig):
+    return rig.rig.db.query_one("SELECT COUNT(*) FROM audit_log")[0]
+
+
+def stored_payloads(rig, doc_id="doc-a"):
+    return {i: dict(p["payload"]) for i, p in rig.rig.points(doc_id).items()}
+
+
+@pytest.mark.parametrize("change", ["an edited chunk", "a new chunk", "who may see it"])
+def test_an_ingest_refuses_to_start_when_upstash_does_not_accept_staleness_writes(rig, change):
+    """Phase 9 [P] preflight: nothing is changed while the cache cannot be told about it."""
+    user = rig.new_user()
+    old_key = cached_once(rig, user)
+    before, audits = stored_payloads(rig), audit_rows(rig)
+    embedded = len(rig.rig.embedder.calls)
     working = rig.rig.cache._client
     rig.rig.cache._client = Down()
-    rig.rig.cache.get_entry("ans:x")  # opens the 30 s skip window: staleness writes ignore it
-    result = rig.rig.ingest(document(waiting="45 days"))
-    assert not result.complete and result.incomplete
-    assert pending.is_pending(rig.rig.ctx.marker_dir, "doc-a")
-    assert "cache_staleness_write_failed" in rig.rig.events
+    edited, options = {
+        "an edited chunk": (document(waiting="45 days"), {}),
+        "a new chunk": (document(extra=True), {}),
+        "who may see it": (document(), {"access_role": "staff"}),  # no chunk text changes
+    }[change]
+    with pytest.raises(CacheUnavailable, match="cache unavailable, nothing was changed"):
+        rig.rig.ingest(edited, **options)
+    assert stored_payloads(rig) == before  # no chunk was written, changed or deactivated
+    assert not pending.is_pending(rig.rig.ctx.marker_dir, "doc-a")
+    assert audit_rows(rig) == audits  # and no audit row
+    assert len(rig.rig.embedder.calls) == embedded  # no model call was paid for
     rig.rig.cache._client = working  # Upstash is back
     rig.rig.cache._skip_until = 0.0
-    assert rig.rig.redis.exists(old_key)  # still there: nothing was half-removed
-    finished = rig.rig.ingest(document(waiting="45 days"))
+    assert rig.rig.redis.exists(old_key)  # untouched
+    result = rig.rig.ingest(edited, **options)  # the same command, run again
+    assert result.complete and not rig.rig.redis.exists(old_key)
+
+
+def test_a_delete_refuses_to_start_when_upstash_does_not_accept_staleness_writes(rig):
+    user = rig.new_user()
+    old_key = cached_once(rig, user)
+    before, audits = stored_payloads(rig), audit_rows(rig)
+    working = rig.rig.cache._client
+    rig.rig.cache._client = Down()
+    with pytest.raises(CacheUnavailable, match="nothing was changed"):
+        delete_document(rig.rig.ctx, "doc-a")
+    assert stored_payloads(rig) == before and len(rig.rig.active()) == 3  # still all there
+    assert not pending.is_pending(rig.rig.ctx.marker_dir, "doc-a")
+    assert audit_rows(rig) == audits
+    rig.rig.cache._client = working
+    rig.rig.cache._skip_until = 0.0
+    assert delete_document(rig.rig.ctx, "doc-a").complete and not rig.rig.redis.exists(old_key)
+
+
+def test_a_review_approval_refuses_to_start_when_upstash_does_not_accept_staleness_writes(rig):
+    rig.rig.ctx.enrich = enricher_for(rig.rig, Tools())  # the real scan holds a chunk back
+    rig.rig.ingest(parsed(*poisoned()), doc_id="doc-p")
+    held = [i for i, p in stored_payloads(rig, "doc-p").items() if p.get("quarantine") == "pending"]
+    assert len(held) == 1, "one chunk is held back: the test proves something"
+    working = rig.rig.cache._client
+    rig.rig.cache._client = Down()
+    asked = []
+    with pytest.raises(CacheUnavailable, match="nothing was changed"):
+        review_chunks(rig.rig.ctx, "doc-p", lambda prompt: asked.append(prompt) or "a", print)
+    assert asked == []  # no decision was even asked for
+    payload = stored_payloads(rig, "doc-p")[held[0]]
+    assert payload["quarantine"] == "pending" and payload["effective_to"]  # still held back
+    assert not pending.is_pending(rig.rig.ctx.marker_dir, "doc-p")
+    rig.rig.cache._client = working
+    rig.rig.cache._skip_until = 0.0
+    done = review_chunks(rig.rig.ctx, "doc-p", lambda prompt: "a", lambda line: None)
+    assert done.approved == 1 and not done.incomplete
+
+
+def test_the_residual_window_a_bump_that_fails_after_the_preflight_is_incomplete(rig):
+    """KNOWN, RECORDED LIMITATION (README, Phase 9): Upstash can fail between the preflight and
+    the bump. The run then reports incomplete and keeps its marker; until the repeat, the version
+    is unchanged, so an answer that cited the document (and not the new chunk) is still served."""
+    user = rig.new_user()
+    old_key = cached_once(rig, user)
+    cache = rig.rig.cache
+    # the preflight passed, then Upstash failed: the bump AND the invalidations are not done
+    cache.bump_corpus_version = lambda: None
+    cache.invalidate_doc = lambda doc_id: None
+    cache.invalidate_chunk = lambda chunk_id: None
+    result = rig.rig.ingest(document(extra=True))  # a NEW chunk
+    assert result.new == 1 and not result.complete and result.incomplete
+    assert pending.is_pending(rig.rig.ctx.marker_dir, "doc-a")
+    assert "cache_staleness_write_failed" not in rig.rig.events  # (the bump was stubbed out)
+    assert rig.rig.redis.exists(old_key)  # nothing invalidated the old entry yet
+    window = run(rig.ask(QUESTION, user=user))
+    assert window.cached  # the window: served although the document has a new chunk
+    for name in ("bump_corpus_version", "invalidate_doc", "invalidate_chunk"):
+        delattr(cache, name)  # Upstash is back; the same command again
+    finished = rig.rig.ingest(document(extra=True))
     assert finished.complete and finished.status == "finished"
     assert not rig.rig.redis.exists(old_key)
     assert not pending.is_pending(rig.rig.ctx.marker_dir, "doc-a")
+    assert not run(rig.ask(QUESTION, user=user)).cached
 
 
 # ---- 10.3 item 7: a change of the role map makes every old entry unreachable --------

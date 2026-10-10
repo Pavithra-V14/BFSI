@@ -224,6 +224,7 @@ def _review_chunks(
     if not held and not redo:
         out("no chunk is held back for this document")
         return result
+    pending.require_cache(ctx.cache)  # before any decision is written
     now = ctx.now()
     for number, chunk in enumerate(held, start=1):
         payload = chunk.payload

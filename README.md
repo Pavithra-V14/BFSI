@@ -571,11 +571,23 @@ for every staleness rule of spec 10.3, and four things were added or fixed:
 - **The role map is part of the key.** The cache key holds a short hash of the role-to-visible-roles
   map (`app/pipeline/roles.py`). If that map ever changes, every older entry becomes unreachable at
   once (and reachable again if the map is restored).
-- **A refusal is not an outage.** Only a connection problem opens the 30 s skip window. A refused
-  command (a key of the wrong type) is one alert (`cache_error`); it no longer switches the cache off
-  for 30 s or lets the rate limiter let everyone through. A wrong-type counter or reverse-set key is
-  removed and made again. An entry is never written unless every reverse set accepted it, and a huge
-  reverse set is removed in batches of 500.
+- **One bad key is not an outage; a refusing server is.** A refusal of one command (a key of the
+  wrong type) is one alert (`cache_error`): it does not switch the cache off for 30 s, and that
+  subject's counter is healed so it keeps being counted. A connection problem, and the refusals that
+  say the whole server will not work (read-only `cache_read_only`, out of memory
+  `cache_out_of_memory`, the daily request quota `cache_quota_exceeded`, no permission
+  `cache_permission_denied`) open the 30 s skip window, each with its own alert name. While the
+  server is down or refusing, the rate limiter still fails open with its alert (spec 11.1): that is
+  the documented rule, not a bug. A key is deleted only when the error says WRONGTYPE. An entry is
+  never written unless every reverse set accepted it (an entry that cites no chunk, or a chunk with
+  no content hash, is not cached), and a huge reverse set is removed in batches of 500.
+- **A preflight before any change.** `ingest`, `delete`, a review approval and `refresh-sparse` first
+  ask whether Upstash accepts the commands a staleness write needs, and refuse to start with `cache
+  unavailable, nothing was changed` if not (an ingest asks before it pays for a model call). Run the
+  same command again when Upstash is back. **Residual window:** Upstash can still fail between that
+  check and the version bump; the run then says it is incomplete and keeps its marker, and until you
+  run the same command again an answer that cited the document (but not a chunk that was just added)
+  can be served. The marker is a local file on the admin machine.
 - **The tokenizer version of the sparse index.** Every chunk records `sparse_version`. If the
   tokenizer ever changes (raise `SPARSE_VERSION` in `app/vector/sparse.py`; a test fails until you do),
   run `uv run python -m app.ingest refresh-sparse` (add `--doc-id NAME` for one document). It rewrites
@@ -598,8 +610,20 @@ for every staleness rule of spec 10.3, and four things were added or fixed:
   `sparse_check_unavailable`. The cache hit rate (exact) and the stale-answer incident count are
   measured there; the semantic-cache decision waits for them.
 - **Phase 14.** A very large corpus makes the start-up check's two count calls slower (they are exact
-  counts); the refresh is sequential, document by document. Load tests should include a refresh.
-- **Phase 15.** The refresh and the cache check run on the admin machine only.
+  counts); the refresh is sequential, document by document, and the filter on `sparse_version` is not
+  a payload index (a full scan on a large collection: add the index then). Reverse sets only grow and
+  their lifetime is renewed on every put, so the set of a popular chunk never expires; members of
+  long-expired entries pile up until that chunk is ingested again (slow memory growth on the free
+  256 MB tier). Load tests should include a refresh and measure both.
+- **Phase 15.** The refresh and the cache check run on the admin machine only. The pending-finish
+  marker is a local file there: production never learns that a run is unfinished (the residual
+  window above).
+- **Recorded, not changed (Phase 9 audit):** the `namespace` argument of `CacheStore` exists only for
+  the owner-run `cache_check.py`; the reverse-set lifetime margin (one hour) and the repair of a
+  wrong-type key are builder choices written up as [P]; with no enricher, stored image captions are
+  left out of an access-role change (the ingest command always has an enricher, so this cannot
+  happen from the command line today); a chunk with no stored text stays "out of date" for ever and
+  is counted, never refreshed.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.
