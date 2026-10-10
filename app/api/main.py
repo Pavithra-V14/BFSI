@@ -10,9 +10,11 @@ The interactive docs and the OpenAPI file are switched off: they would publish t
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -24,7 +26,8 @@ from app.accounts.gate import HashGate
 from app.accounts.throttle import Throttle
 from app.api.deps import Services
 from app.api.errors import install_error_handlers
-from app.api.routes import admin, auth, health
+from app.api.rollout import Rollout
+from app.api.routes import admin, admin_ops, auth, chat, feedback, health, sessions
 from app.api.security import SecurityMiddleware, cors_options
 from app.api.settings import ApiSettings, SettingsError
 from app.cache.store import CacheStore, store_from_env
@@ -54,12 +57,24 @@ def create_app(
     gateway: Any = None,
     throttle: Throttle | None = None,
     limits: UsageLimits | None = None,
+    pipeline: Any = None,
+    on_render: bool = False,
+    rollout_cache_seconds: float | None = None,
 ) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Start-up check (spec 6.6, Phase 9): do the stored sparse vectors come from this
+        # tokenizer version? Counts only; a mismatch is an alert event, never a refusal.
+        if pipeline is not None:
+            await asyncio.to_thread(pipeline.check_index)
+        yield
+
     app = SecureFastAPI(
         title="BFSI assistant API",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.state.services = Services(
         settings=settings,
@@ -70,10 +85,30 @@ def create_app(
         cache=cache,
         vector_client=vector_client,
         gateway=gateway,
+        pipeline=pipeline,
+        on_render=on_render,
     )
+    svc = app.state.services
+    svc.rollout = Rollout(
+        on_event=lambda name, fields: svc.emit(name, **fields),
+        **({} if rollout_cache_seconds is None else {"cache_seconds": rollout_cache_seconds}),
+    )
+    if pipeline is not None and getattr(pipeline, "deps", None) is not None:
+        previous = pipeline.deps.on_event
+
+        def relay(name: str, fields: dict[str, Any]) -> None:
+            svc.emit(name, **fields)
+            if previous is not None:
+                previous(name, fields)
+
+        pipeline.deps.on_event = relay
     install_error_handlers(app)
     app.include_router(auth.router)
     app.include_router(admin.router)
+    app.include_router(admin_ops.router)
+    app.include_router(chat.router)
+    app.include_router(sessions.router)
+    app.include_router(feedback.router)
     app.include_router(health.router)
     options = cors_options(settings.cors_origin)
     if options is not None:  # no origin configured: no CORS header is ever sent
@@ -110,10 +145,55 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
         gateway = Gateway(GatewayConfig.from_env(env))
     except Exception as error:  # a wrong gateway setting must stop the start, with names only
         raise SystemExit(f"refusing to start: gateway settings: {type(error).__name__}") from None
+    limits = UsageLimits(cache, settings)
+    pipeline = _build_pipeline(env, cache, vector_client, gateway, limits)
     return create_app(
         settings,
         db_factory=lambda: connect(database_url),
         cache=cache,
         vector_client=vector_client,
         gateway=gateway,
+        limits=limits,
+        pipeline=pipeline,
+        on_render=running_on_render(env),
     )
+
+
+def _build_pipeline(
+    env: Mapping[str, str],
+    cache: CacheStore | None,
+    vector_client: Any,
+    gateway: Any,
+    limits: UsageLimits,
+) -> Any:
+    """The query pipeline (Phase 8) with its dependencies, or None when no vector store is
+    configured (chat then answers 503). The masker loads in the background: until it is ready
+    a chat is "starting up, please retry". The Langfuse sink is off unless fully configured; a
+    half-set or placeholder configuration refuses to start (names only)."""
+    if vector_client is None:
+        log.warning("no vector store configured: chat is not available")
+        return None
+    from app.gateway.tokens import TokenCounter
+    from app.guardrails.domains import curated_domains
+    from app.pipeline import langfuse_sink
+    from app.pipeline.run import Pipeline
+    from app.pipeline.startup import MaskerHolder
+    from app.pipeline.state import Deps
+
+    try:
+        sink = langfuse_sink.sink_from_env(env)
+    except langfuse_sink.SinkConfigError as error:
+        raise SystemExit(f"refusing to start: {error}") from None
+    holder = MaskerHolder()
+    holder.start()
+    deps = Deps(
+        gateway=gateway,
+        qdrant=vector_client,
+        cache=cache,
+        masker=holder,
+        counter=TokenCounter(),
+        usage=limits,
+        curated_domains=curated_domains(env),
+        langfuse=sink,
+    )
+    return Pipeline(deps)

@@ -201,5 +201,45 @@ def set_active(db: Database, *, username: str, active: bool, now: datetime, acto
     return True
 
 
+def list_users(db: Database, *, limit: int, offset: int) -> tuple[list[User], int]:
+    """One page of accounts (oldest first) and the total. The caller shows no password hash."""
+    total = db.query_one("SELECT COUNT(*) FROM users")
+    rows = db.query_all(
+        f"SELECT {_COLUMNS} FROM users ORDER BY created_at, id LIMIT ? OFFSET ?",
+        (int(limit), int(offset)),
+    )
+    return [_user(row) for row in rows], int(total[0]) if total else 0
+
+
+def set_active_by_id(
+    db: Database, *, actor: User, target_id: str, active: bool, now: datetime
+) -> bool:
+    """An admin turns a customer or staff account on or off (Phase 10). Never an admin account
+    (those are changed only by the owner's command), never one's own, and the last active admin
+    is protected by that rule. Returns the new state. Refused with RoleChangeRefused."""
+    with db.transaction(write=True):
+        if db.kind == "postgres":
+            db.execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+        current = get_by_id(db, actor.id)
+        if current is None or not current.is_active or current.role != "admin":
+            raise RoleChangeRefused("not_an_admin")
+        target = get_by_id(db, target_id)
+        if target is None:
+            raise RoleChangeRefused("not_found")
+        if target.role == "admin":
+            raise RoleChangeRefused("target_is_admin")
+        if target.is_active != active:
+            db.execute("UPDATE users SET is_active = ? WHERE id = ?", (active, target.id))
+            write_audit(
+                db,
+                actor=actor.id,
+                action="account_activated" if active else "account_deactivated",
+                target=target.id,
+                details={"via": "api"},
+                now=now,
+            )
+    return active
+
+
 def update_password_hash(db: Database, user_id: str, password_hash: str) -> None:
     db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))

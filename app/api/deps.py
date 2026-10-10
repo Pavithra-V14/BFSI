@@ -12,24 +12,54 @@ flood cannot use up connections and gets its 401 even while the database is down
 from __future__ import annotations
 
 import logging
+import re
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, Query, Request
 
 from app.accounts import tokens, users
 from app.accounts.budget import UsageLimits
 from app.accounts.gate import HashGate
 from app.accounts.throttle import Throttle
 from app.api.errors import ApiError
+from app.api.rollout import Rollout
 from app.api.settings import ApiSettings
 from app.cache.store import CacheStore
 from app.db.connection import Database
 
 log = logging.getLogger("app.api")
 EVENT_BUFFER = 1_000
+
+# A session or message id as this system makes them (uuid4 text). Anything else is "not found"
+# BEFORE any lookup, the same answer as for a missing or someone else's id.
+UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+MAX_OFFSET = 100_000
+
+
+def is_uuid(value: str | None) -> bool:
+    return isinstance(value, str) and UUID_PATTERN.fullmatch(value) is not None
+
+
+@dataclass(frozen=True)
+class Page:
+    limit: int
+    offset: int
+
+
+def page_params(default: int = 20, maximum: int = 100):
+    """A dependency for a list route: `limit` (default and maximum given) and `offset`. A value
+    over the maximum is refused with 422, never clipped silently."""
+
+    def dependency(
+        limit: int = Query(default, ge=1, le=maximum),
+        offset: int = Query(0, ge=0, le=MAX_OFFSET),
+    ) -> Page:
+        return Page(limit, offset)
+
+    return dependency
 
 
 @dataclass
@@ -42,6 +72,9 @@ class Services:
     cache: CacheStore | None = None
     vector_client: Any = None
     gateway: Any = None
+    pipeline: Any = None  # app.pipeline.run.Pipeline, or None (no chat)
+    rollout: Rollout = field(default_factory=Rollout)
+    on_render: bool = False  # the admin-machine-only actions are refused here (spec 24)
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))
@@ -159,6 +192,22 @@ def authenticated(
             headers={"Retry-After": str(decision.retry_after or 60)},
         )
     return _current_user(db, claims)
+
+
+def open_user_context(svc: Services, authorization: str | None) -> tuple[CurrentUser, LazyDatabase]:
+    """For a route that owns its database connection (the chat route, which must keep it open
+    while a timed-out transcript write finishes). Like `authenticated_for_logout`: the request is
+    NOT counted against the per-user limit, because the pipeline counts it once (stage 1).
+
+    Returns the signed-in user and the (lazy) database; the CALLER closes it. Blocking: call it
+    from a worker thread."""
+    claims = _claims_from(svc, authorization)
+    db = LazyDatabase(svc.db_factory)
+    try:
+        return _current_user(db, claims), db
+    except BaseException:
+        db.close()
+        raise
 
 
 def authenticated_for_logout(

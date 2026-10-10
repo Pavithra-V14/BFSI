@@ -143,6 +143,7 @@ class Pipeline:
         result.correlation_id = request.correlation_id
         result.tokens = ctx.trace.total_tokens()
         result.db_busy = ctx.writes.running > 0
+        result.on_db_idle = ctx.writes.release_when_idle
         if not result.timings_ms:
             result.timings_ms = ctx.trace.timings_ms()
         if deps.langfuse is not None:  # after the result is final: outside the budget, never raises

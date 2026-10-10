@@ -60,6 +60,13 @@ SPEC = {
         "source_removed": ("BOOLEAN", True),
         "created_at": ("TIMESTAMPTZ", True),
         "history_excluded": ("BOOLEAN", True),  # migration 0005 [P]
+        "shadowed": ("BOOLEAN", True),  # migration 0006 [P]
+    },
+    "app_settings": {  # migration 0006 [P]
+        "key": ("TEXT", True),
+        "value": ("TEXT", True),
+        "updated_by": ("TEXT", False),
+        "updated_at": ("TIMESTAMPTZ", True),
     },
     "audit_log": {
         "id": ("TEXT", True),
@@ -111,6 +118,7 @@ PRIMARY_KEYS = {
     "allowlist_entities": "id",
     "feedback_entries": "id",
     "review_queue": "id",
+    "app_settings": "key",
 }
 
 # Every default the schema sets. A column not listed here has no default.
@@ -126,6 +134,8 @@ DEFAULTS = {
     ("messages", "citations"): "'[]'",
     ("messages", "source_removed"): "FALSE",
     ("messages", "history_excluded"): "FALSE",
+    ("messages", "shadowed"): "FALSE",
+    ("app_settings", "updated_at"): "CURRENT_TIMESTAMP",
     ("messages", "created_at"): "CURRENT_TIMESTAMP",
     ("audit_log", "details"): "'{}'",
     ("audit_log", "created_at"): "CURRENT_TIMESTAMP",
@@ -147,6 +157,7 @@ FOREIGN_KEYS = {
     ("review_queue", "session_id"): ("sessions", "SET NULL"),
     ("review_queue", "message_id"): ("messages", "SET NULL"),
     ("review_queue", "labelled_by"): ("users", "SET NULL"),
+    ("app_settings", "updated_by"): ("users", "SET NULL"),
 }
 
 
@@ -204,7 +215,7 @@ def count(conn, table, where="1 = 1", args=()):
 # ---- the migrations themselves --------------------------------------------------------
 
 
-def test_the_five_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
+def test_the_six_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
     quiet = lambda line: None  # noqa: E731
     applied = run(url, MIGRATIONS, log=quiet)
@@ -214,9 +225,10 @@ def test_the_five_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
         "0003_audit_allowlist_feedback_review.sql",
         "0004_users_active.sql",
         "0005_messages_history_excluded.sql",
+        "0006_rollout_feedback_settings.sql",
     ]
     assert run(url, MIGRATIONS, log=quiet) == []  # nothing left to apply
-    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5]
+    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5, 6]
 
 
 def test_the_sql_stays_portable_between_postgres_and_sqlite():
@@ -251,6 +263,7 @@ def test_migration_0004_adds_the_active_flag_and_existing_users_stay_active(tmp_
     assert run(url, MIGRATIONS, log=lambda line: None) == [
         "0004_users_active.sql",
         "0005_messages_history_excluded.sql",
+        "0006_rollout_feedback_settings.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT is_active FROM users").fetchall() == [(1,)]
@@ -276,9 +289,47 @@ def test_migration_0005_adds_the_history_flag_and_existing_messages_stay_in_hist
     )
     conn.commit()
     conn.close()
-    assert run(url, MIGRATIONS, log=lambda line: None) == ["0005_messages_history_excluded.sql"]
+    assert run(url, MIGRATIONS, log=lambda line: None) == [
+        "0005_messages_history_excluded.sql",
+        "0006_rollout_feedback_settings.sql",
+    ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT history_excluded FROM messages").fetchall() == [(0,)]
+    conn.close()
+
+
+def test_migration_0006_adds_the_shadow_flag_the_settings_table_and_one_thumb_per_message(tmp_path):
+    path = tmp_path / "upgrade6.db"
+    old = tmp_path / "old6"
+    old.mkdir()
+    for migration in load_migrations(MIGRATIONS)[:5]:
+        (old / migration.filename).write_text(migration.sql, encoding="utf-8")
+    url = f"sqlite:///{path}"
+    run(url, old, log=lambda line: None)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO users (id, username, email, password_hash) VALUES ('u', 'a', 'a@e.test', 'h')"
+    )
+    conn.execute("INSERT INTO sessions (id, user_id) VALUES ('s', 'u')")
+    conn.execute(
+        "INSERT INTO messages (id, session_id, seq, role, content) "
+        "VALUES ('m', 's', 1, 'assistant', 'x')"
+    )
+    conn.commit()
+    conn.close()
+    assert run(url, MIGRATIONS, log=lambda line: None) == ["0006_rollout_feedback_settings.sql"]
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT shadowed FROM messages").fetchall() == [(0,)]  # visible as before
+    assert conn.execute("SELECT COUNT(*) FROM app_settings").fetchone() == (0,)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        "INSERT INTO feedback_entries (id, message_id, user_id, rating) VALUES ('f','m','u','up')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):  # a second thumb of the same user: refused
+        conn.execute(
+            "INSERT INTO feedback_entries (id, message_id, user_id, rating) "
+            "VALUES ('g', 'm', 'u', 'down')"
+        )
     conn.close()
 
 

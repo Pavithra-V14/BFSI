@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 9 built, awaiting the owner's "commit" and approval (next is Phase 10)
+Current phase: Phase 9 closed; Phase 10 (chat, session and admin API) built, awaiting the owner's "commit" and approval (next is Phase 11)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -624,6 +624,53 @@ for every staleness rule of spec 10.3, and four things were added or fixed:
   left out of an access-role change (the ingest command always has an enricher, so this cannot
   happen from the command line today); a chunk with no stored text stays "out of date" for ever and
   is counted, never refreshed.
+
+## Chat, session and admin API (Phase 10)
+The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and then:
+
+- **Chat:** `POST /chat` with `{"message": "...", "session_id": "..."}` (the session id is optional:
+  leave it out to start a new chat). The answer comes back in one piece (no streaming; the frontend
+  shows progress messages while it waits) with citations, warnings and notices, all plain text.
+  `503` means starting up or temporarily unavailable, `409` a question is still being answered in that
+  session, `429` too many requests or the daily budget (with `Retry-After`), `404` no such session.
+- **Sessions:** `GET /sessions`, `GET /sessions/{id}` (resume: the whole transcript, paged),
+  `DELETE /sessions/{id}` and `DELETE /sessions` (all my chats). Someone else's session is a 404,
+  the same as a missing one.
+- **Feedback:** `POST /messages/{id}/feedback` with `{"rating": "up"}` or `"down"`. A thumbs-down
+  also adds one item to the admin review queue.
+- **Admin (admins only):** users and switching accounts on or off (never an admin), the review
+  queue (list, label from a fixed list), document status (counts), the allow-list (list; approve or
+  reject only on the admin machine), the alerts banner data, and the rollout stage.
+- **The rollout stage (shadow mode).** One setting with three values: `shadow` (only admins see
+  answers), `staff_beta` (admins and staff), `open` (everyone). It starts as `shadow`, and also
+  falls back to `shadow` if it cannot be read. A user who may not see answers still has their turn
+  generated and stored for evaluation, and gets a fixed notice. Change it with
+  `PUT /admin/shadow {"stage": "open"}`; read what was hidden with `GET /admin/shadow/answers`.
+  Answers made while hidden stay hidden for that user for good.
+- **A withdrawn source.** On resume, an answer whose document was deleted shows "This answer cited a
+  document that has since been withdrawn." instead of its text.
+- **Page sizes.** Every list has a default and a maximum; a larger value is refused (422), not
+  clipped.
+- **Start-up.** The API builds the pipeline from the environment (it needs `QDRANT_URL` and the
+  gateway keys; without `QDRANT_URL` chat answers 503), starts the name model in the background and
+  runs the sparse-vector check once (an alert event `sparse_version_mismatch` on a difference).
+  Apply migration `0006` first (`uv run python -m app.db.migrate`).
+- **A local end-to-end check you can run yourself:** `docs/OWNER_RUNS.md`, Run 16.
+
+**Known limitations (recorded in Phase 10)**
+- **Phase 11 (frontend).** Staged progress messages while a chat waits (no streaming); the rollout
+  stage control and the shadow-answers view; `answer_visible` and `notice` drive what the chat shows.
+- **Phase 12 (observability).** The alerts route reads an in-process buffer of the last 1,000 events
+  (it is empty after a restart and per instance); the webhook, persistence and dashboards come
+  there. Traces of a deleted chat are removed by session hash there too.
+- **Phase 14.** The chat route holds a worker thread and a connection per request; load tests must
+  size them against the free tiers. The hidden-answers list counts with a subquery per page.
+- **Phase 15.** Several instances: the per-session lock, the persist queue, the event buffer and
+  the 5-second stage cache are per process. A change of stage reaches another instance within 5
+  seconds. A proxy in front of the API needs the trusted-proxy settings (Phase 4 note).
+- **Recorded, not built:** an admin cannot delete or ingest a document through the API (the
+  command line on the admin machine does that); there is no admin reading of another user's
+  transcript except the masked hidden answers.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

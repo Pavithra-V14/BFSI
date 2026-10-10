@@ -81,6 +81,7 @@ class StoredMessage:
     source_removed: bool
     created_at: str
     history_excluded: bool = False
+    shadowed: bool = False  # generated while the user was not allowed to see answers
 
 
 @dataclass
@@ -183,6 +184,39 @@ def list_sessions(db: Database, user_id: str, *, limit: int = 50) -> list[Sessio
     return [_info(row) for row in rows]
 
 
+def list_sessions_page(
+    db: Database, user_id: str, *, limit: int, offset: int
+) -> tuple[list[SessionInfo], int]:
+    """One page of the user's sessions, most recently active first, and the total number."""
+    require_user(user_id)
+    with db.transaction():
+        total = db.query_one("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user_id,))
+        rows = db.query_all(
+            f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE user_id = ? "
+            "ORDER BY last_active_at DESC, id LIMIT ? OFFSET ?",
+            (user_id, int(limit), int(offset)),
+        )
+    return [_info(row) for row in rows], int(total[0]) if total else 0
+
+
+def transcript(
+    db: Database, user_id: str, session_id: str, *, limit: int, offset: int
+) -> tuple[SessionInfo, list[StoredMessage], int]:
+    """One page of the WHOLE transcript of a session of this user (not only the messages after the
+    summary boundary), oldest first, and the total number of messages. A session of someone else
+    raises the same SessionNotFound as a missing one."""
+    row = owned_session(db, user_id, session_id)
+    with db.transaction():
+        total = db.query_one("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
+        rows = db.query_all(
+            "SELECT id, seq, role, content, citations, grounded, source_removed, created_at, "
+            "history_excluded, shadowed FROM messages WHERE session_id = ? "
+            "ORDER BY seq LIMIT ? OFFSET ?",
+            (session_id, int(limit), int(offset)),
+        )
+    return _info(row), [_message(r) for r in rows], int(total[0]) if total else 0
+
+
 def _message(row: tuple) -> StoredMessage:
     try:
         citations = json.loads(row[4])
@@ -200,6 +234,7 @@ def _message(row: tuple) -> StoredMessage:
         bool(row[6]),
         str(row[7]),
         bool(row[8]),
+        bool(row[9]) if len(row) > 9 else False,
     )
 
 
@@ -223,7 +258,8 @@ def load_session(db: Database, user_id: str, session_id: str) -> SessionState:
             floor = int(boundary[0]) if boundary else 0
         rows = db.query_all(
             "SELECT id, seq, role, content, citations, grounded, source_removed, created_at, "
-            "history_excluded FROM messages WHERE session_id = ? AND seq > ? ORDER BY seq",
+            "history_excluded, shadowed FROM messages WHERE session_id = ? AND seq > ? "
+            "ORDER BY seq",
             (session_id, floor),
         )
     return SessionState(
@@ -267,6 +303,7 @@ def _add_message(
     grounded: bool | None,
     history_excluded: bool,
     now: datetime,
+    shadowed: bool = False,
 ) -> StoredMessage:
     if not text.strip():
         raise ValueError("a message cannot be empty")
@@ -282,7 +319,8 @@ def _add_message(
             with db.transaction():
                 db.execute(
                     "INSERT INTO messages (id, session_id, seq, role, content, citations, "
-                    "grounded, history_excluded, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "grounded, history_excluded, created_at, shadowed) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         message_id,
                         session_id,
@@ -293,6 +331,7 @@ def _add_message(
                         grounded,
                         history_excluded,
                         stamp,
+                        bool(shadowed),
                     ),
                 )
                 db.execute(
@@ -305,7 +344,16 @@ def _add_message(
                 continue  # another writer took this number: read a fresh one
             raise
         return StoredMessage(
-            message_id, seq, role, text, tuple(citations), grounded, False, stamp, history_excluded
+            message_id,
+            seq,
+            role,
+            text,
+            tuple(citations),
+            grounded,
+            False,
+            stamp,
+            history_excluded,
+            bool(shadowed),
         )
     raise SeqCollision("could not find a free message number")
 
@@ -337,6 +385,7 @@ def add_assistant_message(
     citations: Sequence[Mapping[str, Any]],
     grounded: bool,
     now: datetime,
+    shadowed: bool = False,
 ) -> StoredMessage:
     if not is_minted(stored, StoredAnswer):
         raise TypeError("an assistant message must be a StoredAnswer (made by mask_for_storage)")
@@ -352,17 +401,35 @@ def add_assistant_message(
         grounded,
         False,
         now,
+        shadowed=bool(shadowed),
     )
 
 
 def add_fixed_reply(
-    db: Database, user_id: str, session_id: str, stored: StoredAnswer, *, now: datetime
+    db: Database,
+    user_id: str,
+    session_id: str,
+    stored: StoredAnswer,
+    *,
+    now: datetime,
+    shadowed: bool = False,
 ) -> StoredMessage:
     """A fixed reply (a greeting, the unclear-turn ending, a refusal, the low-confidence text):
     always `grounded = False` and never cited, so it can never feed history."""
     if not is_minted(stored, StoredAnswer):
         raise TypeError("a fixed reply must be a StoredAnswer (made by mask_for_storage)")
-    return _add_message(db, user_id, session_id, "assistant", stored.text, [], False, False, now)
+    return _add_message(
+        db,
+        user_id,
+        session_id,
+        "assistant",
+        stored.text,
+        [],
+        False,
+        False,
+        now,
+        shadowed=bool(shadowed),
+    )
 
 
 def close_session(db: Database, user_id: str, session_id: str) -> None:

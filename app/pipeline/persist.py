@@ -69,6 +69,7 @@ class PendingTurn:
     ended: bool = False
     assistant_message_id: str | None = None
     attempts: int = 0  # failed tries while the database itself was reachable (see `flush`)
+    shadowed: bool = False  # the answer must stay hidden from its user (rollout stage)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -125,6 +126,7 @@ def build_job(ctx: PipelineState) -> PendingTurn:
         product_line=product,
         topic=topic,
         entities=entities,
+        shadowed=ctx.request.shadowed,
     )
 
 
@@ -189,9 +191,13 @@ def write_turn(db: Any, job: PendingTurn, now: datetime) -> bool:
             job.done.add("user")
         if "assistant" not in job.done:
             if job.ended and job.ended_answer is not None:
-                message = store.add_fixed_reply(db, job.user_id, sid, job.ended_answer, now=now)
+                message = store.add_fixed_reply(
+                    db, job.user_id, sid, job.ended_answer, now=now, shadowed=job.shadowed
+                )
             elif job.fixed:
-                message = store.add_fixed_reply(db, job.user_id, sid, job.answer, now=now)
+                message = store.add_fixed_reply(
+                    db, job.user_id, sid, job.answer, now=now, shadowed=job.shadowed
+                )
             else:
                 message = store.add_assistant_message(
                     db,
@@ -201,6 +207,7 @@ def write_turn(db: Any, job: PendingTurn, now: datetime) -> bool:
                     citations=job.citations,
                     grounded=job.grounded,
                     now=now,
+                    shadowed=job.shadowed,
                 )
             job.assistant_message_id = message.id
             job.done.add("assistant")

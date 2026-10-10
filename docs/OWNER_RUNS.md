@@ -80,6 +80,7 @@ never set.)
 | 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
 | 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
 | 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
+| 16 | Local end-to-end chat through the API (migration 0006, shadow mode, sessions, feedback) | Phase 10 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -900,6 +901,132 @@ It asks you to type the id.
   no model call, no embedding call.
 - **Safe to repeat:** yes; with nothing out of date it does nothing.
 
+## Run 16. Local end-to-end chat through the API
+
+- **Verifies:** Phase 10 (the chat endpoint over the real pipeline and real services, the rollout
+  stage / shadow mode, sessions and resume, feedback and the review queue, the admin routes, and
+  migration 0006 on your real database).
+- **Before it:** Runs 4 and 5 (keys and a first admin), Run 8 (migrations up to 0005), Runs 9 and
+  10 (provider keys work; the three sample documents are ingested) and Run 12 (the pipeline
+  answers). Two PowerShell windows.
+- **Needs (names only), in window A (the API):** `DATABASE_URL`, `UPSTASH_REDIS_URL`,
+  `JWT_SECRET_KEY`, `AUDIT_HASH_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `JEV_OPENROUTER_API_KEY`,
+  `GEMINI_EMBEDDING_KEY_A`, `GEMINI_API_KEYS`, `GROQ_API_KEYS`, `OPENROUTER_API_KEYS`,
+  `COHERE_API_KEY`, `JINA_API_KEY`. The Langfuse variables are optional (the sink is off without
+  all four). Window B needs no key, only the passwords you type.
+- **Step 1. Apply migration 0006 (window A):**
+
+      $env:DATABASE_URL = Read-Secret "DATABASE_URL"
+      uv run python -m app.db.migrate --dry-run
+      uv run python -m app.db.migrate
+
+  You should see `pending 0006_rollout_feedback_settings.sql` and then `applied
+  0006_rollout_feedback_settings.sql`. If more than one file is pending, an earlier migration was
+  not applied (Run 8): let it apply them in order.
+- **Step 2. Start the API (window A):** set the other variables with `Read-Secret` as in Run 12,
+  then:
+
+      uv run uvicorn app.api.main:create_app_from_env --factory
+
+  You should see `Uvicorn running on http://127.0.0.1:8000`. It refuses to start with `refusing to
+  start: ...` naming the variable if a secret is missing, short or a placeholder. The name model
+  loads in the background (about a minute): until then a chat answers `503 starting_up`.
+- **Step 3. Sign in and ask (window B):**
+
+      $base = "http://127.0.0.1:8000"
+      function Post($path, $body, $token) {
+        $h = @{}; if ($token) { $h["Authorization"] = "Bearer $token" }
+        Invoke-RestMethod "$base$path" -Method Post -ContentType "application/json" `
+          -Headers $h -Body ($body | ConvertTo-Json)
+      }
+      $pw = Read-Secret "your admin password"
+      $admin = (Post "/auth/login" @{ username = "YOUR_ADMIN"; password = $pw }).access_token
+      Post "/auth/register" @{ username = "test.customer"; email = "test.customer@example.test"; password = (Read-Secret "a password for the test customer") }
+      $customer = (Post "/auth/login" @{ username = "test.customer"; password = (Read-Secret "same password again") }).access_token
+
+  You should see the register call print `id`, `username` and `role` (`customer`).
+- **Step 4. The stage is `shadow` by default, so the customer is not shown the answer:**
+
+      Invoke-RestMethod "$base/admin/shadow" -Headers @{ Authorization = "Bearer $admin" }
+      $q = "What deductible applies to storm and flood claims?"
+      Post "/chat" @{ message = $q } $customer
+      Post "/chat" @{ message = $q } $admin
+
+  You should see `stage : shadow`; the customer's chat returns `answer_visible : False`, `kind :
+  shadow_notice` and the fixed notice (no answer text, no citations); the admin's chat returns
+  `answer_visible : True`, an answer in `text` and at least one entry in `citations`.
+- **Step 5. The hidden answer is kept for you:**
+
+      (Invoke-RestMethod "$base/admin/shadow/answers" -Headers @{ Authorization = "Bearer $admin" }).answers
+
+  You should see one item with the customer's masked `question`, the `answer`, `citations`, and a
+  64-character `user` hash (not a name).
+- **Step 6. Open the stage and ask again:**
+
+      Invoke-RestMethod "$base/admin/shadow" -Method Put -ContentType "application/json" `
+        -Headers @{ Authorization = "Bearer $admin" } -Body '{"stage":"open"}'
+      $r = Post "/chat" @{ message = $q } $customer
+      $r.answer_visible; $r.citations.Count
+
+  You should see `previous_stage : shadow`, then `True` and a citation count of 1 or more. (The
+  stage is cached for up to 5 seconds in the server: wait a few seconds if it still shows the
+  notice.)
+- **Step 7. Resume, sessions, feedback:**
+
+      $h = @{ Authorization = "Bearer $customer" }
+      $sessions = Invoke-RestMethod "$base/sessions" -Headers $h
+      $sessions.total
+      $id = $sessions.sessions[0].id
+      $t = Invoke-RestMethod "$base/sessions/$id" -Headers $h
+      $t.messages | ForEach-Object { "$($_.role): $($_.notice)" }
+      Post "/messages/$($t.messages[-1].id)/feedback" @{ rating = "down" } $customer
+
+  You should see the session count, the messages with their roles (the first answer, made in
+  shadow, shows `notice: shadowed` and the fixed notice text instead of its answer; the later one
+  shows no notice), and `rating : down`.
+- **Step 8. The thumbs-down is in the review queue:**
+
+      (Invoke-RestMethod "$base/admin/review?status=open" -Headers @{ Authorization = "Bearer $admin" }).items
+
+  You should see one `thumbs_down` item with the masked question. Label it:
+
+      Post "/admin/review/ITEM_ID/label" @{ label = "wrong_answer"; status = "labelled" } $admin
+
+  You should see `label : wrong_answer`, `status : labelled`.
+- **Step 9. Admin views (no text, counts only):**
+
+      Invoke-RestMethod "$base/admin/documents" -Headers @{ Authorization = "Bearer $admin" }
+      Invoke-RestMethod "$base/admin/alerts" -Headers @{ Authorization = "Bearer $admin" }
+      Invoke-RestMethod "$base/admin/users" -Headers @{ Authorization = "Bearer $admin" }
+
+  You should see your three documents with `chunks_active` equal to their stored counts (19, 22
+  and 21) and `sparse_vectors_out_of_date : 0`; `banner : False` (or the names of the critical
+  alerts, if any); and the accounts without hashes or email addresses.
+- **Step 10. Delete my chats and clean up:**
+
+      Invoke-RestMethod "$base/sessions" -Method Delete -Headers $h
+      Invoke-RestMethod "$base/admin/users" -Headers @{ Authorization = "Bearer $admin" }
+
+  You should see `deleted : N` and, afterwards, `GET /sessions` showing `total : 0`. Turn the test
+  customer off so it cannot be used: `PUT /admin/users/{id}/active` with `{"active": false}`. Put
+  the stage where you want it for now (`shadow` is the safe default). Stop the API with Ctrl+C.
+- **If a line differs:**
+  - `503 starting_up`: wait and try again; if it persists for several minutes, send the server
+    window's last lines.
+  - `503 service_unavailable`: a store or provider is down; the server window shows which stage
+    failed (names only). Send it.
+  - `429 too_many_requests` after 20 chats in a minute is expected.
+  - Step 4 customer answer visible although the stage says `shadow`: stop and send the output (a
+    rollout fault).
+  - Any 500: send the exception name from the server window (no text is logged).
+- **Send back:** for each step the status words and counts only (stage, `answer_visible`, citation
+  count, totals, labels). Never the answer text, a token or a password.
+- **Clear:** close both windows. Remove the variables as in the clearing list at the top.
+- **Real calls:** about 4 model calls per chat (a Jev decision, an embedding, a rerank and an
+  answer; a repeated question can be served from the cache with fewer). Six chats in all: roughly
+  25 calls. Free tiers: as in Run 12.
+- **Safe to repeat:** yes (use a new test username, or reuse the account and skip registering).
+
 ---
 
 # C. Added by later phases
@@ -913,7 +1040,7 @@ closed.** Also add the run to the table at the top.
 Known candidates, not yet written (the phase that creates the code writes the run):
 
 - Phase 9 (cache hardening): written above (Runs 14 and 15).
-- Phase 10 (chat API): a local end-to-end chat against real services.
+- Phase 10 (chat API): written above (Run 16).
 - Phase 11 (Streamlit): a look at the screens, with the API running.
 - Phase 12 (observability): the Langfuse retention and dashboard check.
 - Phase 13 and 16 (evaluation, baseline): the evaluation runs (they use real provider keys and

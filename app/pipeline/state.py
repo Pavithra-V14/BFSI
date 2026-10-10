@@ -32,6 +32,9 @@ class Request:
     query: str = field(repr=False)  # the raw question: never logged, stored or put in a span
     session_id: str | None = None  # None: a new session
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # True when this user may not see answers yet (rollout stage): the turn is generated and
+    # stored for evaluation, and its assistant message is flagged `shadowed`.
+    shadowed: bool = False
 
 
 @dataclass
@@ -57,6 +60,10 @@ class Result:
     # True when a transcript write that timed out is still running in its thread on the request's
     # database connection: the caller (Phase 10) must not close that connection yet.
     db_busy: bool = False
+    # Call it with a function: that function runs once no transcript write of this request is
+    # still running on the connection (at once when none is). The chat API closes the
+    # request's connection through it.
+    on_db_idle: Any = field(default=None, repr=False)
 
 
 @dataclass
