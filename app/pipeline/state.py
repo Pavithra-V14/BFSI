@@ -35,6 +35,9 @@ class Request:
     # True when this user may not see answers yet (rollout stage): the turn is generated and
     # stored for evaluation, and its assistant message is flagged `shadowed`.
     shadowed: bool = False
+    # True when the caller (the chat route) already counted this request against the per-user
+    # rate limit at its entry: stage 1 then skips its own count, so a chat is counted once.
+    rate_counted: bool = False
 
 
 @dataclass

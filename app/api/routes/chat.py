@@ -5,10 +5,13 @@ a new session starts; with one the chat resumes (a session that is missing, some
 bad format is the same 404).
 
 Rules kept here:
-- One count per chat: the route is not metered by the API's per-user limit (the pipeline's first
-  stage counts it, once, together with the daily token budget).
+- One count per chat, taken at the route's entry (`open_user_context`), so a refusal before the
+  pipeline (a bad session id, a busy session, a service that is starting up, no vector store) is
+  counted too. The pipeline is told not to count again (`rate_counted`); it still checks the
+  daily token budget.
 - The request owns its database connection. If a transcript write that timed out is still running
-  when the answer is ready, the connection is closed only when that write has ended.
+  when the answer is ready, or the request is cancelled, the connection is closed only when that
+  write has ended.
 - The rollout stage (shadow mode): a user who may not see answers gets the fixed notice with no
   answer text, citations, scores or reason; their turn was still generated and stored (flagged
   `shadowed`) for evaluation. The notice is the same whatever the pipeline decided.
@@ -33,7 +36,10 @@ from app.pipeline.state import Request as PipelineRequest
 log = logging.getLogger("app.api")
 router = APIRouter(tags=["chat"])
 
-MAX_MESSAGE_CHARACTERS = 8_000
+# [T] The 100-token guardrail (spec 9.1) is what limits a question; this only bounds what is
+# read from the wire. Even 2,000 characters that JSON escapes to 12 bytes each stay under the
+# request body cap (app/api/security.py), so the cap never refuses legitimate text.
+MAX_MESSAGE_CHARACTERS = 2_000
 RETRY_AFTER_STARTING_UP = 5
 
 # Pipeline result kinds that are not an answer: they become an error response.
@@ -50,7 +56,7 @@ _ERRORS = {
 class ChatBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARACTERS)
-    session_id: str | None = Field(default=None, max_length=64)
+    session_id: str | None = None  # its format is checked by `is_uuid`: a bad one is the 404
 
 
 def _error_for(result: Any) -> ApiError | None:
@@ -98,13 +104,26 @@ def _close_when_idle(db: Any, result: Any) -> None:
         db.close()
 
 
+def _close_late(task: asyncio.Future) -> None:
+    """A request was cancelled while its connection was being opened: close it when it arrives."""
+    if task.cancelled() or task.exception() is not None:
+        return
+    task.result()[1].close()
+
+
 @router.post("/chat")
 async def chat(
     body: ChatBody, request: Request, authorization: str | None = Header(default=None)
 ) -> dict[str, Any]:
     svc = services(request)
-    current, db = await asyncio.to_thread(open_user_context, svc, authorization)
+    opening = asyncio.ensure_future(asyncio.to_thread(open_user_context, svc, authorization))
+    try:
+        current, db = await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_late)  # the thread goes on; its connection is closed then
+        raise
     result = None
+    handed_over = False  # True once the pipeline owns closing the connection (close_db)
     try:
         if svc.pipeline is None:
             raise ApiError(503, "service_unavailable", "The service is not available right now.")
@@ -113,6 +132,7 @@ async def chat(
             raise ApiError(404, "not_found", "Not found.")
         stage = await asyncio.to_thread(svc.rollout.stage, db)
         visible = answers_visible(stage, current.user.role)
+        handed_over = True
         result = await svc.pipeline.answer(
             PipelineRequest(
                 user_id=current.user.id,
@@ -120,8 +140,10 @@ async def chat(
                 query=body.message,
                 session_id=session_id,
                 shadowed=not visible,
+                rate_counted=True,
             ),
             db,
+            close_db=db.close,
         )
         error = _error_for(result)
         if error is not None:
@@ -137,5 +159,5 @@ async def chat(
     finally:
         if result is not None:
             _close_when_idle(db, result)
-        else:
+        elif not handed_over:
             db.close()

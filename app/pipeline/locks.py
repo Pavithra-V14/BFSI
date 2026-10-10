@@ -50,7 +50,7 @@ class WriteGuard:
     def __init__(self) -> None:
         self._mutex = threading.Lock()
         self._running = 0
-        self._then: Callable[[], None] | None = None
+        self._then: list[Callable[[], None]] = []
 
     def track(self, future: Any) -> None:
         """Register a `concurrent.futures.Future`. Its completion, or its cancellation before it
@@ -60,18 +60,21 @@ class WriteGuard:
         future.add_done_callback(self._ended)
 
     def _ended(self, _future: Any) -> None:
-        then = None
+        then: list[Callable[[], None]] = []
         with self._mutex:
             self._running -= 1
-            if self._running == 0 and self._then is not None:
-                then, self._then = self._then, None
-        if then is not None:
-            then()
+            if self._running == 0 and self._then:
+                then, self._then = self._then, []
+        for release in then:  # every registered release runs: the lock AND the connection close
+            try:
+                release()
+            except Exception:  # one failing release must not stop the others
+                pass
 
     def release_when_idle(self, release: Callable[[], None]) -> None:
         with self._mutex:
             if self._running > 0:
-                self._then = release
+                self._then.append(release)
                 return
         release()
 

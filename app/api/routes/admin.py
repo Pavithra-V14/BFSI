@@ -9,7 +9,7 @@ import re
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from app.accounts import users
@@ -37,7 +37,7 @@ class RoleBody(BaseModel):
 @router.put("/users/{user_id}/role")
 def change_role(
     body: RoleBody,
-    user_id: str = Path(max_length=64),
+    user_id: str,
     current: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
 ) -> dict[str, str]:

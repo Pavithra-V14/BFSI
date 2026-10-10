@@ -12,17 +12,16 @@
 
 from __future__ import annotations
 
-import json
-import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from app.accounts.tokens import utc_text
 from app.api.deps import CurrentUser, authenticated, get_db, is_uuid
 from app.api.errors import ApiError
+from app.db import feedback
 from app.db.connection import Database
 
 router = APIRouter(tags=["feedback"])
@@ -36,7 +35,7 @@ class FeedbackBody(BaseModel):
 @router.post("/messages/{message_id}/feedback")
 def give_feedback(
     body: FeedbackBody,
-    message_id: str = Path(max_length=64),
+    message_id: str,
     current: CurrentUser = Depends(authenticated),
     db: Database = Depends(get_db),
 ) -> dict[str, str]:
@@ -53,39 +52,22 @@ def give_feedback(
         )
         if row is None or (row[3] and current.user.role != "admin"):
             raise ApiError(404, "not_found", "Not found.")
-        changed = db.execute(
-            "UPDATE feedback_entries SET rating = ?, created_at = ? "
-            "WHERE message_id = ? AND user_id = ?",
-            (body.rating, stamp, message_id, current.user.id),
+        # Each write is one statement that cannot collide with itself (app/db/feedback.py), so two
+        # requests at the same moment neither fail nor make a second review item.
+        feedback.upsert_rating(
+            db, message_id=message_id, user_id=current.user.id, rating=body.rating, stamp=stamp
         )
-        if (changed.rowcount or 0) == 0:
-            db.execute(
-                "INSERT INTO feedback_entries (id, message_id, user_id, rating, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), message_id, current.user.id, body.rating, stamp),
-            )
         if body.rating == "down":
-            existing = db.query_one(
-                "SELECT 1 FROM review_queue WHERE message_id = ? AND kind = 'thumbs_down'",
-                (message_id,),
+            question = db.query_one(
+                "SELECT content FROM messages WHERE session_id = ? AND role = 'user' "
+                "AND seq < ? ORDER BY seq DESC LIMIT 1",
+                (row[1], row[2]),
             )
-            if existing is None:
-                question = db.query_one(
-                    "SELECT content FROM messages WHERE session_id = ? AND role = 'user' "
-                    "AND seq < ? ORDER BY seq DESC LIMIT 1",
-                    (row[1], row[2]),
-                )
-                details = {"reason": "thumbs_down", "question": question[0] if question else ""}
-                db.execute(
-                    "INSERT INTO review_queue "
-                    "(id, kind, status, session_id, message_id, details, created_at) "
-                    "VALUES (?, 'thumbs_down', 'open', ?, ?, ?, ?)",
-                    (
-                        str(uuid.uuid4()),
-                        row[1],
-                        message_id,
-                        json.dumps(details, sort_keys=True),
-                        stamp,
-                    ),
-                )
+            feedback.add_thumbs_down_item(
+                db,
+                message_id=message_id,
+                session_id=row[1],
+                question=question[0] if question else "",
+                stamp=stamp,
+            )
     return {"message_id": message_id, "rating": body.rating}

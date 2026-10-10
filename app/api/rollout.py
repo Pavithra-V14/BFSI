@@ -97,18 +97,14 @@ class Rollout:
         with db.transaction(write=True):
             row = db.query_one("SELECT value FROM app_settings WHERE key = ?", (SETTING_KEY,))
             previous = row[0] if row else DEFAULT_STAGE
-            if row is None:
-                db.execute(
-                    "INSERT INTO app_settings (key, value, updated_by, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (SETTING_KEY, stage, actor_id, utc_text(now)),
-                )
-            else:
-                db.execute(
-                    "UPDATE app_settings SET value = ?, updated_by = ?, updated_at = ? "
-                    "WHERE key = ?",
-                    (stage, actor_id, utc_text(now), SETTING_KEY),
-                )
+            # one statement: the first change cannot collide with another first change
+            db.execute(
+                "INSERT INTO app_settings (key, value, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET "
+                "value = excluded.value, updated_by = excluded.updated_by, "
+                "updated_at = excluded.updated_at",
+                (SETTING_KEY, stage, actor_id, utc_text(now)),
+            )
             write_audit(
                 db,
                 actor=actor_id,

@@ -28,6 +28,7 @@ class ChatEnv(Env):
         gateway=None,
         stage: str | None = "open",
         on_render: bool = False,
+        entity_review_enabled: bool = False,
         pipeline: bool = True,
         rollout_cache_seconds: float | None = 0.0,
         **settings,
@@ -50,6 +51,7 @@ class ChatEnv(Env):
             limits=self.limits,
             pipeline=self.rig.pipeline if pipeline else None,
             on_render=on_render,
+            entity_review_enabled=entity_review_enabled,
             rollout_cache_seconds=rollout_cache_seconds,
         )
         self.client = TestClient(

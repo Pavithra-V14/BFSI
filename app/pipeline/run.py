@@ -17,6 +17,7 @@ is still running in its thread has ended: the next turn is "busy" until then.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
 
 from app.db.connection import Database
@@ -63,7 +64,25 @@ class Pipeline:
     def _early(self, request: Request, kind: str, text: str, reason: str) -> Result:
         return Result(kind, text, reason=reason, correlation_id=request.correlation_id)
 
-    async def answer(self, request: Request, db: Database) -> Result:
+    async def answer(
+        self, request: Request, db: Database, *, close_db: Callable[[], None] | None = None
+    ) -> Result:
+        """Answer one question. `close_db` (optional): the caller's way to close the request's
+        connection. When the call ends WITHOUT a result (a cancellation, a shutdown), it is called
+        after any transcript write still running has ended, so a late write never meets a closed
+        connection. When a result is returned the caller closes via `result.on_db_idle`."""
+        running: list[PipelineState] = []
+        try:
+            return await self._answer(request, db, running)
+        except BaseException:
+            if close_db is not None:
+                if running:
+                    running[0].writes.release_when_idle(close_db)
+                else:
+                    close_db()
+            raise
+
+    async def _answer(self, request: Request, db: Database, running: list[PipelineState]) -> Result:
         deps = self.deps
         if not deps.masker.ready:
             if deps.masker.failed:
@@ -98,6 +117,7 @@ class Pipeline:
                     raw_query=request.query,
                     values=self.values,
                 )
+                running.append(ctx)
             except Exception as error:  # the request could not even be set up: nothing ran
                 if deps.on_event:
                     deps.on_event("graph_failed", {"reason": type(error).__name__})

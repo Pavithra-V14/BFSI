@@ -17,7 +17,7 @@ import pytest
 
 from app.accounts import users
 from app.api.rollout import Rollout
-from app.db import entities, review_queue
+from app.db import entities, feedback, review_queue
 from app.db.connection import connect
 from app.db.migrate import run
 from app.memory import store
@@ -36,7 +36,7 @@ NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def db():
+def url():
     import psycopg
 
     schema = "t_" + uuid.uuid4().hex[:12]
@@ -45,11 +45,16 @@ def db():
     separator = "&" if "?" in POSTGRES_URL else "?"
     url = f"{POSTGRES_URL}{separator}options=-csearch_path%3D{schema}"
     run(url, MIGRATIONS, log=lambda line: None)
+    yield url
+    with psycopg.connect(POSTGRES_URL, autocommit=True) as admin:
+        admin.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+@pytest.fixture
+def db(url):
     database = connect(url)
     yield database
     database.close()
-    with psycopg.connect(POSTGRES_URL, autocommit=True) as admin:
-        admin.execute(f"DROP SCHEMA {schema} CASCADE")
 
 
 def new_user(db, role="customer"):
@@ -166,3 +171,102 @@ def test_one_thumb_per_user_per_message_is_enforced_by_the_index(db):
             (str(uuid.uuid4()), answer.id, user),
         )
     db.raw.rollback()
+
+
+def test_one_thumbs_down_item_per_answer_is_enforced_and_the_insert_is_a_no_op_the_second_time(db):
+    user = new_user(db)
+    session_id = store.create_session(db, user, now=NOW)
+    store.add_user_message(db, user, session_id, stored_query("q"), now=NOW)
+    answer = store.add_assistant_message(
+        db, user, session_id, stored_answer("a"), citations=[], grounded=True, now=NOW
+    )
+    for _ in range(2):
+        with db.transaction(write=True):
+            feedback.add_thumbs_down_item(
+                db, message_id=answer.id, session_id=session_id, question="q", stamp="2026-10-08"
+            )
+    count = db.query_one("SELECT COUNT(*) FROM review_queue WHERE kind = 'thumbs_down'")
+    assert count == (1,)
+    with pytest.raises(Exception):  # noqa: B017  (psycopg.errors.UniqueViolation)
+        db.execute(
+            "INSERT INTO review_queue (id, kind, message_id) VALUES (?, 'thumbs_down', ?)",
+            (str(uuid.uuid4()), answer.id),
+        )
+    db.raw.rollback()
+
+
+def test_two_requests_at_the_same_moment_leave_one_thumb_and_one_item(url):
+    import threading
+
+    setup = connect(url)
+    user = new_user(setup)
+    session_id = store.create_session(setup, user, now=NOW)
+    store.add_user_message(setup, user, session_id, stored_query("q"), now=NOW)
+    answer = store.add_assistant_message(
+        setup, user, session_id, stored_answer("a"), citations=[], grounded=True, now=NOW
+    )
+    setup.close()
+    barrier, errors = threading.Barrier(6), []
+
+    def click(rating):
+        conn = connect(url)
+        try:
+            barrier.wait(10)
+            with conn.transaction(write=True):
+                feedback.upsert_rating(
+                    conn, message_id=answer.id, user_id=user, rating=rating, stamp="2026-10-08"
+                )
+                feedback.add_thumbs_down_item(
+                    conn, message_id=answer.id, session_id=session_id, question="q", stamp="s"
+                )
+        except Exception as error:  # a lost race would show here
+            errors.append(type(error).__name__)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=click, args=("down" if i % 2 else "up",)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    check = connect(url)
+    try:
+        assert errors == []
+        assert check.query_one("SELECT COUNT(*) FROM feedback_entries") == (1,)
+        assert check.query_one("SELECT COUNT(*) FROM review_queue WHERE kind = 'thumbs_down'") == (
+            1,
+        )
+    finally:
+        check.close()
+
+
+def test_two_first_stage_changes_at_the_same_moment_both_succeed(url):
+    import threading
+
+    setup = connect(url)
+    admin = new_user(setup, "admin")
+    setup.close()
+    barrier, errors = threading.Barrier(4), []
+
+    def change(stage):
+        conn = connect(url)
+        try:
+            barrier.wait(10)
+            Rollout(cache_seconds=0.0).set_stage(conn, stage=stage, actor_id=admin, now=NOW)
+        except Exception as error:
+            errors.append(type(error).__name__)
+        finally:
+            conn.close()
+
+    stages = ["open", "staff_beta", "open", "shadow"]
+    threads = [threading.Thread(target=change, args=(stage,)) for stage in stages]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    check = connect(url)
+    try:
+        assert errors == []
+        assert check.query_one("SELECT COUNT(*) FROM app_settings") == (1,)
+    finally:
+        check.close()

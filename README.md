@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 9 closed; Phase 10 (chat, session and admin API) built, awaiting the owner's "commit" and approval (next is Phase 11)
+Current phase: Phase 9 closed; Phase 10 (chat, session and admin API) committed (deb0b8f), round 2 "Phase 10 hardening" built, awaiting the owner's "commit" and approval (next is Phase 11)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -629,10 +629,12 @@ for every staleness rule of spec 10.3, and four things were added or fixed:
 The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and then:
 
 - **Chat:** `POST /chat` with `{"message": "...", "session_id": "..."}` (the session id is optional:
-  leave it out to start a new chat). The answer comes back in one piece (no streaming; the frontend
+  leave it out to start a new chat; the message is at most 2,000 characters [T]). The answer comes back in one piece (no streaming; the frontend
   shows progress messages while it waits) with citations, warnings and notices, all plain text.
   `503` means starting up or temporarily unavailable, `409` a question is still being answered in that
   session, `429` too many requests or the daily budget (with `Retry-After`), `404` no such session.
+  A chat is counted once against the per-user limit, at the route's entry, so a refused one (a bad
+  session id, a busy session, the service starting up) is counted too.
 - **Sessions:** `GET /sessions`, `GET /sessions/{id}` (resume: the whole transcript, paged),
   `DELETE /sessions/{id}` and `DELETE /sessions` (all my chats). Someone else's session is a 404,
   the same as a missing one.
@@ -640,7 +642,9 @@ The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and 
   also adds one item to the admin review queue.
 - **Admin (admins only):** users and switching accounts on or off (never an admin), the review
   queue (list, label from a fixed list), document status (counts), the allow-list (list; approve or
-  reject only on the admin machine), the alerts banner data, and the rollout stage.
+  reject only when `ENTITY_REVIEW_ENABLED=true`, and never on Render; a one-word name needs
+  `"confirm_single_word": true`), the alerts banner data, and the rollout stage (`GET` and `PUT
+  /admin/shadow`).
 - **The rollout stage (shadow mode).** One setting with three values: `shadow` (only admins see
   answers), `staff_beta` (admins and staff), `open` (everyone). It starts as `shadow`, and also
   falls back to `shadow` if it cannot be read. A user who may not see answers still has their turn
@@ -654,7 +658,16 @@ The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and 
 - **Start-up.** The API builds the pipeline from the environment (it needs `QDRANT_URL` and the
   gateway keys; without `QDRANT_URL` chat answers 503), starts the name model in the background and
   runs the sparse-vector check once (an alert event `sparse_version_mismatch` on a difference).
-  Apply migration `0006` first (`uv run python -m app.db.migrate`).
+  Apply migrations `0006` and `0007` first (`uv run python -m app.db.migrate`). The events of the
+  cache, the gateway, the usage limiter and the masker reach the alerts banner.
+- **Structure rule.** Nothing outside `app/ingest` imports the ingestion package or a parsing,
+  OCR or model library; spaCy and Presidio only inside `app/guardrails` (the masker). A test scans
+  the whole `app` tree and a fresh process, before and after the masker loads.
+- **A correction to an old note.** The header of migration `0004` says only the owner's command
+  switches an account off; since Phase 10 an admin can also do it through the API (never for an
+  admin). Migrations are not edited after release, so the note is here and in `0007`.
+- **The request size limit** is now 32 KiB [T] (it was 16 KiB): 2,000 characters that a client
+  escapes as JSON can reach 24,000 bytes, and the limit must never refuse legitimate text.
 - **A local end-to-end check you can run yourself:** `docs/OWNER_RUNS.md`, Run 16.
 
 **Known limitations (recorded in Phase 10)**
@@ -664,10 +677,19 @@ The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and 
   (it is empty after a restart and per instance); the webhook, persistence and dashboards come
   there. Traces of a deleted chat are removed by session hash there too.
 - **Phase 14.** The chat route holds a worker thread and a connection per request; load tests must
-  size them against the free tiers. The hidden-answers list counts with a subquery per page.
+  size them against the free tiers. The hidden-answers list counts with a subquery per page and
+  `messages.shadowed` has no index. `/admin/documents` scrolls the whole collection on every request
+  and slices after (counts only, admin only).
 - **Phase 15.** Several instances: the per-session lock, the persist queue, the event buffer and
   the 5-second stage cache are per process. A change of stage reaches another instance within 5
-  seconds. A proxy in front of the API needs the trusted-proxy settings (Phase 4 note).
+  seconds, and an answer given in that window is stored as visible for good (a change from `open`
+  back to `shadow` leaks up to 5 seconds on another instance). A proxy in front of the API needs
+  the trusted-proxy settings (Phase 4 note). `RENDER=true` as the signal for "on the host" is
+  unverified (Phase 15 confirms it).
+- **Recorded for the owner (round 2 decisions).** The chat response also carries `kind`, `reason`
+  and `answer_visible` and leaves out `heading_path`; the stage read while the connection is
+  opened, if a request is cancelled in that very moment, can still be mid-query when the
+  connection closes (its error is swallowed and the stage fails closed).
 - **Recorded, not built:** an admin cannot delete or ingest a document through the API (the
   command line on the admin machine does that); there is no admin reading of another user's
   transcript except the masked hidden answers.

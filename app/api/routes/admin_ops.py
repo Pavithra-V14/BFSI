@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 from app.accounts import audit, users
 from app.api.deps import CurrentUser, Page, get_db, is_uuid, page_params, require_admin, services
 from app.api.errors import ApiError
-from app.api.rollout import STAGES
+from app.api.rollout import STAGES, WITHDRAWN_NOTICE
 from app.db import entities as entity_store
 from app.db import review_queue
 from app.db.connection import Database
@@ -102,7 +102,7 @@ _USER_REFUSALS = {
 @router.put("/users/{user_id}/active")
 def set_user_active(
     body: ActiveBody,
-    user_id: str = Path(max_length=64),
+    user_id: str,
     current: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
 ) -> dict[str, Any]:
@@ -174,7 +174,7 @@ class LabelBody(BaseModel):
 @router.post("/review/{item_id}/label")
 def label_review_item(
     body: LabelBody,
-    item_id: str = Path(max_length=64),
+    item_id: str,
     current: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
 ) -> dict[str, str]:
@@ -271,26 +271,45 @@ def list_entities(
 class EntityBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["approved", "rejected"]
+    # A one-word person entry (a surname alone) is approved only when this is true: the same
+    # rule as the command-line review's "tick it".
+    confirm_single_word: bool = False
 
 
 @router.put("/entities/{entity_id}")
 def review_entity(
     body: EntityBody,
     request: Request,
-    entity_id: str = Path(max_length=64),
+    entity_id: str,
     current: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
 ) -> dict[str, str]:
-    if services(request).on_render:  # enforced on the server, whatever the client shows
+    svc = services(request)
+    if svc.on_render:  # enforced on the server, whatever the client shows
         raise ApiError(
             403,
             "admin_machine_only",
             "Entity review is done on the admin machine, not on the hosted service.",
         )
+    if not svc.entity_review_enabled:  # opt-in: ENTITY_REVIEW_ENABLED=true on the admin machine
+        raise ApiError(403, "entity_review_disabled", "Entity review is not switched on here.")
     if not is_uuid(entity_id):
         raise _not_found()
     now = datetime.now(UTC)
     with db.transaction(write=True):
+        entry = entity_store.get_entity(db, entity_id)
+        if entry is None:
+            raise _not_found()
+        if (
+            body.status == "approved"
+            and entity_store.is_single_word_person(*entry)
+            and not body.confirm_single_word
+        ):
+            raise ApiError(
+                409,
+                "single_word_needs_confirmation",
+                "A one-word name is approved only when you confirm it.",
+            )
         found = entity_store.set_status(
             db, entity_id=entity_id, status=body.status, user_id=current.user.id, now=now
         )
@@ -301,7 +320,11 @@ def review_entity(
             actor=current.user.id,
             action="entity_review",
             target=entity_id,
-            details={"status": body.status, "via": "api"},
+            details={
+                "status": body.status,
+                "via": "api",
+                "single_word_confirmed": bool(body.confirm_single_word),
+            },
             now=now,
         )
     return {"id": entity_id, "status": body.status}
@@ -370,7 +393,8 @@ def shadow_answers(
         rows = db.query_all(
             "SELECT m.id, m.session_id, m.created_at, m.content, m.citations, m.grounded, "
             "s.user_id, (SELECT q.content FROM messages q WHERE q.session_id = m.session_id "
-            "AND q.role = 'user' AND q.seq < m.seq ORDER BY q.seq DESC LIMIT 1) "
+            "AND q.role = 'user' AND q.seq < m.seq ORDER BY q.seq DESC LIMIT 1), "
+            "m.source_removed "
             "FROM messages m JOIN sessions s ON s.id = m.session_id "
             "WHERE m.role = 'assistant' AND m.shadowed = ? "
             "ORDER BY m.created_at DESC, m.id LIMIT ? OFFSET ?",
@@ -382,15 +406,22 @@ def shadow_answers(
             citations = json.loads(row[4])
         except (TypeError, ValueError):
             citations = []
+        removed = bool(row[8])
+        if removed:  # the document was withdrawn: the notice, never its text or citations
+            answer, citations = WITHDRAWN_NOTICE, []
+        else:
+            answer = row[3]
+            citations = citations if isinstance(citations, list) else []
         items.append(
             {
                 "message_id": row[0],
                 "session_id": row[1],
                 "created_at": str(row[2]),
                 "question": row[7],
-                "answer": row[3],
-                "citations": citations if isinstance(citations, list) else [],
+                "answer": answer,
+                "citations": citations,
                 "grounded": None if row[5] is None else bool(row[5]),
+                "source_removed": removed,
                 "user": audit.keyed_hash(key, "shadow-user", row[6]),
             }
         )

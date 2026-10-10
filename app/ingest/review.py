@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from app.accounts.audit import write_audit
 from app.accounts.tokens import utc_text
+from app.db.entities import is_single_word_person
 from app.ingest import pending
 from app.ingest.entities import normalise_entity, person_variants
 from app.ingest.index import IngestContext, load_existing
@@ -45,7 +46,7 @@ class Group:
     snippet: str = ""
 
     def single_word(self, row: Row) -> bool:
-        return self.kind == "person_in_policy" and len(row.text.split()) == 1
+        return is_single_word_person(self.kind, row.text)
 
 
 _INITIAL = ("mr", "mrs", "ms", "dr", "shri", "smt", "prof")

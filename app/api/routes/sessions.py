@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Response
 
 from app.api.deps import CurrentUser, Page, authenticated, get_db, is_uuid, page_params
 from app.api.errors import ApiError
@@ -41,9 +41,11 @@ def _check_id(session_id: str) -> str:
 def _shown(message: store.StoredMessage, *, is_admin: bool) -> dict[str, Any]:
     """One message as the user may see it."""
     text, citations, grounded = message.content, list(message.citations), message.grounded
-    notice = None
+    notice, removed = None, message.source_removed
     if message.role == "assistant" and message.shadowed and not is_admin:
+        # a hidden answer carries nothing: not even that it once cited a withdrawn document
         text, citations, grounded, notice = SHADOW_NOTICE, [], None, "shadowed"
+        removed = False
     elif message.role == "assistant" and message.source_removed:
         text, citations, notice = WITHDRAWN_NOTICE, [], "source_removed"
     return {
@@ -53,7 +55,7 @@ def _shown(message: store.StoredMessage, *, is_admin: bool) -> dict[str, Any]:
         "text": text,
         "citations": citations,
         "grounded": grounded,
-        "source_removed": message.source_removed,
+        "source_removed": removed,
         "notice": notice,
         "created_at": message.created_at,
     }
@@ -87,7 +89,7 @@ def list_my_sessions(
 
 @router.get("/sessions/{session_id}")
 def resume_session(
-    session_id: str = Path(max_length=64),
+    session_id: str,
     page: Page = Depends(MESSAGE_PAGE),
     current: CurrentUser = Depends(authenticated),
     db: Database = Depends(get_db),
@@ -115,7 +117,7 @@ def resume_session(
 
 @router.delete("/sessions/{session_id}", status_code=204)
 def delete_my_session(
-    session_id: str = Path(max_length=64),
+    session_id: str,
     current: CurrentUser = Depends(authenticated),
     db: Database = Depends(get_db),
 ) -> Response:

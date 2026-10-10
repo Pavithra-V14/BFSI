@@ -215,7 +215,7 @@ def count(conn, table, where="1 = 1", args=()):
 # ---- the migrations themselves --------------------------------------------------------
 
 
-def test_the_six_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
+def test_the_seven_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
     quiet = lambda line: None  # noqa: E731
     applied = run(url, MIGRATIONS, log=quiet)
@@ -226,9 +226,10 @@ def test_the_six_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
         "0004_users_active.sql",
         "0005_messages_history_excluded.sql",
         "0006_rollout_feedback_settings.sql",
+        "0007_review_thumbs_down_unique.sql",
     ]
     assert run(url, MIGRATIONS, log=quiet) == []  # nothing left to apply
-    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5, 6]
+    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5, 6, 7]
 
 
 def test_the_sql_stays_portable_between_postgres_and_sqlite():
@@ -264,6 +265,7 @@ def test_migration_0004_adds_the_active_flag_and_existing_users_stay_active(tmp_
         "0004_users_active.sql",
         "0005_messages_history_excluded.sql",
         "0006_rollout_feedback_settings.sql",
+        "0007_review_thumbs_down_unique.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT is_active FROM users").fetchall() == [(1,)]
@@ -292,6 +294,7 @@ def test_migration_0005_adds_the_history_flag_and_existing_messages_stay_in_hist
     assert run(url, MIGRATIONS, log=lambda line: None) == [
         "0005_messages_history_excluded.sql",
         "0006_rollout_feedback_settings.sql",
+        "0007_review_thumbs_down_unique.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT history_excluded FROM messages").fetchall() == [(0,)]
@@ -317,7 +320,10 @@ def test_migration_0006_adds_the_shadow_flag_the_settings_table_and_one_thumb_pe
     )
     conn.commit()
     conn.close()
-    assert run(url, MIGRATIONS, log=lambda line: None) == ["0006_rollout_feedback_settings.sql"]
+    assert run(url, MIGRATIONS, log=lambda line: None) == [
+        "0006_rollout_feedback_settings.sql",
+        "0007_review_thumbs_down_unique.sql",
+    ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT shadowed FROM messages").fetchall() == [(0,)]  # visible as before
     assert conn.execute("SELECT COUNT(*) FROM app_settings").fetchone() == (0,)
@@ -329,6 +335,48 @@ def test_migration_0006_adds_the_shadow_flag_the_settings_table_and_one_thumb_pe
         conn.execute(
             "INSERT INTO feedback_entries (id, message_id, user_id, rating) "
             "VALUES ('g', 'm', 'u', 'down')"
+        )
+    conn.close()
+
+
+def test_migration_0007_removes_duplicate_thumbs_down_items_and_allows_only_one_per_answer(
+    tmp_path,
+):
+    path = tmp_path / "upgrade7.db"
+    old = tmp_path / "old7"
+    old.mkdir()
+    for migration in load_migrations(MIGRATIONS)[:6]:
+        (old / migration.filename).write_text(migration.sql, encoding="utf-8")
+    url = f"sqlite:///{path}"
+    run(url, old, log=lambda line: None)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO users (id, username, email, password_hash) VALUES ('u', 'a', 'a@e.test', 'h')"
+    )
+    conn.execute("INSERT INTO sessions (id, user_id) VALUES ('s', 'u')")
+    conn.execute(
+        "INSERT INTO messages (id, session_id, seq, role, content) "
+        "VALUES ('m', 's', 1, 'assistant', 'x')"
+    )
+    for item in ("r1", "r2"):  # a double click before this migration made two items
+        conn.execute(
+            "INSERT INTO review_queue (id, kind, message_id) VALUES (?, 'thumbs_down', 'm')",
+            (item,),
+        )
+    conn.execute("INSERT INTO review_queue (id, kind, message_id) VALUES ('x1', 'refused', 'm')")
+    conn.execute("INSERT INTO review_queue (id, kind, message_id) VALUES ('x2', 'refused', 'm')")
+    conn.commit()
+    conn.close()
+    assert run(url, MIGRATIONS, log=lambda line: None) == ["0007_review_thumbs_down_unique.sql"]
+    conn = sqlite3.connect(path)
+    kept = conn.execute("SELECT id FROM review_queue WHERE kind = 'thumbs_down'").fetchall()
+    assert kept == [("r1",)]  # the first one stays
+    assert conn.execute("SELECT COUNT(*) FROM review_queue WHERE kind = 'refused'").fetchone() == (
+        2,
+    )  # other kinds may repeat
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO review_queue (id, kind, message_id) VALUES ('r3', 'thumbs_down', 'm')"
         )
     conn.close()
 
@@ -646,6 +694,8 @@ def test_the_audit_log_takes_inserts_and_the_expected_indexes_exist(db):
         "allowlist_entities_doc_id",
         "review_queue_status_created",
         "feedback_entries_message_id",
+        "feedback_entries_message_user",
+        "review_queue_thumbs_down_message",
     } <= names
 
 

@@ -80,7 +80,7 @@ never set.)
 | 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
 | 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
 | 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
-| 16 | Local end-to-end chat through the API (migration 0006, shadow mode, sessions, feedback) | Phase 10 | PENDING |
+| 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -905,7 +905,7 @@ It asks you to type the id.
 
 - **Verifies:** Phase 10 (the chat endpoint over the real pipeline and real services, the rollout
   stage / shadow mode, sessions and resume, feedback and the review queue, the admin routes, and
-  migration 0006 on your real database).
+  migrations 0006 and 0007 on your real database, and the Phase 10 hardening rules).
 - **Before it:** Runs 4 and 5 (keys and a first admin), Run 8 (migrations up to 0005), Runs 9 and
   10 (provider keys work; the three sample documents are ingested) and Run 12 (the pipeline
   answers). Two PowerShell windows.
@@ -914,15 +914,17 @@ It asks you to type the id.
   `GEMINI_EMBEDDING_KEY_A`, `GEMINI_API_KEYS`, `GROQ_API_KEYS`, `OPENROUTER_API_KEYS`,
   `COHERE_API_KEY`, `JINA_API_KEY`. The Langfuse variables are optional (the sink is off without
   all four). Window B needs no key, only the passwords you type.
-- **Step 1. Apply migration 0006 (window A):**
+- **Step 1. Apply migrations 0006 and 0007 (window A):**
 
       $env:DATABASE_URL = Read-Secret "DATABASE_URL"
       uv run python -m app.db.migrate --dry-run
       uv run python -m app.db.migrate
 
-  You should see `pending 0006_rollout_feedback_settings.sql` and then `applied
-  0006_rollout_feedback_settings.sql`. If more than one file is pending, an earlier migration was
-  not applied (Run 8): let it apply them in order.
+  You should see `pending 0006_rollout_feedback_settings.sql`, `pending
+  0007_review_thumbs_down_unique.sql` and then `applied` for each. If an earlier file is also
+  pending, an earlier migration was not applied (Run 8): let it apply them in order. Migration
+  0007 first removes a duplicate thumbs-down review item for one answer, if an earlier double
+  click made one (it keeps the first), then adds the index that allows only one.
 - **Step 2. Start the API (window A):** set the other variables with `Read-Secret` as in Run 12,
   then:
 
@@ -980,15 +982,17 @@ It asks you to type the id.
       $t = Invoke-RestMethod "$base/sessions/$id" -Headers $h
       $t.messages | ForEach-Object { "$($_.role): $($_.notice)" }
       Post "/messages/$($t.messages[-1].id)/feedback" @{ rating = "down" } $customer
+      Post "/messages/$($t.messages[-1].id)/feedback" @{ rating = "down" } $customer
 
   You should see the session count, the messages with their roles (the first answer, made in
   shadow, shows `notice: shadowed` and the fixed notice text instead of its answer; the later one
-  shows no notice), and `rating : down`.
+  shows no notice), and `rating : down` twice (the second thumb changes nothing: still one).
 - **Step 8. The thumbs-down is in the review queue:**
 
       (Invoke-RestMethod "$base/admin/review?status=open" -Headers @{ Authorization = "Bearer $admin" }).items
 
-  You should see one `thumbs_down` item with the masked question. Label it:
+  You should see exactly ONE `thumbs_down` item with the masked question (you sent the thumb
+  twice). Label it:
 
       Post "/admin/review/ITEM_ID/label" @{ label = "wrong_answer"; status = "labelled" } $admin
 
@@ -1002,6 +1006,12 @@ It asks you to type the id.
   You should see your three documents with `chunks_active` equal to their stored counts (19, 22
   and 21) and `sparse_vectors_out_of_date : 0`; `banner : False` (or the names of the critical
   alerts, if any); and the accounts without hashes or email addresses.
+- **Step 9b. Entity review is off unless you switch it on (optional):** with
+  `ENTITY_REVIEW_ENABLED` not set, `PUT /admin/entities/{id}` answers `403 entity_review_disabled`
+  and `GET /admin/entities` works. To try it, stop the API, run `$env:ENTITY_REVIEW_ENABLED =
+  "true"` in window A, start it again, and approve one entry: a one-word person name answers `409
+  single_word_needs_confirmation` until you send `"confirm_single_word": true`. Remove the
+  variable again afterwards. (On Render it is always refused.)
 - **Step 10. Delete my chats and clean up:**
 
       Invoke-RestMethod "$base/sessions" -Method Delete -Headers $h

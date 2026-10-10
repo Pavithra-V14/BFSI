@@ -75,6 +75,7 @@ class Services:
     pipeline: Any = None  # app.pipeline.run.Pipeline, or None (no chat)
     rollout: Rollout = field(default_factory=Rollout)
     on_render: bool = False  # the admin-machine-only actions are refused here (spec 24)
+    entity_review_enabled: bool = False  # ENTITY_REVIEW_ENABLED=true: opt-in, default off [P]
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))
@@ -183,25 +184,38 @@ def authenticated(
     """
     svc = services(request)
     claims = _claims_from(svc, authorization)
-    decision = svc.limits.check_rate(claims.user_id)
-    if not decision.allowed:
-        raise ApiError(
-            429,
-            "too_many_requests",
-            "You are sending requests too quickly. Please wait a moment.",
-            headers={"Retry-After": str(decision.retry_after or 60)},
-        )
+    refused = _rate_refused(svc, claims.user_id)
+    if refused is not None:
+        raise refused
     return _current_user(db, claims)
+
+
+def _rate_refused(svc: Services, user_id: str) -> ApiError | None:
+    """Count one request for this user; the refusal to send, or None when it is allowed."""
+    decision = svc.limits.check_rate(user_id)
+    if decision.allowed:
+        return None
+    return ApiError(
+        429,
+        "too_many_requests",
+        "You are sending requests too quickly. Please wait a moment.",
+        headers={"Retry-After": str(decision.retry_after or 60)},
+    )
 
 
 def open_user_context(svc: Services, authorization: str | None) -> tuple[CurrentUser, LazyDatabase]:
     """For a route that owns its database connection (the chat route, which must keep it open
-    while a timed-out transcript write finishes). Like `authenticated_for_logout`: the request is
-    NOT counted against the per-user limit, because the pipeline counts it once (stage 1).
+    while a timed-out transcript write finishes). Like `authenticated`, the request is counted
+    against the per-user limit ONCE, here at the entry, so every refusal that follows (a bad
+    session id, a busy session, a service that is starting up) is counted too. The pipeline is
+    told (`Request.rate_counted`) not to count it again.
 
     Returns the signed-in user and the (lazy) database; the CALLER closes it. Blocking: call it
     from a worker thread."""
     claims = _claims_from(svc, authorization)
+    refused = _rate_refused(svc, claims.user_id)
+    if refused is not None:
+        raise refused
     db = LazyDatabase(svc.db_factory)
     try:
         return _current_user(db, claims), db

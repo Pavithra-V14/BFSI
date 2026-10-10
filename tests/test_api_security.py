@@ -112,8 +112,12 @@ def test_a_body_at_the_limit_is_read_and_one_byte_over_is_refused(env):
     assert over.json()["error"]["code"] == "request_too_large"
 
 
-def test_the_limit_is_16_kib():
-    assert MAX_BODY_BYTES == 16 * 1024
+def test_the_limit_is_32_kib_and_holds_the_longest_chat_message_in_its_worst_escaping():
+    assert MAX_BODY_BYTES == 32 * 1024
+    from app.api.routes.chat import MAX_MESSAGE_CHARACTERS
+
+    worst = MAX_MESSAGE_CHARACTERS * 12  # every character an escaped surrogate pair
+    assert worst + 1_024 < MAX_BODY_BYTES
 
 
 def test_a_declared_oversize_body_is_refused_before_it_is_read(env):
@@ -127,8 +131,8 @@ def test_a_declared_oversize_body_is_refused_before_it_is_read(env):
 
 def test_a_chunked_body_with_no_content_length_cannot_get_past_the_limit(env):
     def chunks():
-        for _ in range(8):
-            yield b"x" * 4096  # 32 KiB in total, never declared up front
+        for _ in range(MAX_BODY_BYTES // 4096 + 1):
+            yield b"x" * 4096  # one chunk over the limit in total, never declared up front
 
     response = env.client.post(
         "/auth/login", content=chunks(), headers={"Content-Type": "application/json"}

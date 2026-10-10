@@ -62,6 +62,15 @@ class DocumentCounts:
         }
 
 
+def _as_int(value: object) -> int:
+    """A stored number, or 0 when the payload holds something else (never an error: one odd
+    payload must not turn the admin list into a 500)."""
+    try:
+        return int(value or 0)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0
+
+
 def documents_overview(
     client: QdrantClient, collection: str = COLLECTION, *, doc_id: str | None = None
 ) -> list[DocumentCounts]:
@@ -93,7 +102,7 @@ def documents_overview(
                 counts.access_role = counts.access_role or payload.get("access_role")
                 counts.product_line = counts.product_line or payload.get("product_line")
                 counts.source = counts.source or payload.get("source")
-                counts.doc_version = max(counts.doc_version, int(payload.get("doc_version") or 0))
+                counts.doc_version = max(counts.doc_version, _as_int(payload.get("doc_version")))
                 quarantine = payload.get("quarantine")
                 if quarantine == "pending":
                     counts.held_back += 1

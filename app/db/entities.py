@@ -17,6 +17,13 @@ STATUSES = ("pending", "approved", "rejected")
 SETTABLE = ("approved", "rejected")
 
 
+def is_single_word_person(entity_type: str, text: str) -> bool:
+    """A person's name of one word (a surname alone). The command-line review approves such an
+    entry only when the reviewer ticks it, and the API asks for the same confirmation: one shared
+    rule, used by both (app/ingest/review.py imports it from here)."""
+    return entity_type == "person_in_policy" and len(text.split()) == 1
+
+
 @dataclass(frozen=True)
 class EntityRow:
     id: str
@@ -55,13 +62,21 @@ def list_entities(
     return items, int(total[0]) if total else 0
 
 
+def get_entity(db: Database, entity_id: str) -> tuple[str, str] | None:
+    """(entity_type, text) of one entry, or None."""
+    row = db.query_one(
+        "SELECT entity_type, text FROM allowlist_entities WHERE id = ?", (entity_id,)
+    )
+    return (row[0], row[1]) if row else None
+
+
 def set_status(db: Database, *, entity_id: str, status: str, user_id: str, now: datetime) -> bool:
-    """Approve or reject one entry. False if there is no such entry. The caller writes the audit row
-    in the same transaction."""
+    """Approve or reject one entry, recording WHO (the admin's id, for a rejection too) and WHEN.
+    False if there is no such entry. The caller writes the audit row in the same transaction."""
     if status not in SETTABLE:
         raise ValueError("status must be approved or rejected")
     cursor = db.execute(
         "UPDATE allowlist_entities SET status = ?, approved_by = ?, approved_at = ? WHERE id = ?",
-        (status, user_id if status == "approved" else None, utc_text(now), entity_id),
+        (status, user_id, utc_text(now), entity_id),
     )
     return (cursor.rowcount or 0) > 0

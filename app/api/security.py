@@ -1,9 +1,11 @@
 """The security layer (spec 13.3): headers, a request size limit and CORS.
 
 - Headers go on every response, errors and CORS answers included [P].
-- The request size limit [T] is 16 KiB: a query is at most 100 tokens and the biggest body is a
-  registration. It stops a declared oversize body at once and counts bytes as they stream in, so
-  a body sent in chunks (with no Content-Length) cannot get past it.
+- The request size limit [T] is 32 KiB (16 KiB until Phase 10). A chat message is at most 2,000
+  characters, and a client that escapes every character as JSON sends up to 12 bytes for one
+  (24,000 in all), so the limit must stay above that or it would refuse legitimate text. It stops
+  a declared oversize body at once and counts bytes as they stream in, so a body sent in chunks
+  (with no Content-Length) cannot get past it.
 - CORS: nothing is allowed unless one origin is configured (CORS_ALLOWED_ORIGIN). Then exactly
   that origin may call the API, with no cookies (the token travels in a header).
 """
@@ -16,7 +18,7 @@ from typing import Any
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-MAX_BODY_BYTES = 16 * 1024  # [T]
+MAX_BODY_BYTES = 32 * 1024  # [T]
 
 SECURITY_HEADERS: tuple[tuple[str, str], ...] = (  # [P]
     ("X-Content-Type-Options", "nosniff"),

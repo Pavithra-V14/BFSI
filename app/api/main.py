@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,6 +38,36 @@ from app.gateway.embeddings import running_on_render
 log = logging.getLogger("app.api")
 
 
+class EventRelay:
+    """A way to hand alert events to the app BEFORE the app exists.
+
+    The cache store, the gateway, the usage limiter and the masker are built first and the app is
+    built from them, so they cannot be given `Services.emit` directly. They get this relay; once
+    the app exists `bind` points it at `Services.emit`, and any event that came in before that
+    (a masker that failed to load while the app was being built) is passed on then. Events carry
+    names and counts only."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._target: Callable[[str, dict[str, Any]], None] | None = None
+        self._early: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, name: str, fields: dict[str, Any]) -> None:
+        with self._lock:
+            target = self._target
+            if target is None:
+                self._early.append((name, dict(fields)))
+                return
+        target(name, fields)
+
+    def bind(self, target: Callable[[str, dict[str, Any]], None]) -> None:
+        with self._lock:
+            self._target, early = target, self._early
+            self._early = []
+        for name, fields in early:
+            target(name, fields)
+
+
 class SecureFastAPI(FastAPI):
     """A FastAPI app whose outermost layer is the SecurityMiddleware.
 
@@ -59,6 +90,7 @@ def create_app(
     limits: UsageLimits | None = None,
     pipeline: Any = None,
     on_render: bool = False,
+    entity_review_enabled: bool = False,
     rollout_cache_seconds: float | None = None,
 ) -> FastAPI:
     @asynccontextmanager
@@ -87,6 +119,7 @@ def create_app(
         gateway=gateway,
         pipeline=pipeline,
         on_render=on_render,
+        entity_review_enabled=entity_review_enabled,
     )
     svc = app.state.services
     svc.rollout = Rollout(
@@ -126,9 +159,10 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
     database_url = (env.get("DATABASE_URL") or "").strip()
     if not database_url:
         raise SystemExit("refusing to start: DATABASE_URL is not set")
+    relay = EventRelay()
     cache: CacheStore | None = None
     if (env.get("UPSTASH_REDIS_URL") or "").strip():
-        cache = store_from_env(env)
+        cache = store_from_env(env, on_event=relay)
     elif running_on_render(env):
         raise SystemExit("refusing to start: UPSTASH_REDIS_URL is not set")
     else:
@@ -142,12 +176,12 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
     try:
         from app.gateway import Gateway, GatewayConfig
 
-        gateway = Gateway(GatewayConfig.from_env(env))
+        gateway = Gateway(GatewayConfig.from_env(env), on_event=relay)
     except Exception as error:  # a wrong gateway setting must stop the start, with names only
         raise SystemExit(f"refusing to start: gateway settings: {type(error).__name__}") from None
-    limits = UsageLimits(cache, settings)
-    pipeline = _build_pipeline(env, cache, vector_client, gateway, limits)
-    return create_app(
+    limits = UsageLimits(cache, settings, on_event=relay)
+    pipeline = _build_pipeline(env, cache, vector_client, gateway, limits, relay)
+    app = create_app(
         settings,
         db_factory=lambda: connect(database_url),
         cache=cache,
@@ -156,7 +190,11 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
         limits=limits,
         pipeline=pipeline,
         on_render=running_on_render(env),
+        entity_review_enabled=(env.get("ENTITY_REVIEW_ENABLED") or "").strip().lower() == "true",
     )
+    # From here every event of the cache, gateway, limiter, masker and sink reaches /admin/alerts.
+    relay.bind(lambda name, fields: app.state.services.emit(name, **fields))
+    return app
 
 
 def _build_pipeline(
@@ -165,6 +203,7 @@ def _build_pipeline(
     vector_client: Any,
     gateway: Any,
     limits: UsageLimits,
+    relay: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> Any:
     """The query pipeline (Phase 8) with its dependencies, or None when no vector store is
     configured (chat then answers 503). The masker loads in the background: until it is ready
@@ -181,10 +220,10 @@ def _build_pipeline(
     from app.pipeline.state import Deps
 
     try:
-        sink = langfuse_sink.sink_from_env(env)
+        sink = langfuse_sink.sink_from_env(env, on_event=relay)
     except langfuse_sink.SinkConfigError as error:
         raise SystemExit(f"refusing to start: {error}") from None
-    holder = MaskerHolder()
+    holder = MaskerHolder(on_event=relay)
     holder.start()
     deps = Deps(
         gateway=gateway,

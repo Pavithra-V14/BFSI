@@ -157,12 +157,14 @@ async def authenticate(ctx: PipelineState, span: Span, limit: float) -> None:
         span.status = "skipped"
         return
     deadline = ctx.deps.clock() + limit
+    rate = None
     try:
-        rate = await _within(ctx, deadline, usage.check_rate, ctx.request.user_id)
+        if not ctx.request.rate_counted:  # the chat route counts at its entry (once per chat)
+            rate = await _within(ctx, deadline, usage.check_rate, ctx.request.user_id)
     except Exception as error:  # includes the slice running out
         ctx.emit("rate_limit_unavailable", reason=type(error).__name__)
     else:
-        if not rate.allowed:
+        if rate is not None and not rate.allowed:
             ctx.exited = "authenticate"
             ctx.result = Result(
                 "rate_limited",

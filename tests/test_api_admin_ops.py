@@ -14,7 +14,7 @@ MISSING = "00000000-0000-4000-8000-000000000000"
 
 @pytest.fixture
 def env(tmp_path, fast_hashing):
-    made = ChatEnv(tmp_path)
+    made = ChatEnv(tmp_path, entity_review_enabled=True)
     yield made
     made.close()
 
@@ -272,13 +272,16 @@ def test_pending_entities_are_listed_and_an_admin_approves_one_with_who_and_when
     assert audit == [(admin_id,)]
 
 
-def test_a_rejected_entity_records_no_approver(env, admin):
+def test_a_rejected_entity_records_who_rejected_it(env, admin):
     entity = add_entity(env)
     env.client.put(
         f"/admin/entities/{entity}", json={"status": "rejected"}, headers=env.bearer(admin)
     )
-    row = env.rows("SELECT status, approved_by FROM allowlist_entities WHERE id = ?", (entity,))[0]
-    assert row == ("rejected", None)
+    admin_id = env.rows("SELECT id FROM users WHERE username = 'boss'")[0][0]
+    row = env.rows(
+        "SELECT status, approved_by, approved_at FROM allowlist_entities WHERE id = ?", (entity,)
+    )[0]
+    assert row[0] == "rejected" and row[1] == admin_id and row[2]
 
 
 def test_entity_review_is_refused_on_the_host_but_reading_is_allowed(tmp_path, fast_hashing):
@@ -391,7 +394,7 @@ def test_hidden_answers_are_listed_for_the_admin_masked_and_with_a_hashed_user(e
     assert len(item["user"]) == 64  # a keyed hash, not the account
     assert set(item) == {
         "message_id", "session_id", "created_at", "question", "answer", "citations", "grounded",
-        "user",
+        "source_removed", "user",
     }  # fmt: skip
 
 
