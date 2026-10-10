@@ -1,0 +1,33 @@
+# Streamlit settings of the frontend service (spec 24). Read from the folder `streamlit run` is
+# started in (the project root). No secret belongs in this file.
+
+[server]
+# Protects the form posts against cross-site request forgery.
+enableXsrfProtection = true
+headless = true
+
+[browser]
+# No usage statistics are sent to Streamlit.
+gatherUsageStats = false
+
+[client]
+# A page error shows a generic message in the browser; details stay in the service's own console.
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[logger]
+level = "warning"
+
+# The colours repeat frontend/theme.py (a test keeps them equal). Text colours are checked for a
+# contrast of at least 4.5 to 1 in both themes.
+[theme.light]
+primaryColor = "#0E6B68"
+backgroundColor = "#F6F7F9"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#14202B"
+
+[theme.dark]
+primaryColor = "#4DB6AC"
+backgroundColor = "#0E1418"
+secondaryBackgroundColor = "#161F26"
+textColor = "#E7EDF2"

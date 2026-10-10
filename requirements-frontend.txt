@@ -1,0 +1,6 @@
+# The Streamlit frontend service (spec 2, 24; Phase 11). The frontend is its own Render service and
+# installs ONLY this file. It talks to the API over HTTP and imports nothing from `app/`, so no
+# torch, spaCy, Presidio or ingestion package belongs here. Every package is pinned with ==; the
+# packages these depend on are resolved at install time.
+streamlit==1.65.0
+httpx==0.28.1

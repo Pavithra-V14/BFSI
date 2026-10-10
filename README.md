@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 9 closed; Phase 10 (chat, session and admin API) committed (deb0b8f), round 2 "Phase 10 hardening" built, awaiting the owner's "commit" and approval (next is Phase 11)
+Current phase: Phase 10 closed; Phase 11 (Streamlit frontend) built, awaiting the owner's "commit" and approval (next is Phase 12)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -34,7 +34,9 @@ Current phase: Phase 9 closed; Phase 10 (chat, session and admin API) committed 
 - `tests/` : automated tests. They only use SQLite and local resources.
 - `migrations/` : numbered SQL files for the database (Phase 3 holds the full schema).
 - `.github/workflows/ci.yml` : the checks that run on GitHub.
-- `requirements*.txt` : the four dependency files. `.env.example` : the settings template.
+- `requirements*.txt` : the five dependency files (the API, the frontend, ingestion,
+  evaluation, development). `.env.example` : the settings template.
+- `frontend/` : the Streamlit frontend, a separate service that talks to the API over HTTP only.
 - More folders are added phase by phase.
 
 ## How to work with Claude Code in this project
@@ -693,6 +695,52 @@ The routes are in `app/api/routes/`. A user signs in (`/auth/...`, Phase 4) and 
 - **Recorded, not built:** an admin cannot delete or ingest a document through the API (the
   command line on the admin machine does that); there is no admin reading of another user's
   transcript except the masked hidden answers.
+
+## Streamlit frontend (Phase 11)
+The screens are in `frontend/`. It is a separate service: it installs only
+`requirements-frontend.txt` (`streamlit` and `httpx`), imports nothing from `app/`, and needs no
+secret. Run it in your own terminal, with the API running:
+
+    uv pip install -r requirements-frontend.txt
+    uv run streamlit run frontend/app.py
+
+Settings (names only; set them in your shell): `API_BASE_URL` (default `http://127.0.0.1:8000`) and,
+on the admin machine only, `ADMIN_MACHINE=true`. `docs/OWNER_RUNS.md`, Run 17, is a step-by-step look
+at every screen.
+
+- **Everyone:** sign in or create a customer account; ask a question and read the answer with its
+  sources (document, clause, page), warnings, confidence and reduced-mode notices; the disclaimer
+  appears as a footnote only when the service says it applies; thumbs up or down; my chats (resume,
+  delete one, delete all, each after a confirmation); a "test period" notice while the rollout
+  stage hides answers; a "source withdrawn" notice on old answers.
+- **Admins** also get one section at a time: Documents (status; on the admin machine the exact
+  ingest and delete commands to copy, never run from the browser), Entities (read-only except on
+  the admin machine), Review queue (fixed labels), Users and roles, Alerts (a banner on every
+  admin section), Rollout (the stage and the hidden answers) and an Evaluation shell (Phase 13).
+- **Waiting.** There is no streaming. While an answer is on its way the page shows generic stage
+  names and an elapsed timer; they do not claim which step is really running. A service that is
+  waking up (a free Render instance) shows "waking up, up to a minute" and carries on by itself.
+- **Plain text.** Everything from the API is HTML-escaped before it is shown, so it can never
+  become markup or a link. The token lives only in the server-side session (a refresh means signing
+  in again) and is never shown, logged or put in a URL.
+- **Looks.** Light and dark themes follow the viewer's Streamlit theme, with the system font stack.
+  A test checks a contrast of at least 4.5 to 1 for every text colour in both themes. Focus is
+  always visible and the layout works at 360 px.
+- **The `/chat` response** gained `message_id` (null while the transcript write has not ended); the
+  frontend uses it for thumbs.
+
+**Known limitations (recorded in Phase 11)**
+- **Phase 12.** The alerts banner reads the API's in-memory buffer; webhook, persistence and the
+  dashboards come there. The evaluation dashboard is a shell until Phase 13.
+- **Phase 13.** "Add to evaluation set" in the review queue is a disabled button until then.
+- **Phase 15.** Browser refresh signs you out (the token is held server-side per session by design).
+  The Streamlit service's Render settings, health check and the free-tier sleep are written in
+  `DEPLOY.md`. A Streamlit session holds one server thread per open browser tab: size it there.
+- **Time-based stage text.** The "Searching the documents" and similar stage names change on a
+  timer only; they are not progress reports (a decision of the owner).
+- **Not seen in a browser yet.** The tests use Streamlit's own test runner, which does not draw the
+  page: the look, the 360 px layout and the keyboard focus are checked by their CSS rules and by
+  Run 17, which you do in a browser.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

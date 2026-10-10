@@ -55,6 +55,9 @@ class Result:
     disclaimer: bool = False
     cached: bool = False
     session_id: str | None = None
+    # The stored assistant message, for thumbs feedback. None while its transcript write has not
+    # ended (a write that was queued or timed out leaves it None).
+    message_id: str | None = None
     correlation_id: str = ""  # recorded internally, not shown to users
     retry_after: int | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)

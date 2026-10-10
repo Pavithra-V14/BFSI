@@ -367,6 +367,7 @@ async def persist_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
         return
     if ctx.result is not None:
         ctx.result.session_id = job.session_id
+        ctx.result.message_id = job.assistant_message_id
         if ended:
             ctx.result.text = UNCLEAR_END
             ctx.result.reason = "two_unclear_turns"

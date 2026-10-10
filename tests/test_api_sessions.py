@@ -78,6 +78,15 @@ def test_resume_returns_the_whole_transcript_with_citations_and_flags(env):
     assert answer["notice"] is None and "30 days" in answer["text"]
 
 
+def test_resume_returns_the_grounded_flag_false_for_an_answer_stored_as_not_verified(env):
+    _, token = env.user_token("asha_rao")
+    session_id = start(env, token)
+    env.execute("UPDATE messages SET grounded = 0 WHERE role = 'assistant'")
+    body = env.client.get(f"/sessions/{session_id}", headers=env.bearer(token)).json()
+    answer = [m for m in body["messages"] if m["role"] == "assistant"][0]
+    assert answer["grounded"] is False  # the frontend shows its "not fully verified" notice
+
+
 def test_resume_pages_are_limited(env):
     _, token = env.user_token("asha_rao")
     session_id = start(env, token)

@@ -46,7 +46,7 @@ def test_a_chat_returns_a_cited_answer_and_stores_the_turn(chat_env):
     assert body["citations"][0]["doc_id"] == "doc-a"
     assert set(body) == {
         "answer_visible", "kind", "text", "reason", "citations", "warnings", "confidence",
-        "degraded", "disclaimer", "session_id",
+        "degraded", "disclaimer", "session_id", "message_id",
     }  # fmt: skip
     assert "correlation_id" not in body and "tokens" not in body and "audit" not in body
     rows = stored(chat_env, body["session_id"])
@@ -352,6 +352,50 @@ def test_a_chat_whose_write_timed_out_keeps_its_connection_until_the_write_ends(
             break
         time.sleep(0.05)
     assert len(closes) > started + during  # one more close happened AFTER the write ended
+
+
+def test_the_answer_carries_the_id_of_its_stored_assistant_message(chat_env):
+    _, token = chat_env.user_token("asha_rao")
+    body = chat_env.chat(token).json()
+    stored_ids = chat_env.rows(
+        "SELECT id FROM messages WHERE session_id = ? AND role = 'assistant'", (body["session_id"],)
+    )
+    assert stored_ids == [(body["message_id"],)]
+    # and it is the id feedback takes
+    rated = chat_env.client.post(
+        f"/messages/{body['message_id']}/feedback",
+        json={"rating": "up"},
+        headers=chat_env.bearer(token),
+    )
+    assert rated.status_code == 200
+
+
+def test_a_hidden_answer_carries_no_message_id(chat_env):
+    chat_env.set_stage_in_database("shadow")
+    _, token = chat_env.user_token("asha_rao")
+    body = chat_env.chat(token).json()
+    assert set(body) == SHADOW_KEYS  # no message id for an answer the user may not see
+
+
+def test_the_message_id_is_null_while_the_transcript_write_has_not_ended(chat_env, monkeypatch):
+    from app.memory import store
+
+    gate = threading.Event()
+    real = store.add_user_message
+
+    def slow(*args, **kwargs):
+        gate.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_user_message", slow)
+    chat_env.rig.deps.config = PipelineConfig(
+        node_limits=dict(NODE_LIMITS) | {"persist": (0.3, 0.1)}
+    )
+    _, token = chat_env.user_token("asha_rao")
+    response = chat_env.chat(token)
+    gate.set()
+    assert response.status_code == 200
+    assert response.json()["message_id"] is None  # queued: the frontend disables thumbs
 
 
 # ---- the start-up check ----------

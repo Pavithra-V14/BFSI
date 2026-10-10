@@ -58,8 +58,9 @@ session must follow.
 | Cache | Upstash (Redis protocol) |
 | Migrations | Numbered SQL files with a small runner |
 
-Four separate dependency files: `requirements.txt` (runtime only),
-`requirements-ingest.txt`, `requirements-eval.txt`, `requirements-dev.txt`.
+Five separate dependency files: `requirements.txt` (runtime only: the API),
+`requirements-frontend.txt` (the Streamlit service: `streamlit` and `httpx` only, nothing from
+`app/`), `requirements-ingest.txt`, `requirements-eval.txt`, `requirements-dev.txt`.
 Ingestion, entity extraction, evaluation and load tests run locally only.
 Production (Render) serves queries only.
 
@@ -95,7 +96,11 @@ Production (Render) serves queries only.
 - Format: `uv run ruff format .`
 - Run the API (the owner, in his own terminal; settings come from the shell, never a file):
   `uv run uvicorn app.api.main:create_app_from_env --factory`. It refuses to start on a missing,
-  short or placeholder `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`. Streamlit: TBD (Phase 11).
+  short or placeholder `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`.
+- Run the frontend (the owner, in his own terminal; install `requirements-frontend.txt` first):
+  `uv run streamlit run frontend/app.py`. It reads `API_BASE_URL` (default: the API on this
+  machine) and, on the admin machine only, `ADMIN_MACHINE=true`. It needs no secret and imports
+  nothing from `app/`.
 - Create or deactivate accounts (owner only, hidden password prompt, never by Claude):
   `uv run python -m app.accounts.admin_cli create-admin --username NAME --email ADDRESS`.
 - Apply migrations: `uv run python -m app.db.migrate` (add `--dry-run` to list pending

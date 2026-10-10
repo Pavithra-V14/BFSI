@@ -92,6 +92,7 @@ def _body(result: Any) -> dict[str, Any]:
         "degraded": list(result.degraded),
         "disclaimer": bool(result.disclaimer),
         "session_id": result.session_id,
+        "message_id": result.message_id,
     }
 
 

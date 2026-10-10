@@ -81,6 +81,7 @@ never set.)
 | 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
 | 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
 | 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | PENDING |
+| 17 | Look at every screen of the Streamlit frontend, with the API running | Phase 11 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -1037,6 +1038,87 @@ It asks you to type the id.
   25 calls. Free tiers: as in Run 12.
 - **Safe to repeat:** yes (use a new test username, or reuse the account and skip registering).
 
+
+## Run 17. Look at every screen of the Streamlit frontend
+
+- **Verifies:** Phase 11 (the screens, in a real browser: the look in the light and dark themes,
+  the layout on a narrow window, keyboard focus, the waiting states, and that the admin
+  controls appear only where they should). The tests cannot draw a page, so this is the check of
+  what you actually see.
+- **Before it:** Run 16 (the API runs locally with a database that has the migrations, an admin
+  account and the three sample documents), and Run 12's variables for the API. Two PowerShell
+  windows: A for the API, B for the frontend.
+- **Needs (names only):** window A: as in Run 16. Window B: `API_BASE_URL` (optional; the
+  default is the API on this machine) and `ADMIN_MACHINE`. No key and no password is set in
+  window B: you type passwords into the page.
+- **Step 1. Install the frontend packages (window B):**
+
+      uv pip install -r requirements-frontend.txt
+
+  This installs only `streamlit`, `httpx` and what they need. It should not install torch, spaCy
+  or anything of the API (`uv pip list` shows them from earlier phases; they are not this
+  service's).
+- **Step 2. Start the API (window A):** as in Run 16, step 2. Wait for `Uvicorn running`.
+- **Step 3. Start the frontend as a customer would see it (window B):**
+
+      Remove-Item Env:ADMIN_MACHINE -ErrorAction SilentlyContinue
+      uv run streamlit run frontend/app.py
+
+  A browser tab opens at `http://localhost:8501`. You should see the sign-in page: a "BFSI
+  Assistant" title, two tabs ("Sign in", "Create account"), and no warning about usage statistics.
+- **Step 4. Create a customer account and sign in.** Create an account in the second tab, then sign
+  in. You should see the chat page with "Ask about a policy or regulation" at the bottom and your
+  name and "(Customer)" in the left column. No admin sections are shown.
+- **Step 5. Ask.** Ask `What deductible applies to storm and flood claims?`. While it works you
+  should see "Checking your question", then other stage names and a timer in seconds. Then the
+  answer card: the answer, source chips such as `doc-id · clause 4.2 · page 7`, and, where the
+  service says so, notices in words (a warning, a reduced-mode notice, the disclaimer as a small
+  footnote). Click "👍 Helpful": you should see "Thank you, your feedback was noted." and the
+  buttons go away. (While the rollout stage is `shadow` you will see the "Test period" notice
+  instead of an answer: that is correct; open the stage as an admin in Step 8 and ask again.)
+- **Step 6. Chats.** Click "New chat", ask another question, then click the first chat in the list:
+  it should open with its earlier messages. Click "Delete this chat": you should be asked
+  "Delete this chat?" and nothing is deleted until you click "Yes, delete". Click "Keep" to cancel.
+- **Step 7. Themes, narrow window, keyboard.** In the browser's menu, switch the theme to dark and
+  back: all text should stay easy to read in both. Make the window narrow (about 360 px): nothing
+  should scroll sideways and the text keeps a small margin on both sides. Press Tab repeatedly: a
+  thick blue outline should show on whatever has focus, in both themes.
+- **Step 8. Admin view.** Sign out. Sign in as your admin account. You should see a row of
+  sections: Chat, Documents, Entities, Review queue, Users, Alerts, Rollout, Evaluation. Open each:
+  Documents shows your three documents with counts and says "done on the admin machine"; Entities
+  is read-only; Review queue lists items and has a "Label" box with five fixed labels; Users shows
+  accounts (no hashes or emails); Alerts shows "All quiet" or the critical events; Rollout shows
+  the stage and lets you change it; Evaluation says "Not available yet".
+- **Step 9. The admin machine view.** Stop the frontend (Ctrl+C in window B) and start it as the
+  admin machine:
+
+      $env:ADMIN_MACHINE = "true"
+      uv run streamlit run frontend/app.py
+
+  Sign in as admin: Documents now also shows the exact ingest and delete commands to copy (the
+  page never runs them), and Entities shows "Approve" and "Reject". Approving needs
+  `ENTITY_REVIEW_ENABLED=true` in window A (Run 16, step 9b); without it the page says "Entity
+  review is not switched on on this machine." Remove the variable again afterwards.
+- **Step 10. The service waking up.** Stop the API (Ctrl+C in window A), then ask a question in the
+  page. You should see "The service is waking up" with a timer (not an error), and after up to
+  about 75 seconds "The service is still not ready. Please try again in a minute." Start the API
+  again and ask once more: it answers.
+- **If a line differs:**
+  - A blank page or a red error box: send the last lines of window B (the page itself shows only
+    a generic message by design).
+  - "Set-up problem: API_BASE_URL must be a web address": fix the variable and restart.
+  - Text hard to read in one theme, a sideways scroll at 360 px, or no focus outline: send a
+    screenshot and the theme name.
+  - Any answer that shows a link you can click, or markup characters turned into formatting: stop
+    and send a screenshot (a rendering fault).
+- **Send back:** for each step "ok" or what differed, and screenshots only of layout problems.
+  Never a token, a password or an answer's text.
+- **Clear:** close both windows and the browser tab. Remove `ADMIN_MACHINE` and
+  `ENTITY_REVIEW_ENABLED` from your shell. Nothing is written to disk by the frontend.
+- **Real calls:** the same as Run 16 for each question you ask (about 4 model calls each). Four to
+  six questions in all.
+- **Safe to repeat:** yes.
+
 ---
 
 # C. Added by later phases
@@ -1051,7 +1133,7 @@ Known candidates, not yet written (the phase that creates the code writes the ru
 
 - Phase 9 (cache hardening): written above (Runs 14 and 15).
 - Phase 10 (chat API): written above (Run 16).
-- Phase 11 (Streamlit): a look at the screens, with the API running.
+- Phase 11 (Streamlit): written above (Run 17).
 - Phase 12 (observability): the Langfuse retention and dashboard check.
 - Phase 13 and 16 (evaluation, baseline): the evaluation runs (they use real provider keys and
   need your approval first).
