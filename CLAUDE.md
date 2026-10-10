@@ -109,6 +109,12 @@ Production (Render) serves queries only.
   Claude): `uv run python scripts/gateway_smoke.py --run`. It does nothing without `--run`.
 
 ## Definition of done for a phase (proposal, not in the spec)
+- Every real-service check the phase needs (a smoke script, a migration, an ingest, a key check)
+  is appended to `docs/OWNER_RUNS.md` in its standard shape (what it verifies, what must come
+  before, the variable names and how to set them, the exact commands, the expected output line
+  by line, what to do if a line differs, what to send back, how to clear, the call count and
+  limits, whether it is safe to repeat) **before the phase can be called closed**. Claude never
+  runs these.
 - Unit tests for the phase pass using the isolation guard (no production URLs).
 - No secret values in the diff or in any output.
 - A short summary lists the files created or changed and what each does.

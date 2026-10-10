@@ -5,12 +5,14 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 8 built and committed; hardening round 2 written, awaiting the owner's "commit" (next is Phase 9)
+Current phase: Phase 8 closed (commits 52cdc7b and 317de83); next is Phase 9, only when the owner asks
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
   sample company PDFs. This is the source of truth.
 - `CLAUDE.md` : the rules every Claude Code session reads.
+- `docs/OWNER_RUNS.md` : the checklist of every run you do yourself with real keys and real
+  services (what is done, what is pending, in order, with the commands and what you should see).
 - `.claude/` : Claude Code settings, hook scripts and any approved skills or
   agents.
 - `app/` : application code. Phase 1 holds the isolation guard and the migration runner.

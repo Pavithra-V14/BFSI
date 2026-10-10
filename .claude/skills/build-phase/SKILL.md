@@ -33,6 +33,10 @@ Follow them as written. They are not repeated here.
    - the test results, including any failure, stated plainly,
    - the [P] and [T] items this phase touched,
    - spec ambiguities or decisions you made that the owner should confirm.
-7. Update the line "Current phase: ..." in `README.md` to show this phase as
+7. If the phase has any check that needs real keys or real services, append it
+   to `docs/OWNER_RUNS.md` in the standard shape (see the file's section C and
+   `CLAUDE.md`, "Definition of done"), and add it to the table at the top. A
+   phase with such a check is not closed until it is there.
+8. Update the line "Current phase: ..." in `README.md` to show this phase as
    finished and awaiting approval.
-8. Stop. Do not start the next phase. Wait for the owner's approval.
+9. Stop. Do not start the next phase. Wait for the owner's approval.
