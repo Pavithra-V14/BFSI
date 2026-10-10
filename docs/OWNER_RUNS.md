@@ -570,9 +570,13 @@ after (g), with the same variables. It adds a document; it does not change the o
       persist              OK        ...
       respond              OK        ...
       RESULT               ANSWER    reason=None citations=N warnings=0 degraded=None cached=False confidence=None tokens=NNN seconds=NN.N
+      cited doc ids: <the id of the sample document, for example insurance-flexi-property>
+      review rows: 0
       done: the pipeline answered
 
-  `authenticate` is SKIPPED because the smoke run has no rate limiter; `rewrite` is SKIPPED
+  `cited doc ids` must name the document the question is about (insurance question:
+  `insurance-flexi-property`; banking: `banking-rtl-facility`; eCAS: `finserv-mf-ecas`), never
+  text. `review rows: 0` for an answer. `authenticate` is SKIPPED because the smoke run has no rate limiter; `rewrite` is SKIPPED
   because a first message that is clear needs no rewrite; `cache_write` is SKIPPED because the
   run has no cache. Exit code 0 means an answer. The question and the answer text are never
   printed.
@@ -636,20 +640,26 @@ It asks you to type the id.
   `generate` or `output_guard` line: nothing was generated), then
 
       RESULT               REFUSAL   reason=no_context citations=0 warnings=0 degraded=None cached=False confidence=None tokens=NNN seconds=NN.N
+      cited doc ids: none
+      review rows: 1
       done: the pipeline did not answer
 
-  Exit code **1** (a refusal is "did not answer": that is the expected result here).
-- **The review row:** a no-reliable-context refusal is queued for review, and the `persist OK`
-  line is where that row is written. The smoke script writes it to its throw-away database,
-  which is deleted when the script ends, so the row itself cannot be seen in your real
-  database. The only sign you can check is `persist OK` together with `reason=no_context`. If
-  you want the row visible (a `review rows: N` line, counts only), ask for it as a small change
-  to the script in a later round: I have not added it.
+  Exit code **1** (a refusal is "did not answer": that is the expected result here). The check
+  is the two new lines: **`cited doc ids: none`** and **`review rows: 1`**.
+- **About `review rows`:** a no-reliable-context refusal is queued for review, and the
+  `persist OK` line is where that row is written. The script writes it to its throw-away
+  database and prints how many rows it holds (a count: never the row, which holds the masked
+  question) just before the file is deleted. Your real database is not touched.
 - **If it differs:**
-  - `RESULT ANSWER` with `citations=1` or more: a customer was answered. The script does not
-    print which document the citation is from, so stop, keep the output, and tell your advisor:
-    it is either another sample that mentions the same folio (unlikely) or a real isolation
-    failure. Do not go on.
+  - `cited doc ids:` shows `ecas-staff-only` (or any id) and `RESULT ANSWER`: a customer was
+    answered from a document. Stop, keep the output, and tell your advisor: with the customer
+    copy deleted, the only document that can answer is the staff-only one, so this is a real
+    isolation failure. Do not go on.
+  - `cited doc ids:` shows another id (for example `banking-rtl-facility`): the customer was
+    answered from a customer document that happens to mention the same folio (unlikely);
+    send the line.
+  - `review rows: 0` with `reason=no_context`: the refusal was not queued: send the output.
+    `review rows: unknown`: the count could not be read: send the output.
   - `reason=` something else (`out_of_domain`, `unclear`): the question was judged before
     retrieval; send the line.
   - `RESULT UNAVAILABLE`: a provider or store failed; run again.
@@ -662,12 +672,18 @@ It asks you to type the id.
   then
 
       RESULT               ANSWER    reason=None citations=1 warnings=0 degraded=None cached=False confidence=None tokens=NNN seconds=NN.N
+      cited doc ids: ecas-staff-only
+      review rows: 0
       done: the pipeline answered
 
-  `citations` is 1 or more. Exit code 0. (The answer text is not printed.)
+  `citations` is 1 or more. Exit code 0. (The answer text is not printed.) The check is
+  **`cited doc ids: ecas-staff-only`**: the staff-only copy, and only that id. `review rows: 0`
+  (an answer is not queued).
 - **If it differs:** `REFUSAL reason=no_context` as staff means the staff copy is not being
   found: run `status --doc-id ecas-staff-only` (it must say `active 21`) and send both outputs.
-  `warnings=` above 0 or `confidence=low`: the answer was labelled; send the numbers.
+  `cited doc ids:` showing another id means the staff answer came from a different document:
+  send the line. `warnings=` above 0 or `confidence=low`: the answer was labelled (and
+  `review rows: 1` would be the low-confidence row): send the numbers.
 
 **Step 4. Delete the staff-only copy with the delete command.**
 
@@ -687,10 +703,12 @@ It asks you to type the id.
     uv run python scripts/pipeline_smoke.py --run --role staff --question "Which folio is pending nomination opt-in or opt-out?"
 
 - **You should see (both):** the same shape as Step 2: `context_guard OK`, `persist OK`,
-  `RESULT REFUSAL reason=no_context citations=0 ...`, `done: the pipeline did not answer`, exit
-  code 1.
-- **If it differs:** an `ANSWER` for staff after the delete means a deleted chunk is still
-  retrieved: stop and send the output (this would be a deletion or filter fault).
+  `RESULT REFUSAL reason=no_context citations=0 ...`, **`cited doc ids: none`**,
+  **`review rows: 1`**, `done: the pipeline did not answer`, exit code 1. (Each run has its own
+  throw-away database, so each shows `review rows: 1` for its own refusal.)
+- **If it differs:** an `ANSWER` for staff after the delete, or `cited doc ids:` showing
+  `ecas-staff-only`, means a deleted chunk is still retrieved: stop and send the output (this
+  would be a deletion or filter fault).
 
 **Step 6. Put the customer copy back.**
 
@@ -701,8 +719,10 @@ It asks you to type the id.
   exit code 0 (quick: the answers are cached). Then `status --doc-id finserv-mf-ecas` shows
   `active 21`.
 
-- **Send back:** for each smoke command only its role, the `RESULT` line, and the exit code;
-  for each ingest, delete and status the counts lines. Never the question's answer text.
+- **Send back:** for each smoke command its role, the `RESULT` line, the `cited doc ids:` line,
+  the `review rows:` line and the exit code; for each ingest, delete and status the counts
+  lines. Never the question's answer text. (The ids are document ids you chose, such as
+  `ecas-staff-only`: safe to send.)
 - **Clear:** the variables, as in Run 10 and Run 12.
 - **Real calls:** four smoke commands in all (Step 2, Step 3 and the two of Step 5). Each
   refusal makes a Jev decision, an embedding and a rerank (about 3 calls); the staff answer

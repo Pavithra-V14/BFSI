@@ -30,6 +30,11 @@ What it touches, in plain words:
   cached answer, exactly as the live service would).
 - Real model providers are called with your own keys: this is the point of the script.
 
+After the RESULT line it prints two more lines: "cited doc ids: ..." (the ids of the documents the
+answer cites, never a title or text; "none" for a refusal) and "review rows: N" (how many rows the
+run wrote to its throw-away review queue, read before the file is deleted: a refusal for no
+reliable context writes 1).
+
 Nothing happens without --run. By default it uses only the variables already set in your shell
 (settings come from the shell, as for the API). With --load-env it also reads your .env file itself,
 only the variables that .env.example lists and that this script needs, only into this process, and
@@ -153,6 +158,26 @@ def report_langfuse(sink: langfuse_sink.LangfuseSink | None, off: bool) -> int:
     return 1
 
 
+def cited_doc_ids(citations: list) -> str:
+    """The distinct document ids the answer cites, comma-separated, or "none". Ids only: never a
+    title, a source name, a clause or any text. An id that does not look like an id is hidden."""
+    found = {str(c.get("doc_id")) for c in citations if isinstance(c, dict) and c.get("doc_id")}
+    if not found:
+        return "none"
+    shown = [safe_value(doc_id) or "<hidden>" for doc_id in sorted(found)]
+    return ",".join(str(item) for item in shown)
+
+
+def review_row_count(db: Database) -> str:
+    """How many rows the run put in its throw-away review queue (a count: the rows hold the masked
+    question and are deleted with the file). "unknown" if it cannot be read."""
+    try:
+        row = db.query_one("SELECT COUNT(*) FROM review_queue")
+        return str(int(row[0])) if row else "0"
+    except Exception:
+        return "unknown"
+
+
 async def smoke(deps: Deps, db: Database, user_id: str, role: str, question: str) -> int:
     started = time.perf_counter()
     if not deps.masker.ready:
@@ -192,6 +217,8 @@ async def smoke(deps: Deps, db: Database, user_id: str, role: str, question: str
         tokens=result.tokens,
         seconds=round(time.perf_counter() - started, 1),
     )
+    print(f"cited doc ids: {cited_doc_ids(result.citations)}")
+    print(f"review rows: {review_row_count(db)}")
     if events:
         line("events", "SEEN", names=",".join(sorted(set(events))))
     return 0 if result.kind == "answer" else 1
