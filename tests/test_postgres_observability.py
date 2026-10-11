@@ -119,13 +119,25 @@ def test_the_trace_queue_works_on_postgres(db, monkeypatch):
     traces.enqueue(db, ["h1"], NOW)  # the unique index makes this a no-op
     assert traces.pending_count(db) == 2
 
+    present = {"h1": ["t1"], "h2": ["t2"]}
+
     def handler(request):
         if request.method == "GET":
-            return httpx.Response(200, json={"data": [{"id": "t1"}]})
+            ids = present.get(request.url.params["sessionId"], [])
+            return httpx.Response(200, json={"data": [{"id": i} for i in ids]})
+        trace_id = request.url.path.rsplit("/", 1)[1]
+        for ids in present.values():
+            if trace_id in ids:
+                ids.remove(trace_id)
         return httpx.Response(200, json={})
 
     monkeypatch.setattr(traces, "TRANSPORT", httpx.MockTransport(handler))
-    result = traces.process_pending(db, traces.TraceDeleter.from_config(CONFIG), NOW)
+    deleter = traces.TraceDeleter.from_config(CONFIG)
+    first = traces.process_pending(db, deleter, NOW)
+    # the traces are gone, but a row waits for a clean look at least 10 minutes after it was queued
+    assert first.removed_chats == 0 and traces.pending_count(db) == 2
+    later = NOW + timedelta(seconds=traces.GRACE_SECONDS + 60)
+    result = traces.process_pending(db, deleter, later)
     assert result.removed_chats == 2 and traces.pending_count(db) == 0
 
 
