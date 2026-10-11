@@ -87,6 +87,27 @@ def test_resume_returns_the_grounded_flag_false_for_an_answer_stored_as_not_veri
     assert answer["grounded"] is False  # the frontend shows its "not fully verified" notice
 
 
+def test_resume_marks_a_greeting_as_a_fixed_reply_and_an_answer_as_an_answer(env):
+    _, token = env.user_token("asha_rao")
+    greeted = start(env, token, "Hello!")
+    asked = start(env, token)
+    kind = {}
+    for name, session_id in (("greeting", greeted), ("question", asked)):
+        body = env.client.get(f"/sessions/{session_id}", headers=env.bearer(token)).json()
+        roles = {m["role"]: m for m in body["messages"]}
+        kind[name] = roles["assistant"]["kind"]
+        assert roles["user"]["kind"] is None  # the marker is for assistant messages only
+    assert kind == {"greeting": "fixed_reply", "question": "answer"}
+
+
+def test_the_fixed_reply_marker_is_stored_when_the_message_is_written(env):
+    _, token = env.user_token("asha_rao")
+    start(env, token, "Hello!")
+    start(env, token)
+    rows = env.rows("SELECT fixed_reply FROM messages WHERE role = 'assistant' ORDER BY created_at")
+    assert [bool(r[0]) for r in rows] == [True, False]
+
+
 def test_resume_pages_are_limited(env):
     _, token = env.user_token("asha_rao")
     session_id = start(env, token)

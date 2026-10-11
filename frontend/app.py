@@ -19,8 +19,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from frontend import messages, render, state, theme  # noqa: E402
-from frontend.api import ApiClient  # noqa: E402
-from frontend.config import ConfigError, load_settings  # noqa: E402
+from frontend.api import ApiClient, SessionExpired  # noqa: E402
+from frontend.config import ConfigError, config_file_found, load_settings  # noqa: E402
 from frontend.views import admin  # noqa: E402
 from frontend.views.auth import render_auth  # noqa: E402
 from frontend.views.chat import render_chat  # noqa: E402
@@ -35,11 +35,29 @@ def main() -> None:
     except ConfigError as error:
         render.show_notice("danger", "Set-up problem", str(error), urgent=True)
         return
+    if not config_file_found():
+        render.show_notice(
+            "warn", messages.CONFIG_MISSING_TITLE, messages.CONFIG_MISSING_TEXT, urgent=True
+        )
+    if settings.insecure_api:
+        render.show_notice(
+            "danger", messages.INSECURE_API_TITLE, messages.INSECURE_API_TEXT, urgent=True
+        )
     token = state.token()
     if token is None:
         render_auth(settings)
         return
     client = ApiClient(settings, token)
+    try:
+        _signed_in_page(client, settings)
+    except SessionExpired:
+        # One place for every API call: the service no longer accepts this sign-in.
+        state.sign_out()
+        state.flash("warn", "Signed out", messages.SIGNED_OUT)
+        st.rerun()
+
+
+def _signed_in_page(client: ApiClient, settings) -> None:  # noqa: ANN001
     render_sidebar(client)
     flash = state.take_flash()
     if flash:

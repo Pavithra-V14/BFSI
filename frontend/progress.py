@@ -39,7 +39,15 @@ def wait_with_progress(
     """Run `work` (a blocking API call) in a thread and keep `placeholder` updated meanwhile."""
     clock = clock or time.monotonic
     box: list[Reply] = []
-    thread = threading.Thread(target=lambda: box.append(work()), daemon=True)
+    failed: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            box.append(work())
+        except BaseException as error:  # handed to the caller, which owns the page
+            failed.append(error)
+
+    thread = threading.Thread(target=target, daemon=True)
     started = clock()
     thread.start()
     while True:
@@ -49,6 +57,8 @@ def wait_with_progress(
         elapsed = clock() - started
         placeholder.html(render.waiting(stage_for(elapsed), f"{int(elapsed)} s"))
     placeholder.empty()
+    if failed:
+        raise failed[0]
     return box[0] if box else Reply("timeout")
 
 

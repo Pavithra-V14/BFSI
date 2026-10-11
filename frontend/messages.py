@@ -21,6 +21,31 @@ TIMEOUT_TEXT = (
 )
 GENERIC_ERROR = "Something went wrong. Please try again in a moment."
 SIGNED_OUT = "Please sign in again."
+CONNECTION_ERROR = (
+    "The connection to the service was interrupted. Your question may have been received: "
+    "open your chats on the left before asking it again."
+)
+INSECURE_API_TITLE = "Not a secure connection"
+INSECURE_API_TEXT = (
+    "The service address does not start with https, so passwords and your sign-in would travel "
+    "unprotected. Do not sign in here. Tell the person who runs this service."
+)
+CONFIG_MISSING_TITLE = "Safety settings may not be active"
+CONFIG_MISSING_TEXT = (
+    "This page was started from a different folder than the project folder, so its settings "
+    "file was not found. Tell the person who runs this service."
+)
+INTERRUPTED_TITLE = "Question not sent"
+INTERRUPTED_TEXT = (
+    "You sent another question while an answer was still on its way, so the page stopped "
+    "waiting for the first one. It may still be answered: open it from My chats on the left. "
+    "Please ask your new question again once the answer has arrived."
+)
+LOGOUT_FAILED_TITLE = "Signed out on this page only"
+LOGOUT_FAILED_TEXT = (
+    "The service could not be reached to end your sign-in, so it stays valid there until it "
+    "expires. If this is a shared computer, sign in again later and sign out."
+)
 
 # Stages shown while an answer is on its way. They are generic and time-based: the service does
 # not report its progress, so these do not claim which step is running.
@@ -61,6 +86,7 @@ ERROR_TEXT = {
     "over_budget": "You have reached today's usage limit. Please try again tomorrow.",
     "busy": "Your previous message is still being answered. Please wait for it to finish.",
     "starting_up": "The service is starting up. Please try again in a minute.",
+    "connection_error": CONNECTION_ERROR,
     "service_unavailable": "This service is temporarily unavailable. Please try again shortly.",
     "forbidden": "You do not have access to this.",
     "not_found": "That could not be found.",

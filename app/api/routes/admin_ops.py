@@ -394,7 +394,7 @@ def shadow_answers(
             "SELECT m.id, m.session_id, m.created_at, m.content, m.citations, m.grounded, "
             "s.user_id, (SELECT q.content FROM messages q WHERE q.session_id = m.session_id "
             "AND q.role = 'user' AND q.seq < m.seq ORDER BY q.seq DESC LIMIT 1), "
-            "m.source_removed "
+            "m.source_removed, m.fixed_reply "
             "FROM messages m JOIN sessions s ON s.id = m.session_id "
             "WHERE m.role = 'assistant' AND m.shadowed = ? "
             "ORDER BY m.created_at DESC, m.id LIMIT ? OFFSET ?",
@@ -421,6 +421,7 @@ def shadow_answers(
                 "answer": answer,
                 "citations": citations,
                 "grounded": None if row[5] is None else bool(row[5]),
+                "kind": "fixed_reply" if row[9] else "answer",
                 "source_removed": removed,
                 "user": audit.keyed_hash(key, "shadow-user", row[6]),
             }

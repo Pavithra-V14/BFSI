@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 10 closed; Phase 11 (Streamlit frontend) built, awaiting the owner's "commit" and approval (next is Phase 12)
+Current phase: Phase 10 closed; Phase 11 (Streamlit frontend) committed (0dd9ffd), round 2 "Phase 11 hardening" built, awaiting the owner's "commit" and approval (next is Phase 12)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -732,12 +732,31 @@ at every screen.
 **Known limitations (recorded in Phase 11)**
 - **Phase 12.** The alerts banner reads the API's in-memory buffer; webhook, persistence and the
   dashboards come there. The evaluation dashboard is a shell until Phase 13.
+- **Phase 14.** The sidebar asks the service for the chat list on every page update, and an
+  admin section makes two list calls plus the alerts call per update. Bounded by what a person
+  clicks; a cache or a smaller call belongs to the load-test round.
 - **Phase 13.** "Add to evaluation set" in the review queue is a disabled button until then.
+- **Phase 15.** Two deploy requirements for `DEPLOY.md`: the Streamlit start command must run from
+  the repository root (Streamlit reads `.streamlit/config.toml` from the folder it is started in
+  only; from anywhere else the safety settings are off and the page warns), and `API_BASE_URL`
+  must always be an https address on Render (the page warns on plain http to another host).
 - **Phase 15.** Browser refresh signs you out (the token is held server-side per session by design).
   The Streamlit service's Render settings, health check and the free-tier sleep are written in
   `DEPLOY.md`. A Streamlit session holds one server thread per open browser tab: size it there.
 - **Time-based stage text.** The "Searching the documents" and similar stage names change on a
   timer only; they are not progress reports (a decision of the owner).
+- **Narrow tables.** A table with several columns (`st.dataframe`) scrolls sideways inside its own
+  box at 360 px; the page itself does not. Accepted for the pilot (admin screens).
+- **Contrast.** The checked claim is for app-authored markup. Streamlit's own widgets follow
+  Streamlit's theme; their captions are forced to the checked muted colour, and the rest is
+  checked with a contrast tool in Run 17.
+- **Older messages.** `messages.fixed_reply` (migration 0008) is set as messages are written. A
+  greeting or refusal stored before it reads as an answer on resume and can show the "not fully
+  verified" notice; nothing is guessed to repair them.
+- **Theme.** If Streamlit cannot tell the viewer's theme the page uses the light tokens; Run 17
+  step 7 checks the switch in a browser.
+- **The design paragraphs.** The Phase 11 [P] paragraphs of spec section 24 were written by the
+  builder from the design you approved; they are listed for your confirmation before release.
 - **Not seen in a browser yet.** The tests use Streamlit's own test runner, which does not draw the
   page: the look, the 360 px layout and the keyboard focus are checked by their CSS rules and by
   Run 17, which you do in a browser.

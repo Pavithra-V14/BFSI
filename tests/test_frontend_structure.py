@@ -103,18 +103,144 @@ def test_streamlit_markdown_is_never_used_outside_the_theme():
             assert dotted(call.func) not in ("st.markdown", "st.write", "st.text"), path.name
 
 
-def test_model_and_api_text_goes_only_through_the_escaping_fragments():
-    """`st.html` is called with a fragment from `render` only: a variable named `fragment`, or a
-    call of one of render's own builders, never a raw string from the API."""
-    allowed = {"fragment"}
+def html_violations(tree: ast.AST, name: str) -> list[str]:
+    """Calls that put markup on the page (`st.html`, `render.show`, `<placeholder>.html`) with
+    anything but a fragment built by one of `render`'s own builders. A raw string, an f-string, a
+    sum of strings or a plain variable is refused: only `render.show` itself may pass its own
+    `fragment` argument on to `st.html`."""
+    found: list[str] = []
+    for call in calls(tree):
+        target = dotted(call.func)
+        if not (target in ("st.html", "render.show") or target.endswith(".html")):
+            continue
+        if not call.args:
+            found.append(f"{name}: {target}() without an argument")
+            continue
+        arg = call.args[0]
+        built = isinstance(arg, ast.Call) and dotted(arg.func).startswith("render.")
+        passed_on = name == "render.py" and isinstance(arg, ast.Name) and arg.id == "fragment"
+        if not (built or passed_on):
+            found.append(f"{name}: {target}({ast.unparse(arg)})")
+    return found
+
+
+def test_markup_reaches_the_page_only_through_the_escaping_builders():
     for path in FILES:
-        for call in calls(parse(path)):
-            if dotted(call.func) in ("st.html", "placeholder.html"):
-                arg = call.args[0]
-                ok = (isinstance(arg, ast.Name) and arg.id in allowed) or (
-                    isinstance(arg, ast.Call) and dotted(arg.func).startswith("render.")
-                )
-                assert ok, (path.name, ast.unparse(arg))
+        assert html_violations(parse(path), path.name) == [], path.name
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'render.show("<p>raw</p>")',
+        'render.show(f"<p>{value}</p>")',
+        'render.show("<p>" + value + "</p>")',
+        "render.show(value)",
+        'st.html("<b>x</b>")',
+        'slot.html(f"<i>{text}</i>")',
+        "st.html(fragment)",
+    ],
+)
+def test_the_markup_check_refuses_a_raw_string_a_variable_and_a_sum(source):
+    assert html_violations(ast.parse(source), "other.py"), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["render.show(render.notice('warn', 'a', b))", "slot.html(render.waiting('a', 'b'))"],
+)
+def test_the_markup_check_accepts_a_builder_call(source):
+    assert html_violations(ast.parse(source), "other.py") == []
+
+
+WIDGETS = (
+    "button", "form_submit_button", "checkbox", "selectbox", "radio", "expander", "caption",
+    "subheader", "text_input", "header", "toggle", "multiselect", "tabs", "chat_input",
+)  # fmt: skip
+
+
+def label_violations(tree: ast.AST, name: str) -> list[str]:
+    """The text a Streamlit widget shows is markdown. Its label must be a literal, a choice between
+    literals, or come from `render.label_text` / `render.safe_text`; a `format_func` must return
+    one of those or a lookup of one of our own fixed texts."""
+    found: list[str] = []
+    ok_calls = ("render.label_text", "render.safe_text", "label_text", "safe_text")
+
+    def fixed(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, ast.IfExp):
+            return fixed(node.body) and fixed(node.orelse)
+        if isinstance(node, ast.Call):
+            return dotted(node.func) in ok_calls
+        if isinstance(node, ast.Attribute):  # messages.NO_FEEDBACK_YET: one of our fixed texts
+            return dotted(node).startswith("messages.")
+        if isinstance(node, ast.Subscript):  # messages.LABEL_TEXT[v]: our own fixed texts
+            return dotted(node.value).startswith("messages.")
+        return False
+
+    for call in calls(tree):
+        method = dotted(call.func).split(".")[-1]
+        if dotted(call.func).startswith("render."):
+            continue  # render's own builders neutralise what they are given
+        if method in WIDGETS and call.args:
+            first = call.args[0]
+            if method == "tabs":
+                bad = not (isinstance(first, ast.List) and all(fixed(e) for e in first.elts))
+            else:
+                bad = not (fixed(first) or (isinstance(first, ast.Name) and first.id == "label"))
+            if bad:
+                found.append(f"{name}: {method}({ast.unparse(first)})")
+        for keyword in call.keywords:
+            if keyword.arg == "format_func":
+                body = keyword.value
+                inner = body.body if isinstance(body, ast.Lambda) else None
+                if inner is None or not fixed(inner):
+                    found.append(f"{name}: format_func={ast.unparse(body)}")
+    return found
+
+
+def test_every_widget_label_is_a_literal_or_comes_through_the_label_neutraliser():
+    seen = 0
+    for path in FILES:
+        tree = parse(path)
+        found = label_violations(tree, path.name)
+        assert found == [], found
+        seen += sum(1 for c in calls(tree) if dotted(c.func).split(".")[-1] in WIDGETS)
+    assert seen > 40  # the check really walked the widgets
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "st.caption(f'Hello {name}')",
+        "st.button(title)",
+        "st.expander(item.get('q'))",
+        "st.selectbox('Entry', ids, format_func=lambda i: by_id[i].get('text'))",
+        "st.radio(options)",
+        "st.checkbox(text)",
+        "col.button(row.get('title'))",
+        "st.tabs([a, 'b'])",
+    ],
+)
+def test_the_label_check_refuses_api_text_in_every_widget_type(source):
+    assert label_violations(ast.parse(source), "other.py"), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "st.caption('Plain words.')",
+        "st.button(render.label_text(row.get('title')), key=k)",
+        "st.expander(render.label_text(x, 70))",
+        "st.selectbox('A', ids, format_func=lambda v: messages.LABEL_TEXT[v])",
+        "st.selectbox('A', ids, format_func=lambda i: render.label_text(by_id[i].get('t'), 60))",
+        "st.button('On' if active else 'Off')",
+        "st.tabs(['Sign in', 'Create account'])",
+    ],
+)
+def test_the_label_check_accepts_literals_and_the_neutraliser(source):
+    assert label_violations(ast.parse(source), "other.py") == []
 
 
 def test_nothing_is_printed_or_logged_by_the_frontend():
@@ -143,23 +269,6 @@ def test_every_button_has_a_text_label_not_only_an_icon():
     assert seen > 10
 
 
-def test_no_label_is_built_from_an_unchecked_api_value():
-    """A button label is markdown. A label that is not a literal must come from `label_text`."""
-    for path in FILES:
-        for call in calls(parse(path)):
-            if dotted(call.func).split(".")[-1] != "button" or not call.args:
-                continue
-            first = call.args[0]
-            if isinstance(first, ast.Constant):
-                continue
-            if isinstance(first, ast.IfExp) and all(
-                isinstance(n, ast.Constant) for n in (first.body, first.orelse)
-            ):
-                continue  # a choice between two literal words
-            text = ast.unparse(first)
-            assert "label_text(" in text or text in ("label",), (path.name, text)
-
-
 # ============================================================================ contrast ====
 def test_the_contrast_function_matches_known_values():
     assert round(theme.contrast_ratio("#000000", "#FFFFFF"), 2) == 21.0
@@ -168,7 +277,10 @@ def test_the_contrast_function_matches_known_values():
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
-def test_every_text_and_background_pair_has_at_least_4_5_to_1(mode):
+def test_every_text_and_background_pair_of_the_app_markup_has_at_least_4_5_to_1(mode):
+    """App-authored markup and the stylesheet only: Streamlit's own widgets follow Streamlit's
+    theme and are checked with a contrast tool in Run 17 (their captions are forced to the muted
+    token below)."""
     tokens = theme.TOKENS[mode]
     for foreground, background in theme.TEXT_PAIRS:
         ratio = theme.contrast_ratio(tokens[foreground], tokens[background])
@@ -217,6 +329,12 @@ def test_text_wraps_and_nothing_has_a_fixed_width_wider_than_a_phone():
 def test_the_stylesheet_loads_nothing_from_another_site():
     sheet = theme.stylesheet("dark")
     assert "@import" not in sheet and "url(" not in sheet and "http" not in sheet
+
+
+def test_streamlits_own_captions_use_the_checked_muted_colour():
+    sheet = theme.stylesheet("light")
+    assert re.search(r'stCaptionContainer"\][^{]*\{[^}]*color:\s*var\(--fx-muted\)', sheet)
+    assert ("muted", "bg") in theme.TEXT_PAIRS and ("muted", "surface") in theme.TEXT_PAIRS
 
 
 def test_motion_is_switched_off_for_people_who_ask():

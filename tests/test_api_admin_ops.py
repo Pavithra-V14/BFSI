@@ -394,7 +394,7 @@ def test_hidden_answers_are_listed_for_the_admin_masked_and_with_a_hashed_user(e
     assert len(item["user"]) == 64  # a keyed hash, not the account
     assert set(item) == {
         "message_id", "session_id", "created_at", "question", "answer", "citations", "grounded",
-        "source_removed", "user",
+        "source_removed", "kind", "user",
     }  # fmt: skip
 
 

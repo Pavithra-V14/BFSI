@@ -82,6 +82,7 @@ class StoredMessage:
     created_at: str
     history_excluded: bool = False
     shadowed: bool = False  # generated while the user was not allowed to see answers
+    fixed_reply: bool = False  # one of our own fixed texts, not a generated answer (0008)
 
 
 @dataclass
@@ -210,7 +211,7 @@ def transcript(
         total = db.query_one("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
         rows = db.query_all(
             "SELECT id, seq, role, content, citations, grounded, source_removed, created_at, "
-            "history_excluded, shadowed FROM messages WHERE session_id = ? "
+            "history_excluded, shadowed, fixed_reply FROM messages WHERE session_id = ? "
             "ORDER BY seq LIMIT ? OFFSET ?",
             (session_id, int(limit), int(offset)),
         )
@@ -235,6 +236,7 @@ def _message(row: tuple) -> StoredMessage:
         str(row[7]),
         bool(row[8]),
         bool(row[9]) if len(row) > 9 else False,
+        bool(row[10]) if len(row) > 10 else False,
     )
 
 
@@ -258,8 +260,8 @@ def load_session(db: Database, user_id: str, session_id: str) -> SessionState:
             floor = int(boundary[0]) if boundary else 0
         rows = db.query_all(
             "SELECT id, seq, role, content, citations, grounded, source_removed, created_at, "
-            "history_excluded, shadowed FROM messages WHERE session_id = ? AND seq > ? "
-            "ORDER BY seq",
+            "history_excluded, shadowed, fixed_reply FROM messages "
+            "WHERE session_id = ? AND seq > ? ORDER BY seq",
             (session_id, floor),
         )
     return SessionState(
@@ -304,6 +306,7 @@ def _add_message(
     history_excluded: bool,
     now: datetime,
     shadowed: bool = False,
+    fixed_reply: bool = False,
 ) -> StoredMessage:
     if not text.strip():
         raise ValueError("a message cannot be empty")
@@ -319,8 +322,8 @@ def _add_message(
             with db.transaction():
                 db.execute(
                     "INSERT INTO messages (id, session_id, seq, role, content, citations, "
-                    "grounded, history_excluded, created_at, shadowed) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "grounded, history_excluded, created_at, shadowed, fixed_reply) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         message_id,
                         session_id,
@@ -332,6 +335,7 @@ def _add_message(
                         history_excluded,
                         stamp,
                         bool(shadowed),
+                        bool(fixed_reply),
                     ),
                 )
                 db.execute(
@@ -354,6 +358,7 @@ def _add_message(
             stamp,
             history_excluded,
             bool(shadowed),
+            bool(fixed_reply),
         )
     raise SeqCollision("could not find a free message number")
 
@@ -429,6 +434,7 @@ def add_fixed_reply(
         False,
         now,
         shadowed=bool(shadowed),
+        fixed_reply=True,
     )
 
 

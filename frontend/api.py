@@ -24,6 +24,11 @@ TRANSPORT: httpx.BaseTransport | None = None
 WAKING_STATUSES = (502, 503, 504)
 
 
+class SessionExpired(Exception):
+    """The service no longer accepts this sign-in (expired, revoked, account switched off). Raised
+    by the client for EVERY call that was made with a token, so one place (the app) signs out."""
+
+
 @dataclass(frozen=True)
 class Reply:
     """What came back. `kind` is `ok`, `error` (the API refused, with a code and a plain message),
@@ -103,13 +108,18 @@ class ApiClient:
                 base_url=self._base, timeout=timeout, transport=TRANSPORT, follow_redirects=False
             ) as client:
                 response = client.request(method, path, json=json, params=params, headers=headers)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
-            return Reply("waking")  # nothing answered: most likely a cold start
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return Reply("waking")  # nothing answered at all: most likely a cold start
         except httpx.TimeoutException:
             return Reply("timeout")  # the request got there, the answer did not come in time
         except httpx.HTTPError:
-            return Reply("waking")
-        return _reply_from(response)
+            # the connection broke after it was made: the request may have been received, so it
+            # is NOT treated as "waking" (which would ask the question again)
+            return Reply("error", code="connection_error")
+        reply = _reply_from(response)
+        if self._token and reply.kind == "error" and reply.code == "not_signed_in":
+            raise SessionExpired
+        return reply
 
     # ---- account ------------------------------------------------------------------------
     def live(self) -> Reply:

@@ -21,7 +21,10 @@ import streamlit as st
 from frontend import messages
 
 MAX_LABEL = 48
-_MARKDOWN_CHARS = re.compile(r"[\[\]()*_`~<>\\#|!]")
+# Characters that make Streamlit label text markdown, a link, a LaTeX formula, an emoji shortcode
+# or a colour (`:red[...]`), an address or an entity. They are dropped from every label.
+_MARKDOWN_CHARS = re.compile(r"[\[\]()*_`~<>\\#|!$:&@{}]")
+_WWW = re.compile(r"(?i)\bwww\.")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f​-‏‪-‮⁦-⁩﻿]")
 
 
@@ -31,10 +34,19 @@ def plain(value: Any) -> str:
     return html.escape(text, quote=True)
 
 
-def label_text(value: Any, limit: int = MAX_LABEL) -> str:
-    """A short plain label for a button: no markdown characters, no line breaks, shortened."""
+def safe_text(value: Any) -> str:
+    """Text for a Streamlit widget, which treats it as markdown: no markdown, link, formula,
+    shortcode or address syntax is left in it (`https://x`, `www.x`, `a@b`, `$x$`, `:warning:`,
+    `&amp;`, `[t](u)`). Line breaks become spaces."""
     text = _CONTROL.sub("", "" if value is None else str(value))
-    text = _MARKDOWN_CHARS.sub("", " ".join(text.split()))
+    text = _WWW.sub("www ", text)
+    text = _MARKDOWN_CHARS.sub("", text)
+    return " ".join(text.split())
+
+
+def label_text(value: Any, limit: int = MAX_LABEL) -> str:
+    """A short plain label for a button, expander or selectbox entry: `safe_text`, shortened."""
+    text = safe_text(value)
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text or "Untitled chat"
@@ -50,6 +62,35 @@ def notice(kind: str, title: str, text: str = "", *, urgent: bool = False) -> st
         f'<div class="fx-notice fx-notice-{plain(kind)}" role="{role}">'
         f"<b>{plain(title)}</b>{body}</div>"
     )
+
+
+def brand(text: str) -> str:
+    return f'<p class="fx-brand">{plain(text)}</p>'
+
+
+def who(text: str) -> str:
+    return f'<p class="fx-who">{plain(text)}</p>'
+
+
+def muted(text: str) -> str:
+    return f'<p class="fx-muted">{plain(text)}</p>'
+
+
+def account_line(username: Any, role: Any) -> str:
+    return muted(f"Signed in as {safe_text(username)} ({safe_text(role)})")
+
+
+def hidden_answer(item: dict[str, Any]) -> str:
+    """One hidden answer as the admin list shows it: the same notices as the chat view (a withdrawn
+    source, or an answer that was not verified; a fixed reply never gets the second)."""
+    answer = str(item.get("answer", ""))
+    if item.get("source_removed"):
+        return notice("warn", "Source withdrawn", answer)
+    meta = {
+        "citations": item.get("citations") or [],
+        "grounded": item.get("grounded") if item.get("kind") != "fixed_reply" else None,
+    }
+    return message_card("Answer", answer, extra=answer_extras(meta))
 
 
 def waiting(title: str, text: str) -> str:
@@ -125,6 +166,11 @@ def answer_extras(meta: dict[str, Any]) -> str:
 # ---- showing ---------------------------------------------------------------------------------
 def show(fragment: str) -> None:
     st.html(fragment)
+
+
+def caption(text: Any) -> None:
+    """A caption from text that may hold API values: neutralised like a label."""
+    st.caption(safe_text(text))
 
 
 def show_notice(kind: str, title: str, text: str = "", *, urgent: bool = False) -> None:

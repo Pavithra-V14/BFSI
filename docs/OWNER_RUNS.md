@@ -922,7 +922,8 @@ It asks you to type the id.
       uv run python -m app.db.migrate
 
   You should see `pending 0006_rollout_feedback_settings.sql`, `pending
-  0007_review_thumbs_down_unique.sql` and then `applied` for each. If an earlier file is also
+  0007_review_thumbs_down_unique.sql` (and, from Phase 11, `pending
+  0008_messages_fixed_reply.sql`) and then `applied` for each. If an earlier file is also
   pending, an earlier migration was not applied (Run 8): let it apply them in order. Migration
   0007 first removes a duplicate thumbs-down review item for one answer, if an earlier double
   click made one (it keeps the first), then adds the index that allows only one.
@@ -1045,8 +1046,9 @@ It asks you to type the id.
   the layout on a narrow window, keyboard focus, the waiting states, and that the admin
   controls appear only where they should). The tests cannot draw a page, so this is the check of
   what you actually see.
-- **Before it:** Run 16 (the API runs locally with a database that has the migrations, an admin
-  account and the three sample documents), and Run 12's variables for the API. Two PowerShell
+- **Before it:** Run 16 (the API runs locally with a database that has the migrations up to
+  0008, an admin account and the three sample documents; apply 0008 with `uv run python -m
+  app.db.migrate` as in Run 16 step 1), and Run 12's variables for the API. Two PowerShell
   windows: A for the API, B for the frontend.
 - **Needs (names only):** window A: as in Run 16. Window B: `API_BASE_URL` (optional; the
   default is the API on this machine) and `ADMIN_MACHINE`. No key and no password is set in
@@ -1083,6 +1085,15 @@ It asks you to type the id.
   back: all text should stay easy to read in both. Make the window narrow (about 360 px): nothing
   should scroll sideways and the text keeps a small margin on both sides. Press Tab repeatedly: a
   thick blue outline should show on whatever has focus, in both themes.
+- **Step 7b. Contrast of Streamlit's own text.** The tests check the colours the page itself
+  sets. Streamlit draws some text itself (the small grey notes such as "No chats yet.", the
+  page numbers under a table, "Feedback is not available for this answer yet."). Use a contrast
+  tool in the browser (for example the contrast checker in the browser's developer tools, or a
+  colour picker extension) on two or three of these notes, in the light and the dark theme. You
+  should see a ratio of at least 4.5. Send back the ratio and the theme for any that is lower.
+- **Step 7c. The settings file.** In window B, stop the frontend and start it from a different
+  folder: `cd frontend` then `uv run streamlit run app.py`. The page should show "Safety settings
+  may not be active". Go back to the project folder and start it again: the notice is gone.
 - **Step 8. Admin view.** Sign out. Sign in as your admin account. You should see a row of
   sections: Chat, Documents, Entities, Review queue, Users, Alerts, Rollout, Evaluation. Open each:
   Documents shows your three documents with counts and says "done on the admin machine"; Entities

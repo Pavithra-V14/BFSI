@@ -19,7 +19,7 @@ RATED = "fx_rated"
 SESSIONS_LIMIT = "fx_sessions_limit"
 CONFIRM = "fx_confirm"
 FLASH = "fx_flash"
-PENDING_RETRY = "fx_pending_retry"
+PENDING = "fx_pending"  # an answer is on its way; still set at the start of a run = interrupted
 
 
 def token() -> str | None:

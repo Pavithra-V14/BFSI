@@ -120,6 +120,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 select:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
   outline: 3px solid var(--fx-focus) !important;
 }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+  color: var(--fx-muted);
+}
 .fx-brand { font-weight: 700; font-size: 1.15rem; color: var(--fx-primary); margin: 0 0 .5rem 0; }
 .fx-muted { color: var(--fx-muted); font-size: .9rem; }
 .fx-card {

@@ -50,8 +50,8 @@ def _register(settings: Settings, username: str, email: str, password: str) -> N
 
 
 def render_auth(settings: Settings) -> None:
-    render.show(f'<p class="fx-brand">{render.plain(messages.APP_NAME)}</p>')
-    render.show(f'<p class="fx-muted">{render.plain(messages.TAGLINE)}</p>')
+    render.show(render.brand(messages.APP_NAME))
+    render.show(render.muted(messages.TAGLINE))
     flash = state.take_flash()
     if flash:
         render.show_notice(*flash)

@@ -5,9 +5,9 @@ from __future__ import annotations
 import streamlit as st
 
 from frontend import messages, render, state
-from frontend.api import ApiClient
+from frontend.api import ApiClient, SessionExpired
 from frontend.views import chat as chat_view
-from frontend.views.common import friendly
+from frontend.views.common import friendly, number
 
 PAGE = 20
 MAX_LIST = 100
@@ -60,13 +60,27 @@ def _confirm_box(client: ApiClient) -> None:
         st.rerun()
 
 
+def _sign_out(client: ApiClient) -> None:
+    """End the sign-in at the service and drop it here. The token is dropped here whatever the
+    service says; if it could not be told, the next page says so."""
+    revoked = False
+    try:
+        revoked = client.logout().ok
+    except SessionExpired:
+        revoked = True  # the service had already stopped accepting it
+    state.sign_out()
+    if not revoked:
+        state.flash("warn", messages.LOGOUT_FAILED_TITLE, messages.LOGOUT_FAILED_TEXT)
+    st.rerun()
+
+
 def render_sidebar(client: ApiClient) -> None:
     with st.sidebar:
-        render.show(f'<p class="fx-brand">{render.plain(messages.APP_NAME)}</p>')
+        render.show(render.brand(messages.APP_NAME))
         if st.button("New chat", key="fx_new_chat", use_container_width=True):
             state.new_chat()
             st.rerun()
-        render.show('<p class="fx-who">My chats</p>')
+        render.show(render.who("My chats"))
         limit = min(int(st.session_state.get(state.SESSIONS_LIMIT, PAGE)), MAX_LIST)
         reply = client.sessions(limit=limit)
         if reply.ok and isinstance(reply.data, dict):
@@ -86,7 +100,7 @@ def render_sidebar(client: ApiClient) -> None:
                 if st.button("Delete this chat", key=f"fx_del_{session_id}"):
                     st.session_state[state.CONFIRM] = session_id
                     st.rerun()
-            total = int(reply.data.get("total") or 0)
+            total = number(reply.data.get("total"))
             if total > limit and limit < MAX_LIST:
                 if st.button("Show more chats", key="fx_more"):
                     st.session_state[state.SESSIONS_LIMIT] = min(limit + PAGE, MAX_LIST)
@@ -100,11 +114,6 @@ def render_sidebar(client: ApiClient) -> None:
         _confirm_box(client)
         account = state.user() or {}
         role = messages.ROLE_TEXT.get(str(account.get("role")), "Customer")
-        render.show(
-            f'<p class="fx-muted">Signed in as {render.plain(account.get("username", ""))} '
-            f"({render.plain(role)})</p>"
-        )
+        render.show(render.account_line(account.get("username", ""), role))
         if st.button("Sign out", key="fx_sign_out"):
-            client.logout()
-            state.sign_out()
-            st.rerun()
+            _sign_out(client)

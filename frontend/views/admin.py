@@ -5,6 +5,10 @@ rollout stage work against the hosted API. Ingest and delete are COMMANDS shown 
 machine (the browser never starts them), and entity review is shown only when `ADMIN_MACHINE=true`
 (the API also refuses it on the host and unless `ENTITY_REVIEW_ENABLED=true`). The evaluation
 dashboard is a shell until Phase 13.
+
+Text that comes from the API reaches a Streamlit label only through `render.label_text` /
+`render.safe_text`, and a table cell that starts with a formula character is prefixed so a
+downloaded copy cannot run as a spreadsheet formula.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import streamlit as st
 from frontend import messages, render, state
 from frontend.api import ApiClient, Reply
 from frontend.config import Settings
-from frontend.views.common import friendly
+from frontend.views.common import friendly, number
 
 SECTIONS = (
     "Chat",
@@ -29,6 +33,7 @@ SECTIONS = (
     "Evaluation",
 )
 PAGE = 20
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _load(reply: Reply) -> dict[str, Any] | None:
@@ -36,6 +41,13 @@ def _load(reply: Reply) -> dict[str, Any] | None:
         return reply.data
     render.show_notice("danger", "Could not load", friendly(reply), urgent=True)
     return None
+
+
+def cell(value: Any) -> str:
+    """A table cell as text. One that starts with `=`, `+`, `-` or `@` gets a leading apostrophe,
+    so the CSV a table can be downloaded as does not run as a spreadsheet formula."""
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(FORMULA_START) else text
 
 
 def _pager(key: str, total: int, limit: int = PAGE) -> int:
@@ -51,12 +63,12 @@ def _pager(key: str, total: int, limit: int = PAGE) -> int:
         if right.button("Next", key=f"{slot}_next", disabled=offset + limit >= total):
             st.session_state[slot] = offset + limit
             st.rerun()
-        st.caption(f"{offset + 1} to {min(offset + limit, total)} of {total}")
+        render.caption(f"{offset + 1} to {min(offset + limit, total)} of {total}")
     return offset
 
 
 def _table(rows: list[dict[str, Any]]) -> None:
-    safe = [{k: ("" if v is None else str(v)) for k, v in row.items()} for row in rows]
+    safe = [{k: cell(v) for k, v in row.items()} for row in rows]
     if safe:
         st.dataframe(safe, hide_index=True, use_container_width=True)
     else:
@@ -75,11 +87,11 @@ def alerts_banner(client: ApiClient) -> None:
 
 # ---- sections --------------------------------------------------------------------------------
 def documents(client: ApiClient, settings: Settings) -> None:
-    render.show('<p class="fx-who">Documents</p>')
+    render.show(render.who("Documents"))
     first = _load(client.documents(limit=1))
     if first is None:
         return
-    total = int(first.get("total") or 0)
+    total = number(first.get("total"))
     offset = _pager("documents", total)
     data = _load(client.documents(limit=PAGE, offset=offset))
     if data is None:
@@ -103,14 +115,14 @@ def documents(client: ApiClient, settings: Settings) -> None:
 
 
 def entities(client: ApiClient, settings: Settings) -> None:
-    render.show('<p class="fx-who">Allow-list entries waiting for review</p>')
+    render.show(render.who("Allow-list entries waiting for review"))
     if not settings.admin_machine:
         st.caption("Entity review is done on the admin machine. This list is read-only here.")
     status = st.selectbox("Show", ["pending", "approved", "rejected"], key="fx_ent_status")
     first = _load(client.entities(status=status, limit=1))
     if first is None:
         return
-    offset = _pager("entities", int(first.get("total") or 0))
+    offset = _pager("entities", number(first.get("total")))
     data = _load(client.entities(status=status, limit=PAGE, offset=offset))
     if data is None:
         return
@@ -130,15 +142,17 @@ def entities(client: ApiClient, settings: Settings) -> None:
         format_func=lambda i: render.label_text(by_id[i].get("text"), 60),
         key="fx_ent_pick",
     )
+    # The id is in the key, so a tick given to one entry is never carried over to another.
     confirm = st.checkbox(
-        "I confirm this one-word name (needed to approve a surname on its own)", key="fx_ent_conf"
+        "I confirm this one-word name (needed to approve a surname on its own)",
+        key=f"fx_ent_conf_{chosen}",
     )
     approve, reject = st.columns(2)
     for column, outcome, label in (
         (approve, "approved", "Approve"),
         (reject, "rejected", "Reject"),
     ):
-        if column.button(label, key=f"fx_ent_{outcome}"):
+        if column.button(label, key=f"fx_ent_{outcome}_{chosen}"):
             reply = client.set_entity(chosen, outcome, confirm_single_word=confirm)
             if reply.ok:
                 st.rerun()
@@ -146,14 +160,14 @@ def entities(client: ApiClient, settings: Settings) -> None:
 
 
 def review_queue(client: ApiClient) -> None:
-    render.show('<p class="fx-who">Review queue</p>')
+    render.show(render.who("Review queue"))
     status = st.selectbox(
         "Show", ["open", "labelled", "added_to_eval", "dismissed"], key="fx_rev_status"
     )
     first = _load(client.review(status=status, limit=1))
     if first is None:
         return
-    offset = _pager("review", int(first.get("total") or 0))
+    offset = _pager("review", number(first.get("total")))
     data = _load(client.review(status=status, limit=PAGE, offset=offset))
     if data is None:
         return
@@ -176,14 +190,16 @@ def review_queue(client: ApiClient) -> None:
     chosen = st.selectbox(
         "Item",
         list(by_id),
-        format_func=lambda i: f"{by_id[i].get('kind')} · {str(by_id[i].get('created_at'))[:10]}",
+        format_func=lambda i: render.label_text(
+            f"{by_id[i].get('kind')} · {str(by_id[i].get('created_at'))[:10]}", 60
+        ),
         key="fx_rev_pick",
     )
     label = st.selectbox(
         "Label",
         list(messages.REVIEW_LABELS),
         format_func=lambda v: messages.LABEL_TEXT[v],
-        key="fx_rev_label",
+        key=f"fx_rev_label_{chosen}",
     )
     left, right = st.columns(2)
     if left.button("Save label", key="fx_rev_save"):
@@ -196,11 +212,11 @@ def review_queue(client: ApiClient) -> None:
 
 
 def users(client: ApiClient) -> None:
-    render.show('<p class="fx-who">Users and roles</p>')
+    render.show(render.who("Users and roles"))
     first = _load(client.users(limit=1))
     if first is None:
         return
-    offset = _pager("users", int(first.get("total") or 0), 50)
+    offset = _pager("users", number(first.get("total")), 50)
     data = _load(client.users(limit=50, offset=offset))
     if data is None:
         return
@@ -227,24 +243,28 @@ def users(client: ApiClient) -> None:
         key="fx_user_pick",
     )
     target = by_id[chosen]
-    if target.get("role") == "admin" or chosen == me:
-        st.caption("Admin accounts, and your own account, cannot be changed here.")
+    if chosen == me:
+        st.caption("Your own account cannot be changed here.")
         return
+    if target.get("role") == "admin":
+        st.caption("Admin accounts cannot be changed here.")
+        return
+    # The id is in the key, so a role picked for one account is never carried over to another.
     role = st.selectbox(
         "Role",
         ["customer", "staff"],
         index=0 if target.get("role") == "customer" else 1,
         format_func=lambda v: messages.ROLE_TEXT[v],
-        key="fx_user_role",
+        key=f"fx_user_role_{chosen}",
     )
     left, right = st.columns(2)
-    if left.button("Save role", key="fx_user_save"):
+    if left.button("Save role", key=f"fx_user_save_{chosen}"):
         reply = client.set_role(chosen, role)
         if reply.ok:
             st.rerun()
         render.show_notice("danger", "Not saved", friendly(reply), urgent=True)
     active = bool(target.get("is_active"))
-    if right.button("Switch off" if active else "Switch on", key="fx_user_active"):
+    if right.button("Switch off" if active else "Switch on", key=f"fx_user_active_{chosen}"):
         reply = client.set_active(chosen, not active)
         if reply.ok:
             st.rerun()
@@ -252,7 +272,7 @@ def users(client: ApiClient) -> None:
 
 
 def alerts(client: ApiClient) -> None:
-    render.show('<p class="fx-who">Alerts</p>')
+    render.show(render.who("Alerts"))
     data = _load(client.alerts())
     if data is None:
         return
@@ -262,14 +282,14 @@ def alerts(client: ApiClient) -> None:
     else:
         render.show_notice("ok", "All quiet", "No critical event among the recent ones.")
     _table([{"event": e.get("name"), "count": e.get("count")} for e in data.get("events") or []])
-    st.caption(
-        f"Counts of the last {int(data.get('window') or 0)} events, kept in memory by the running "
+    render.caption(
+        f"Counts of the last {number(data.get('window'))} events, kept in memory by the running "
         "service (a restart clears them)."
     )
 
 
 def rollout(client: ApiClient) -> None:
-    render.show('<p class="fx-who">Rollout stage (shadow mode)</p>')
+    render.show(render.who("Rollout stage (shadow mode)"))
     data = _load(client.stage())
     if data is None:
         return
@@ -293,26 +313,20 @@ def rollout(client: ApiClient) -> None:
     first = _load(client.shadow_answers(limit=1))
     if first is None:
         return
-    offset = _pager("shadow", int(first.get("total") or 0))
+    offset = _pager("shadow", number(first.get("total")))
     page = _load(client.shadow_answers(limit=PAGE, offset=offset))
     if page is None:
         return
     for item in page.get("answers") or []:
         with st.expander(render.label_text(item.get("question"), 70)):
-            render.show(
-                render.message_card(
-                    "Question (masked)",
-                    str(item.get("question", "")),
-                    extra=render.message_card("Answer", str(item.get("answer", ""))),
-                )
-            )
-            render.show(render.citation_chips(item.get("citations") or []))
+            render.show(render.message_card("Question (masked)", str(item.get("question", ""))))
+            render.show(render.hidden_answer(item))
     if not page.get("answers"):
         st.caption("Nothing hidden yet.")
 
 
 def evaluation() -> None:
-    render.show('<p class="fx-who">Evaluation</p>')
+    render.show(render.who("Evaluation"))
     render.show_notice(
         "info",
         "Not available yet",

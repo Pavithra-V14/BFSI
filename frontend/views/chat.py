@@ -65,12 +65,14 @@ def messages_from_session(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "role": "assistant",
                 "text": str(item.get("text", "")),
                 "id": item.get("id") if isinstance(item.get("id"), str) else None,
-                "kind": "answer",
+                # "fixed_reply" = one of our own texts (a greeting, a refusal ...): no "not fully
+                # verified" notice and no thumbs. A missing marker (an older service) = an answer.
+                "kind": "fixed_reply" if item.get("kind") == "fixed_reply" else "answer",
                 "resumed": True,
                 "meta": {
                     "citations": item.get("citations") or [],
                     "source_removed": bool(item.get("source_removed")),
-                    "grounded": item.get("grounded"),
+                    "grounded": None if item.get("kind") == "fixed_reply" else item.get("grounded"),
                 },
             }
         )
@@ -127,15 +129,28 @@ def render_message(client: ApiClient, message: dict[str, Any], index: int = 0) -
 def render_history(client: ApiClient) -> None:
     history = state.messages()
     if not history:
-        render.show(f'<p class="fx-muted">{render.plain(messages.EMPTY_CHAT)}</p>')
+        render.show(render.muted(messages.EMPTY_CHAT))
     for index, message in enumerate(history):
         render_message(client, message, index)
 
 
 # ---- sending ---------------------------------------------------------------------------------
+def _drop_interrupted_question() -> bool:
+    """A run that found `PENDING` still set was cut short while an answer was on its way (the
+    user sent something else, or reloaded). Its question has no answer on this page: remove it,
+    clear the flag and say so. Returns True when that happened."""
+    if not st.session_state.pop(state.PENDING, None):
+        return False
+    history = state.messages()
+    if history and history[-1].get("role") == "user":
+        history.pop()
+    return True
+
+
 def _send(client: ApiClient, settings: Settings, question: str) -> None:
     history = state.messages()
     history.append({"role": "user", "text": question})
+    st.session_state[state.PENDING] = True  # cleared when the answer (or an error) is in
     render.show(render.message_card("You", question))
     slot = st.empty()
     session_id = state.session_id()
@@ -151,13 +166,10 @@ def _send(client: ApiClient, settings: Settings, question: str) -> None:
             reply = progress.wait_with_progress(lambda: client.chat(question, session_id), slot)
         else:
             history.append(_notice_message("warn", messages.WAKING_TITLE, messages.WAKING_GAVE_UP))
+            st.session_state.pop(state.PENDING, None)
             st.rerun()
             return
-    if reply.kind == "error" and reply.code == "not_signed_in":
-        state.sign_out()
-        state.flash("warn", "Signed out", messages.SIGNED_OUT)
-        st.rerun()
-        return
+    st.session_state.pop(state.PENDING, None)
     if reply.kind == "error" and reply.code == "not_found" and session_id:
         history.append(
             _notice_message(
@@ -176,7 +188,12 @@ def _send(client: ApiClient, settings: Settings, question: str) -> None:
 
 
 def render_chat(client: ApiClient, settings: Settings) -> None:
+    interrupted = _drop_interrupted_question()
     render_history(client)
+    if interrupted:
+        render.show_notice("warn", messages.INTERRUPTED_TITLE, messages.INTERRUPTED_TEXT)
     question = st.chat_input("Ask about a policy or regulation", max_chars=MAX_QUESTION_CHARACTERS)
     if question and question.strip():
+        if interrupted:
+            return  # the earlier question may still be answered: the user asks this one again
         _send(client, settings, question.strip())

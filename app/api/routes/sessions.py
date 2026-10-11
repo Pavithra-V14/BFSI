@@ -55,6 +55,13 @@ def _shown(message: store.StoredMessage, *, is_admin: bool) -> dict[str, Any]:
         "text": text,
         "citations": citations,
         "grounded": grounded,
+        # "answer" (generated) or "fixed_reply" (one of our own texts: a greeting, a refusal ...).
+        # The "not fully verified" notice and thumbs apply to generated answers only.
+        "kind": (
+            None
+            if message.role != "assistant"
+            else ("fixed_reply" if message.fixed_reply else "answer")
+        ),
         "source_removed": removed,
         "notice": notice,
         "created_at": message.created_at,

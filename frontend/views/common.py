@@ -18,3 +18,11 @@ def friendly(reply: Reply) -> str:
     if reply.retry_after and reply.code in ("too_many_requests", "too_many_attempts"):
         text = f"{text} Try again in about {reply.retry_after} seconds."
     return text
+
+
+def number(value: object) -> int:
+    """A count from the service as a whole number (0 when it is anything else)."""
+    try:
+        return int(value or 0)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0

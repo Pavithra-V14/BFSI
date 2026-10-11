@@ -113,13 +113,14 @@ def signed_in(
     *,
     role: str = "customer",
     username: str = "asha_rao",
+    user_id: str = "u1",
     env: dict[str, str] | None = None,
 ) -> AppTest:
     """The app, already signed in (the session state a login would have made)."""
     _prepare(api, monkeypatch, env)
     at = AppTest.from_file(APP, default_timeout=20)
     at.session_state["fx_token"] = FAKE_TOKEN
-    at.session_state["fx_user"] = {"id": "u1", "username": username, "role": role}
+    at.session_state["fx_user"] = {"id": user_id, "username": username, "role": role}
     return at
 
 
