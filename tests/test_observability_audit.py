@@ -67,18 +67,26 @@ def test_every_listed_action_is_written_somewhere():
 
 
 def test_the_expected_actions_of_the_spec_are_there():
-    # spec 12.1: every ingest, reindex, delete, role change, login (Phase 13 adds evaluation runs)
-    assert {"ingest", "reindex", "delete", "role_change", "login"} <= AUDITED_ACTIONS
+    # spec 12.1: every ingest, reindex, delete, role change, login and evaluation run
+    assert {
+        "ingest",
+        "reindex",
+        "delete",
+        "role_change",
+        "login",
+        "evaluation_run",
+    } <= AUDITED_ACTIONS
 
 
-def test_the_list_is_what_it_was_when_phase_12_was_written():
-    """A change to this list is a decision: it has to be made here as well as in the code."""
+def test_the_list_is_what_it_was_when_phase_13_was_written():
+    """A change to this list is a decision: it has to be made here as well as in the code.
+    Phase 13 added `evaluation_run` (an estimate or a start from the admin page)."""
     assert sorted(AUDITED_ACTIONS) == sorted(
         [
             "login", "role_change", "account_activated", "account_deactivated", "ingest",
             "reindex", "delete", "allowlist_review", "chunk_review", "entity_review",
             "review_label", "rollout_stage_change", "memory_clear", "retention_sweep",
-            "audit_purge",
+            "audit_purge", "evaluation_run",
         ]
     )  # fmt: skip
 

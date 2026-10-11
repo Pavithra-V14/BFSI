@@ -133,3 +133,10 @@ def label_item(
         (label, status, user_id, utc_text(now), item_id),
     )
     return (cursor.rowcount or 0) > 0
+
+
+def get_item(db: Database, item_id: str, *, now: datetime) -> ReviewItem | None:
+    """One review item by id (None: no such item)."""
+    with db.transaction():
+        row = db.query_one(f"SELECT {_COLUMNS} FROM review_queue WHERE id = ?", (item_id,))
+    return _item(row, now) if row else None

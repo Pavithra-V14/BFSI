@@ -1,0 +1,6 @@
+import sys
+
+from app.eval.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

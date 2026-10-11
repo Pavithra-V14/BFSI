@@ -39,6 +39,7 @@ from app.memory.store import require_aware
 from app.observability import traces
 
 AUDIT_RETENTION_DAYS = 30  # [T] the pilot value (spec 12.1): to be revisited in Phase 16
+SAMPLE_RETENTION_DAYS = 30  # [T] masked evaluation samples (spec 15.4), the same pilot value
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def purge_old_rows(
     actor: str,
     dry_run: bool = False,
     days: int = AUDIT_RETENTION_DAYS,
+    eval_samples: int = 0,
 ) -> PurgeResult:
     """Delete audit rows, alert rows and hourly rollups older than `days` (30 for the pilot), in
     ONE transaction with ONE audit row of counts. Daily rollups are kept: they hold counts only."""
@@ -154,13 +156,19 @@ def purge_old_rows(
         db.execute(
             "DELETE FROM metric_rollups WHERE period = 'hour' AND period_start < ?", (limit,)
         )
-        if audit or alerts or hourly:  # no audit row when nothing was deleted
+        if audit or alerts or hourly or eval_samples:  # no audit row when nothing was deleted
             write_audit(
                 db,
                 actor=actor,
                 action="audit_purge",
                 target="audit_log",
-                details={"audit": audit, "alerts": alerts, "hourly": hourly, "days": days},
+                details={
+                    "audit": audit,
+                    "alerts": alerts,
+                    "hourly": hourly,
+                    "eval_samples": eval_samples,
+                    "days": days,
+                },
                 now=now,
             )
     return PurgeResult(audit, alerts, hourly, False)
@@ -173,6 +181,21 @@ def os_actor() -> str:
     except Exception:
         name = "unknown"
     return "cli:" + (re.sub(r"[^A-Za-z0-9._-]", "_", name)[:40] or "unknown")
+
+
+def _purge_eval_samples(now: datetime, *, dry_run: bool) -> int | None:
+    """Purge the masked production samples of the evaluation database when its address is set in
+    the shell (None: not set, nothing done)."""
+    url = (os.environ.get("EVAL_DATABASE_URL") or "").strip()
+    if not url:
+        return None
+    from app.eval import store as eval_store
+
+    db = connect(url)
+    try:
+        return eval_store.purge_samples(db, now=now, dry_run=dry_run)
+    finally:
+        db.close()
 
 
 def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
@@ -195,10 +218,17 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 2
     trace_key = (os.environ.get("LANGFUSE_USER_HASH_KEY") or "").strip() or None
     moment = now or datetime.now(UTC)
+    samples_purged = _purge_eval_samples(moment, dry_run=args.dry_run)
     db = connect(url)
     try:
         result = sweep(db, now=moment, actor=os_actor(), dry_run=args.dry_run, trace_key=trace_key)
-        purged = purge_old_rows(db, now=moment, actor=os_actor(), dry_run=args.dry_run)
+        purged = purge_old_rows(
+            db,
+            now=moment,
+            actor=os_actor(),
+            dry_run=args.dry_run,
+            eval_samples=samples_purged or 0,
+        )
         pending = traces.pending_count(db)
     finally:
         db.close()
@@ -208,6 +238,11 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         f"{verb} {purged.audit_rows} audit rows, {purged.alert_rows} alert rows and "
         f"{purged.hourly_rows} hourly metric rows older than {AUDIT_RETENTION_DAYS} days"
     )
+    if samples_purged is not None:
+        print(
+            f"{verb} {samples_purged} masked evaluation samples older than "
+            f"{SAMPLE_RETENTION_DAYS} days"
+        )
     if trace_key is None and result.sessions and not result.dry_run:
         print(
             "note: LANGFUSE_USER_HASH_KEY is not set, so the traces of these chats could not be "

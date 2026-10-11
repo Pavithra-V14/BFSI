@@ -172,9 +172,43 @@ class LabelBody(BaseModel):
     status: Literal["labelled", "added_to_eval", "dismissed"] = "labelled"
 
 
+def _add_evaluation_candidate(
+    request: Request, db: Database, item_id: str, label: str, now: datetime
+) -> str:
+    """One click, "add to evaluation set" (spec 11.4): the masked question of the item becomes a
+    CANDIDATE in the evaluation database. Returns what happened, as a word:
+    added | already_added | not_added | no_evaluation_database | failed. Never raises."""
+    access = getattr(services(request), "evaluation", None)
+    environments = access.environments() if access is not None else []
+    if not environments:
+        return "no_evaluation_database"
+    try:
+        from app.eval import store as eval_store
+        from app.eval.candidates import candidate_from_review
+
+        item = review_queue.get_item(db, item_id, now=now)
+        candidate = candidate_from_review(item, label) if item is not None else None
+        if candidate is None:
+            return "not_added"
+        target = "production" if "production" in environments else "local"
+        eval_db = access.database(target)
+        if eval_db is None:
+            return "no_evaluation_database"
+        try:
+            if eval_store.candidate_exists(eval_db, item_id):
+                return "already_added"
+            eval_store.upsert_case(eval_db, candidate, now=now)
+        finally:
+            eval_db.close()
+        return "added"
+    except Exception:
+        return "failed"
+
+
 @router.post("/review/{item_id}/label")
 def label_review_item(
     body: LabelBody,
+    request: Request,
     item_id: str,
     current: CurrentUser = Depends(require_admin),
     db: Database = Depends(get_db),
@@ -201,7 +235,12 @@ def label_review_item(
             details={"label": body.label, "status": body.status},
             now=now,
         )
-    return {"id": item_id, "label": body.label, "status": body.status}
+    reply = {"id": item_id, "label": body.label, "status": body.status}
+    if body.status == "added_to_eval":
+        reply["evaluation_candidate"] = _add_evaluation_candidate(
+            request, db, item_id, body.label, now
+        )
+    return reply
 
 
 # ---- documents and entities (counts and the allow-list; no document text) ----------

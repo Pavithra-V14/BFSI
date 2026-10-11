@@ -31,6 +31,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from app.gateway.embeddings import running_on_render
 from app.ingest import paths
@@ -55,7 +56,9 @@ from app.ingest.queue import flag_failed_pages, resolve_failed_pages
 from app.ingest.review import review_chunks, review_entities
 from app.ingest.sparse_refresh import refresh_sparse_vectors
 from app.ingest.status import describe, document_status
+from app.isolation import is_local_url
 from app.store_errors import StoreRejected, StoreUnavailable
+from app.vector.documents import COLLECTION
 
 ORIGINALS_DIR = paths.ORIGINALS_DIR
 LOCKS_DIR = paths.LOCKS_DIR
@@ -84,6 +87,24 @@ class _NotAvailable:
         raise IngestError(f"{self._what} is not set up for this command")
 
 
+class _EvalCache:
+    """The cache of an ingest into the EVALUATION collection: there is none. The production cache
+    (Upstash) is never told about a test collection, so the corpus version and the cached answers
+    of the live service are not touched. Every staleness step succeeds and does nothing."""
+
+    def preflight(self) -> bool:
+        return True
+
+    def bump_corpus_version(self) -> int:
+        return 0
+
+    def invalidate_chunk(self, chunk_id: str) -> int:
+        return 0
+
+    def invalidate_doc(self, doc_id: str) -> int:
+        return 0
+
+
 @dataclass
 class Services:
     ctx: IngestContext
@@ -107,11 +128,22 @@ def parse_with_unstructured(path: Path) -> ParsedDocument:
     return parse_pdf(path, page_count=backend.count_pages(path), parse_page=backend.parse_page)
 
 
+def eval_collection(env: Mapping[str, str]) -> str | None:
+    """The evaluation collection this run targets, or None for the production one. The name is
+    checked: it must be an evaluation collection, never `documents`."""
+    from app.eval.constants import check_eval_collection
+
+    name = (env.get("INGEST_COLLECTION") or "").strip()
+    if not name or name == COLLECTION:
+        return None
+    return check_eval_collection(name)
+
+
 def missing_settings(env: Mapping[str, str], needs: str) -> list[str]:
     """The NAMES of the settings a command needs and does not have (never their values)."""
     level = NEEDS[needs]
     required = [*STORE_SETTINGS]
-    if level >= 1:
+    if level >= 1 and eval_collection(env) is None:
         required += [*CACHE_SETTINGS]
     missing = [name for name in required if not (env.get(name) or "").strip()]
     if level >= 2:
@@ -139,9 +171,20 @@ def build_services(env: Mapping[str, str], needs: str = "models") -> Services:
             + " (set them in this terminal, or add --load-env to read them from the env file)"
         )
     level = NEEDS[needs]
-    db = connect((env.get("DATABASE_URL") or "").strip())
+    target = eval_collection(env)
+    database_url = (env.get("DATABASE_URL") or "").strip()
+    if target is not None and not is_local_url(database_url):
+        # the allow-list and audit rows of a test ingest must never reach the main database
+        raise IngestError(
+            "an ingest into the evaluation collection needs DATABASE_URL to be a local SQLite "
+            "file (never the main database)"
+        )
+    db = connect(database_url)
     closers: list[Callable[[], None]] = [db.close]
-    cache = store_from_env(env) if level >= 1 else _NotAvailable("the cache")
+    if target is not None:
+        cache: Any = _EvalCache()
+    else:
+        cache = store_from_env(env) if level >= 1 else _NotAvailable("the cache")
     embed = _NotAvailable("embedding")
     count = len
     enrich = None
@@ -188,9 +231,12 @@ def build_services(env: Mapping[str, str], needs: str = "models") -> Services:
         db=db,
         embed=embed,
         count=count,
-        lock_dir=LOCKS_DIR,
-        marker_dir=PENDING_DIR,
+        lock_dir=LOCKS_DIR if target is None else paths.ROOT / "eval_data" / "ingest" / "locks",
+        marker_dir=PENDING_DIR
+        if target is None
+        else paths.ROOT / "eval_data" / "ingest" / "pending",
         enrich=enrich,
+        collection=target or COLLECTION,
         actor=os_actor(),
     )
 
@@ -457,6 +503,11 @@ def main(
 ) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
+        "--collection",
+        help="evaluation only: the test collection to use (for example documents_eval). The "
+        "default is the production collection. Needs DATABASE_URL to be a local SQLite file.",
+    )
+    common.add_argument(
         "--load-env",
         action="store_true",
         help="fill settings you have not set from the project's env file (off by default)",
@@ -495,6 +546,8 @@ def main(
     refresh.add_argument("--doc-id", help="only this document (default: every out-of-date chunk)")
     args = parser.parse_args(argv)
     env = os.environ if env is None else env
+    if getattr(args, "collection", None):
+        env = {**env, "INGEST_COLLECTION": args.collection}
     try:
         if running_on_render(env):
             raise IngestError("ingestion runs only on the admin machine, never on Render")

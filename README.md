@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 11 closed; Phase 12 (observability) built, awaiting the owner's "commit" and approval (next is Phase 13)
+Current phase: Phase 12 closed; Phase 13 (evaluation) built, awaiting the owner's "commit" and approval (next is Phase 14)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -821,6 +821,70 @@ that enters it holds a question, an answer, a username or a key.
   were re-checked by removing each rule in turn; two rules were not guarded (billed against shadow
   cost per answer, and the end bound of the hourly sum) and now are. The `isfinite` test in the
   threshold check is redundant, because the range test already refuses nan and infinity.
+
+## Evaluation (Phase 13)
+The parts are in `app/eval/`. It runs on the admin machine, with the evaluation keys, against a
+separate test collection and a separate evaluation database (spec 15.1). The hosted API loads only
+its light parts (the production sample and the stored numbers); the evaluation libraries are never
+loaded by it.
+
+- **The set.** `app/eval/data/cases.json`: 60 cases in 13 categories, 20 active (at least one in
+  every category), written from the three sample documents; expected sources are stored by clause
+  reference with an anchor phrase, never by chunk id. `calibration.json`: 30 hand-labelled items.
+  `uv run python -m app.eval check` tests every rule (including that every case names only
+  documents of the sample corpus manifest). **You review all 20 active cases and the 10
+  calibration items marked `review`** (the expert-review sample [T]).
+- **Runs.** `estimate` (no call: requests and tokens per provider against the free-tier daily
+  limits, resumable one-day batches, and a confirmation code), then `run RUN_ID --confirm CODE`.
+  A run uses only the evaluation keys, no production budget, limiter or cache, and stops by itself
+  when it passes the estimate by more than 25 %. The edit, delete, conflict and source-removed cases
+  change the TEST collection and always undo it (a journal repairs a crash).
+- **Scores.** Rules first (behaviour, facts, expected source, leaks, numeric faithfulness), then
+  the judge: RAGAS (faithfulness, relevancy, precision, recall, entity recall, correctness) and
+  DeepEval (wording judgements) through the gateway's judge call, and typed verdicts that Jev
+  decides only for metrics where calibration reached 85 % [T]. A score nobody could produce is
+  "not scored", never zero. The judge may not be of the family of a model that wrote the answer.
+- **Production.** The running service keeps about 5 % of live answers (masked text and the
+  passages that reached the generator) in the separate evaluation database off the request path;
+  `judge-samples` scores them here; `drift` writes the weekly report; the retention command
+  purges samples after 30 days.
+- **Page.** Admin Evaluation section: two views never mixed, a table beside every chart, the
+  variance band, per-category scores, drift, calibration, and (admin machine only) estimate and
+  start. The review queue's "add to evaluation set" makes a candidate that waits for the next
+  dataset version.
+- **Commands and runs.** `uv run python -m app.eval --help` (the module docstring lists them);
+  `docs/OWNER_RUNS.md` Runs 19 to 23.
+
+**Known limitations (recorded in Phase 13)**
+- **Phase 16.** Every per-call size in the estimate, the 25 % margin, the 85 % calibration
+  threshold, the 5 % sample rate, the 30-day sample retention, the PSI alert level (0.25) and the
+  30 % cost creep are placeholders [T] until the first baseline run replaces them with measured
+  numbers.
+- **Phase 14 or 16.** The metric inventory of spec 15.4a is built for the floor, RAG, gateway and
+  cache numbers that the data allows. Not built: MTTD, MTTR, uptime, incidents and rollback
+  frequency, vendor deprecation tracking, trace coverage, index freshness lag, failover success
+  rate and circuit-breaker recovery times (they need production history or the Phase 14 chaos
+  tests), summary and resume fidelity, staleness and contradiction rates (need a memory-specific
+  set), and entity extraction precision and recall (needs hand-labelled entities).
+- **Phase 15.** The weekly drift report, the sample judging and the CI evaluation job are commands
+  and a job; scheduling them on a free host is part of `DEPLOY.md`. The CI job uses a scripted
+  model, so it checks the harness, not the model.
+- **Phase 16.** A run answers with the Groq and Gemini evaluation keys only; the OpenRouter
+  (Gemma) fallback answers are not evaluated (the OpenRouter evaluation keys are the judge's).
+  Keep this in mind when reading the baseline.
+  Jev counts against its own dedicated key and its paid tokens, and so appears in the estimate.
+- **Recorded.** A run started from the command line is recorded in the evaluation database
+  (`eval_runs`: who, when, the confirmed estimate), not in the main audit log, because an
+  evaluation never writes to the main database (build rule 3). A run started from the page also
+  writes an `evaluation_run` row for its estimate and its start.
+- **Recorded.** `ragas 0.4.3` has an advisory (the multi-modal faithfulness metric) and its
+  `diskcache` dependency another, both without a fixed release; neither is used here
+  (`requirements-eval.txt` has the reasoning). CI's pip-audit does not cover the evaluation file.
+- **Recorded.** Customer questions that become candidates carry the masked text the review item
+  holds; a candidate can join the set only when its document is in the sample corpus manifest.
+- **Not seen with real models yet.** The 60 cases and the stubbed-model run prove the harness; how
+  the real system does on them is Run 21. Names of people in the made-up PII cases are masked by the
+  NER model, which only a real run exercises.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

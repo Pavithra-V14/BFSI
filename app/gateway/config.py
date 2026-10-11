@@ -50,6 +50,7 @@ MODEL_VARIABLES = (
 LIMIT_PROVIDERS = ("GROQ", "GEMINI", "OPENROUTER", "JEV", "EMBEDDING", "COHERE", "JINA")
 LIMIT_VARIABLES = tuple(f"GATEWAY_LIMITS_{p}" for p in LIMIT_PROVIDERS)
 OTHER_VARIABLES = (
+    "EVAL_JUDGE_MODEL",
     "GATEWAY_TIMEOUT_SECONDS",
     "GATEWAY_CONTEXT_OVERRIDES",
     "GATEWAY_ENABLE_MOCK",
@@ -205,6 +206,50 @@ def validate_jev_model(value: str) -> None:
         )
 
 
+# The judge of the evaluation must come from a different model family than every model that can
+# write an answer (the generator and its fallbacks): a model grading its own family's answers is
+# not a check. The family is the vendor (a strict reading: Gemini and Gemma are both Google).
+_FAMILY_WORDS = (
+    (("gpt", "openai", "o1", "o3", "o4", "chatgpt"), "openai"),
+    (("gemini", "gemma", "palm", "google"), "google"),
+    (("llama", "meta-llama", "meta"), "meta"),
+    (("qwen", "alibaba", "qwq"), "alibaba"),
+    (("mistral", "mixtral", "ministral", "codestral", "magistral"), "mistral"),
+    (("deepseek",), "deepseek"),
+    (("claude", "anthropic"), "anthropic"),
+    (("command", "cohere", "aya"), "cohere"),
+    (("grok", "x-ai", "xai"), "xai"),
+    (("phi", "microsoft"), "microsoft"),
+    (("nemotron", "nvidia"), "nvidia"),
+    (("glm", "zhipu", "z-ai"), "zhipu"),
+    (("kimi", "moonshot", "moonshotai"), "moonshot"),
+)
+
+
+def model_family(model: str) -> str:
+    """The vendor family of a model name such as 'openai/gpt-oss-120b' or 'gemini-3.8-flash'."""
+    text = (model or "").strip().lower().removesuffix(":free")
+    tokens = [t for t in re.split(r"[/\-_.:\s]+", text) if t]
+    for words, family in _FAMILY_WORDS:
+        if any(word in tokens for word in words):
+            return family
+    # unknown: the vendor prefix before the slash, else the first word
+    prefix = text.split("/", 1)[0] if "/" in text else (tokens[0] if tokens else "")
+    return prefix or "unknown"
+
+
+def judge_model_problem(judge: str | None, answer_models: Mapping[str, str]) -> str | None:
+    """None when the judge is usable, else the name of the answer model setting it clashes with."""
+    if not judge:
+        return None
+    family = model_family(judge)
+    for name in ("GROQ_MODEL", "GEMINI_MODEL", "OPENROUTER_MODEL"):
+        model = answer_models.get(name)
+        if model and model_family(model) == family:
+            return name
+    return None
+
+
 def _truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -263,6 +308,12 @@ class GatewayConfig:
         object.__setattr__(self, "limits", {**DEFAULT_LIMITS, **self.limits})
         object.__setattr__(self, "plans", {**DEFAULT_PLANS, **self.plans})
         validate_jev_model(self.models["JEV_MODEL"])
+        clash = judge_model_problem(self.eval_judge_model, self.models)
+        if clash is not None:
+            raise ConfigError(
+                f"EVAL_JUDGE_MODEL must be a different model family than {clash} "
+                "and the other answer models"
+            )
         for provider, limits in self.limits.items():
             validate_limits(limits, f"GATEWAY_LIMITS_{provider}")
         for provider, plan in self.plans.items():
@@ -356,6 +407,7 @@ class GatewayConfig:
             cohere_key=(env.get("COHERE_API_KEY") or "").strip() or None,
             jina_key=(env.get("JINA_API_KEY") or "").strip() or None,
             models=models,
+            eval_judge_model=(env.get("EVAL_JUDGE_MODEL") or "").strip() or None,
             limits=limits,
             plans={
                 p: _parse_plan(
@@ -376,3 +428,23 @@ class GatewayConfig:
         )
         check_render_rules(config, env)
         return config
+
+    @classmethod
+    def for_evaluation(cls, env: Mapping[str, str] | None = None) -> GatewayConfig:
+        """The gateway settings of an evaluation run (admin machine only, never Render).
+
+        The system under test answers with the EVALUATION keys (`EVAL_GROQ_API_KEYS`,
+        `EVAL_GEMINI_API_KEYS`), so a run never spends the production keys' limits or budgets.
+        The judge uses `EVAL_OPENROUTER_API_KEYS`. There is no OpenRouter answer fallback in a run
+        and the offline mock answer is switched off (a mock text must never be scored)."""
+        values = dict(os.environ if env is None else env)
+        if running_on_render(values):
+            raise ConfigError("refusing to start on Render: evaluation is for the admin machine")
+        names = ("EVAL_GROQ_API_KEYS", "EVAL_GEMINI_API_KEYS", "EVAL_OPENROUTER_API_KEYS")
+        if not any((values.get(name) or "").strip() for name in names):
+            raise ConfigError("no evaluation key is set (EVAL_GROQ_API_KEYS, EVAL_GEMINI_API_KEYS)")
+        values["GROQ_API_KEYS"] = values.get("EVAL_GROQ_API_KEYS") or ""
+        values["GEMINI_API_KEYS"] = values.get("EVAL_GEMINI_API_KEYS") or ""
+        values["OPENROUTER_API_KEYS"] = ""
+        values["GATEWAY_ENABLE_MOCK"] = ""
+        return cls.from_env(values)

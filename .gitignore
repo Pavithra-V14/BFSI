@@ -17,6 +17,10 @@ wheels/
 # Ingestion keeps the original PDFs here (Phase 5). It is the ONLY copy: back it up yourself.
 originals/
 
+# Evaluation (Phase 13): the local results database, the scratch database of a run and the
+# test-collection ingest folders. Local data of the admin machine.
+eval_data/
+
 # Secrets (.env.example is kept: it holds placeholders only)
 .env*
 !.env.example

@@ -194,6 +194,9 @@ class PipelineState:
     plan: PersistPlan | None = field(default=None, repr=False)  # the text to store
     result: Result | None = field(default=None, repr=False)  # the answer text
     writes: WriteGuard = field(default_factory=WriteGuard, repr=False)
+    # (question, answer) as the stored copies hold them: MASKED text, made by `mask_for_storage`.
+    # Set by stage 16 and read by the production sample (Phase 13); never the raw question.
+    stored_copy: tuple[str, str] | None = field(default=None, repr=False)
     tokens: int = 0
     exited: str | None = None  # the stage that ended the request early, for the trace
 

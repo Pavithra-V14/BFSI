@@ -90,7 +90,13 @@ def test_the_purge_writes_one_audit_row_of_counts_only(db):
     assert len(rows) == 1
     actor, action, target, details = rows[0]
     assert (actor, action, target) == ("cli:test", "audit_purge", "audit_log")
-    assert details == '{"alerts": 1, "audit": 1, "days": 30, "hourly": 0}'
+    assert details == '{"alerts": 1, "audit": 1, "days": 30, "eval_samples": 0, "hourly": 0}'
+
+
+def test_the_purge_counts_the_evaluation_samples_it_was_told_about(db):
+    retention.purge_old_rows(db, now=NOW, actor="cli:test", eval_samples=4)
+    (details,) = db.query_one("SELECT details FROM audit_log")
+    assert '"eval_samples": 4' in details
 
 
 def test_nothing_to_purge_writes_no_audit_row(db):

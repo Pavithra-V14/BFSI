@@ -711,6 +711,54 @@ class Gateway:
             )
         raise AllProvidersFailed(skipped)
 
+    async def complete_judge(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        timeout_s: float | None = None,
+        max_wait_s: float = 0.0,
+    ) -> CompletionResult:
+        """A text call for the evaluation judge (claim extraction, nuanced correctness ...).
+
+        It runs on the evaluation key pool and the judge model only, never on a production pool.
+        With no judge model set, or when the judge cannot answer, `AllProvidersFailed` is raised
+        and the caller records the metric as "not scored" (spec 5.1)."""
+        steps = self.judge_steps()
+        if not steps:
+            raise AllProvidersFailed([("judge", "no_judge_model")])
+        started = self._clock.now()
+        answer_limit = max_tokens or (
+            cfg_module.MAX_OUTPUT_TOKENS_JSON if json_mode else cfg_module.MAX_OUTPUT_TOKENS_ANSWER
+        )
+        reserved = answer_limit + self.config.reasoning_allowance
+        prompt_tokens = self._counter.count_messages(messages)
+        self._windows.check(prompt_tokens, reserved, [s.litellm_model for s in steps])
+        per_call, deadline = self._timing(timeout_s)
+        skipped: list[tuple[str, str]] = []
+        for step in steps:
+            outcome = await self._llm_step(
+                step,
+                "eval",
+                messages,
+                prompt_tokens=prompt_tokens,
+                max_tokens=reserved,
+                json_mode=json_mode,
+                validator=extract_json if json_mode else None,
+                per_call=per_call,
+                deadline=deadline,
+                reasoning_effort=self.config.reasoning_effort_decide,
+                max_wait_s=max_wait_s,
+            )
+            if outcome.ok:
+                result = self._completion_result(step, outcome, skipped, started, prompt_tokens)
+                self.stats.record("eval", "judge")
+                return result
+            skipped.append((step.provider, outcome.reason))
+            self._emit("step_skipped", tier="eval", provider=step.provider, reason=outcome.reason)
+        raise AllProvidersFailed(skipped)
+
     async def caption_image(
         self,
         image: bytes,
@@ -779,8 +827,12 @@ class Gateway:
         tier: str = "decide",
         timeout_s: float | None = None,
         max_wait_s: float = 0.0,
+        use_jev: bool = True,
     ) -> DecisionResult:
         """Answer typed questions: Jev first, then chat models, then rules ('not scored' for eval).
+
+        `use_jev=False` (evaluation only) goes straight to the judge model: a metric whose
+        calibration did not reach the threshold is never decided by Jev (spec 15.3).
 
         `state` must already be masked text. When nothing answers, the result has
         answers=None and decider 'rules' (or 'not_scored'): the caller applies its own rules.
@@ -792,16 +844,19 @@ class Gateway:
         per_call, deadline = self._timing(timeout_s)
         skipped: list[tuple[str, str]] = []
 
-        try:
-            result = await self._try_jev(
-                questions, state, tier, per_call, deadline, started, max_wait_s
-            )
-        except ContextWindowExceeded as error:  # a fallback is always available: never abort
-            result = error.reason
-        if isinstance(result, DecisionResult):
-            return result
-        skipped.append(("jev", result))
-        self._emit("jev_unavailable", tier=tier, reason=result)
+        if use_jev or tier != "eval":
+            try:
+                result = await self._try_jev(
+                    questions, state, tier, per_call, deadline, started, max_wait_s
+                )
+            except ContextWindowExceeded as error:  # a fallback is always available: never abort
+                result = error.reason
+            if isinstance(result, DecisionResult):
+                return result
+            skipped.append(("jev", result))
+            self._emit("jev_unavailable", tier=tier, reason=result)
+        else:
+            skipped.append(("jev", "not_trusted"))
 
         steps = self.decide_steps() if tier == "decide" else self.judge_steps()
         messages = build_fallback_messages(state, questions)

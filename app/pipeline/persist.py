@@ -329,6 +329,7 @@ def queue_unwritten(ctx: PipelineState, reason: str) -> None:
         ctx.drop_raw()
         ctx.emit("persist_masking_failed", reason=type(error).__name__)
         return
+    ctx.stored_copy = (job.question.text, job.answer.text)
     ctx.drop_raw()
     dropped = ctx.deps.queue.add(job)
     ctx.emit("persist_queued", reason=reason, queued=len(ctx.deps.queue))
@@ -349,6 +350,7 @@ async def persist_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
         span.error_code = type(error).__name__
         ctx.emit("persist_masking_failed", reason=type(error).__name__)
         return
+    ctx.stored_copy = (job.question.text, job.answer.text)
     ctx.drop_raw()  # the raw question is not needed any more
     now = ctx.deps.now()
     # The write runs in a worker thread that a timeout cannot stop. It is tracked so that the

@@ -949,7 +949,11 @@ def test_a_review_item_is_labelled_from_the_fixed_list(monkeypatch):
         "label": "wrong_answer",
         "status": "labelled",
     }
-    assert [b for b in at.button if b.disabled and "Phase 13" in b.label]  # eval button is a shell
+    # the evaluation button is live now: it adds the item as a candidate, with its own status
+    add = button(at, "Add to evaluation set")
+    assert not add.disabled
+    add.click().run()
+    assert api.calls("POST", "/admin/review/r1/label")[-1][2]["status"] == "added_to_eval"
 
 
 def test_roles_are_changed_for_customers_and_staff_never_for_an_admin(monkeypatch):
@@ -976,12 +980,15 @@ def test_the_rollout_stage_is_shown_and_changed(monkeypatch):
     assert api.calls("PUT", "/admin/shadow")[0][2] == {"stage": "open"}
 
 
-def test_the_evaluation_section_is_an_honest_shell(monkeypatch):
+def test_the_evaluation_section_says_so_when_there_is_no_evaluation_database(monkeypatch):
     api = admin_api()
+    api.routes[("GET", "/admin/evaluation/environments")] = json_response(
+        200, {"environments": [], "can_run": False, "on_render": False}
+    )
     at = open_section(
         signed_in(api, monkeypatch, role="admin", username="boss").run(), "Evaluation"
     )
-    assert "Not available yet" in "\n".join(html_bodies(at))
+    assert "No evaluation data here yet" in "\n".join(html_bodies(at))
 
 
 def test_an_admin_refusal_is_shown_in_plain_words(monkeypatch):

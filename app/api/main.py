@@ -31,6 +31,7 @@ from app.api.rollout import Rollout
 from app.api.routes import (
     admin,
     admin_dashboards,
+    admin_eval,
     admin_ops,
     auth,
     chat,
@@ -42,6 +43,7 @@ from app.api.security import SecurityMiddleware, cors_options
 from app.api.settings import ApiSettings, SettingsError
 from app.cache.store import CacheStore, store_from_env
 from app.db.connection import Database, connect
+from app.eval.sampling import SamplingConfigError
 from app.gateway.embeddings import running_on_render
 from app.observability import logs as observability_logs
 from app.observability.service import from_env as observability_from_env
@@ -110,6 +112,7 @@ def create_app(
     entity_review_enabled: bool = False,
     rollout_cache_seconds: float | None = None,
     observability: Any = None,
+    evaluation: Any = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -119,9 +122,14 @@ def create_app(
             await asyncio.to_thread(pipeline.check_index)
         if observability is not None:  # alert writer, rollups and trace deletion (Phase 12)
             observability.start()
+        sampler = getattr(evaluation, "sampler", None)
+        if sampler is not None:  # the production sample's writer (Phase 13)
+            sampler.start()
         try:
             yield
         finally:
+            if sampler is not None:
+                await asyncio.to_thread(sampler.stop)
             if observability is not None:
                 await asyncio.to_thread(observability.stop)
 
@@ -145,6 +153,7 @@ def create_app(
         on_render=on_render,
         entity_review_enabled=entity_review_enabled,
         observability=observability,
+        evaluation=evaluation,
     )
     svc = app.state.services
     svc.rollout = Rollout(
@@ -163,11 +172,17 @@ def create_app(
     if pipeline is not None and observability is not None and getattr(pipeline, "deps", None):
         pipeline.deps.observer = observability.observe
         pipeline.deps.observer_early = observability.observe_early
+    sampler = getattr(evaluation, "sampler", None)
+    if pipeline is not None and sampler is not None and getattr(pipeline, "deps", None):
+        from app.eval.sampling import chain
+
+        pipeline.deps.observer = chain(pipeline.deps.observer, sampler.observe)
     install_error_handlers(app)
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(admin_ops.router)
     app.include_router(admin_dashboards.router)
+    app.include_router(admin_eval.router)
     app.include_router(chat.router)
     app.include_router(sessions.router)
     app.include_router(feedback.router)
@@ -228,10 +243,15 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
         deps.on_finish = lambda ctx, result: printer.waterfall(
             list(ctx.trace.spans), (ctx.deps.clock() - ctx.started) * 1000.0
         )
+    try:
+        evaluation = _evaluation_access(env, relay)
+    except SamplingConfigError as error:
+        raise SystemExit(f"refusing to start: {error}") from None
     app = create_app(
         settings,
         db_factory=db_factory,
         observability=observability,
+        evaluation=evaluation,
         cache=cache,
         vector_client=vector_client,
         gateway=gateway,
@@ -243,6 +263,28 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
     # From here every event of the cache, gateway, limiter, masker and sink reaches /admin/alerts.
     relay.bind(lambda name, fields: app.state.services.emit(name, **fields))
     return app
+
+
+def _evaluation_access(
+    env: Mapping[str, str], relay: Callable[[str, dict[str, Any]], None] | None = None
+) -> Any:
+    """The evaluation databases this process can reach and, when `EVAL_DATABASE_URL` is set, the
+    5 % production sample (Phase 13). The local test database exists only off Render."""
+    from app.eval import store as eval_store
+    from app.eval.access import EvalAccess
+    from app.eval.sampling import sampler_from_env
+
+    production = (env.get("EVAL_DATABASE_URL") or "").strip() or None
+    on_render = running_on_render(env)
+    local = None if on_render else eval_store.DEFAULT_LOCAL_FILE
+    if production is None and (local is None or not local.is_file()):
+        return None if on_render else EvalAccess(local_path=local, env=env)
+    return EvalAccess(
+        local_path=local,
+        production_url=production,
+        sampler=sampler_from_env(env, on_event=relay),
+        env=env,
+    )
 
 
 def _build_pipeline(

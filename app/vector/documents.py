@@ -283,13 +283,27 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     parser.add_argument(
         "--ensure", action="store_true", help="create what is missing (safe to run again)"
     )
+    parser.add_argument(
+        "--collection",
+        default=COLLECTION,
+        help="evaluation only: the test collection to create (for example documents_eval)",
+    )
     args = parser.parse_args(argv)
+    collection = COLLECTION
+    if args.collection != COLLECTION:
+        from app.eval.constants import EvalConfigError, check_eval_collection
+
+        try:
+            collection = check_eval_collection(args.collection)
+        except EvalConfigError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
     if not args.ensure:
         print(__doc__)
         print("Nothing was done. Add --ensure to create the collection.")
         return 0
     try:
-        result = ensure_documents_collection(client_from_env(env))
+        result = ensure_documents_collection(client_from_env(env), collection)
     except (VectorConfigError, CollectionMismatch) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -302,7 +316,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
             file=sys.stderr,
         )
         return 1
-    print(f"collection '{COLLECTION}': {'created' if result.created else 'already exists'}")
+    print(f"collection '{collection}': {'created' if result.created else 'already exists'}")
     print(f"payload indexes created: {', '.join(result.indexes_created) or 'none'}")
     return 0
 

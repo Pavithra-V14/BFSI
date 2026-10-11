@@ -1,8 +1,22 @@
 # Evaluation packages (spec sections 2 and 15). Admin machine only, never on Render.
 # Install requirements.txt first, then this file.
 #
-# Note: deepeval 4.x does not resolve together with ragas 0.4.3 on Python 3.12;
-# the resolver falls back to deepeval 2.9.3, which is pinned here. Review this
-# choice in Phase 13 (for example separate environments for the two tools).
+# Phase 13 decision (owner answer 4): both packages are kept, pinned, and used only behind our own
+# gateway wrappers (app/eval/ragas_adapter.py and app/eval/deepeval_adapter.py: the only two
+# modules that import them). Checked in a throw-away environment: they resolve together
+# (130 packages) and import cleanly. deepeval 2.9.3 is what the resolver picks beside ragas 0.4.3
+# on Python 3.12 (deepeval 4.x does not resolve with ragas 0.4.3).
+#
+# pip-audit on that exact set (2026-10-11): deepeval has no known vulnerability. Two advisories,
+# both without a fixed release yet, and how they are handled:
+#   - ragas 0.4.3, PYSEC-2026-3046 / CVE-2026-6587: the multi-modal faithfulness metric reads a
+#     file or address named in a retrieved context. We never use that metric (the adapter lists the
+#     metrics it builds and a test checks none is multi-modal), and the contexts are our own
+#     sample documents.
+#   - diskcache 5.6.3 (needed by ragas), PYSEC-2026-2447: reading its cache directory runs pickled
+#     code if someone can write there. RAGAS's disk cache is never switched on here and the packages
+#     run on the admin machine only.
+# CI's pip-audit covers requirements.txt and requirements-dev.txt only; run
+# `uvx pip-audit -r requirements-eval.txt` when these pins change.
 ragas==0.4.3
 deepeval==2.9.3

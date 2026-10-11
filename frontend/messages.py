@@ -119,6 +119,14 @@ LABEL_TEXT = {
     "bad_question": "Bad question",
     "other": "Other",
 }
+# What happened when an item was added to the evaluation set (the service's one-word answer).
+CANDIDATE_TEXT = {
+    "added": "It waits as a candidate for the next evaluation set version.",
+    "already_added": "It was already a candidate.",
+    "not_added": "The label was saved; a bad question is not added to the set.",
+    "no_evaluation_database": "The label was saved; no evaluation database is set up here.",
+    "failed": "The label was saved; the candidate could not be written.",
+}
 STAGE_TEXT = {
     "shadow": "Shadow: only admins see answers",
     "staff_beta": "Staff beta: admins and staff see answers",

@@ -212,8 +212,16 @@ def review_queue(client: ApiClient) -> None:
         if reply.ok:
             st.rerun()
         render.show_notice("danger", "Not saved", friendly(reply), urgent=True)
-    # "Add to evaluation set" arrives with the evaluation set itself (Phase 13).
-    right.button("Add to evaluation set (Phase 13)", key="fx_rev_eval", disabled=True)
+    if right.button("Add to evaluation set", key="fx_rev_eval"):
+        reply = client.label(chosen, label, status="added_to_eval")
+        if reply.ok:
+            result = str((reply.data or {}).get("evaluation_candidate") or "")
+            st.session_state["fx_rev_notice"] = messages.CANDIDATE_TEXT.get(result, "")
+            st.rerun()
+        render.show_notice("danger", "Not added", friendly(reply), urgent=True)
+    note = st.session_state.pop("fx_rev_notice", "")
+    if note:
+        render.show_notice("ok", "Added to the evaluation set", note)
 
 
 def users(client: ApiClient) -> None:
@@ -349,16 +357,6 @@ def rollout(client: ApiClient) -> None:
         st.caption("Nothing hidden yet.")
 
 
-def evaluation() -> None:
-    render.show(render.who("Evaluation"))
-    render.show_notice(
-        "info",
-        "Not available yet",
-        "The evaluation dashboard (local versus production, drift, decider in use, key-pool "
-        "health, billed versus shadow cost) arrives with the evaluation phase.",
-    )
-
-
 def render_section(name: str, client: ApiClient, settings: Settings) -> None:
     if name == "Documents":
         documents(client, settings)
@@ -377,4 +375,6 @@ def render_section(name: str, client: ApiClient, settings: Settings) -> None:
     elif name == "Rollout":
         rollout(client)
     elif name == "Evaluation":
-        evaluation()
+        from frontend.views.evaluation import render_evaluation
+
+        render_evaluation(client, settings)

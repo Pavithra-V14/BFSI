@@ -79,6 +79,7 @@ class Services:
     on_render: bool = False  # the admin-machine-only actions are refused here (spec 24)
     entity_review_enabled: bool = False  # ENTITY_REVIEW_ENABLED=true: opt-in, default off [P]
     observability: Any = None  # app.observability.service.Observability, or None
+    evaluation: Any = None  # app.eval.access.EvalAccess, or None (Phase 13)
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))

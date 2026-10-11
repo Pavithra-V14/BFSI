@@ -4,7 +4,7 @@ Claude never runs any of these. You run them in your own PowerShell window, in t
 folder, and you send only the short "send back" lines (names, counts and status; never a key, a
 URL or a piece of text) to your advisor.
 
-Last updated: 2026-10-10 (after Phase 8). Each phase that has a real-service check adds its runs
+Last updated: 2026-10-12 (after Phase 13). Each phase that has a real-service check adds its runs
 at the end, under "Added by later phases", before the phase can be called closed.
 
 ## How to read a run
@@ -83,9 +83,16 @@ never set.)
 | 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | PENDING |
 | 17 | Look at every screen of the Streamlit frontend, with the API running | Phase 11 | PENDING |
 | 18 | Observability: migration 0009, the webhook, the log scan, trace deletion on real Langfuse, the purge and the dashboards | Phase 12 | PENDING |
+| 19 | Evaluation set-up: the check, the local evaluation database, the test collection `documents_eval` and the three sample documents in it | Phase 13 | PENDING |
+| 20 | Evaluation calibration: the judge model, the 30 labelled items, which metrics Jev may decide | Phase 13 | PENDING (needs your yes: real keys) |
+| 21 | The first baseline run and the variance band (the active set, then three runs) | Phase 13 | PENDING (needs your yes: real keys) |
+| 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | PENDING (needs your yes: real keys) |
+| 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
-use up free-tier calls, so do them on a day when you have not used the providers much.
+use up free-tier calls, so do them on a day when you have not used the providers much. The
+evaluation runs go 19, 20, 21, then 22 and 23; 20, 21 and 22 use the EVALUATION keys (not the
+production ones) and each one shows an estimate first and starts only with your typed code.
 
 ---
 
@@ -1230,6 +1237,204 @@ It asks you to type the id.
   One webhook message. A few Langfuse list and delete calls.
 - **Safe to repeat:** yes. Use a throw-away channel for the webhook.
 
+## Run 19. Evaluation set-up: the test collection and the sample documents: PENDING
+
+- **Verifies:** Phase 13 on your real Qdrant: the 60-case set and the corpus files check out; the
+  local evaluation database is created; the separate test collection `documents_eval` exists on
+  your cloud Qdrant; the three sample documents are ingested into it (and NOT into `documents`).
+- **Before it:** Run 2 (Qdrant works) and Run 10 (an ingest has worked once, so you know the
+  ingest command and its keys). No evaluation key is needed for this run.
+- **Needs (names only):** `QDRANT_URL`, `QDRANT_API_KEY`, the two embedding keys
+  (`GEMINI_EMBEDDING_KEY_A`, and `_B` if you have it), `GEMINI_API_KEYS` (the image captions), and
+  a **local** `DATABASE_URL` pointing at a SQLite file, for example
+  `sqlite:///eval_data/ingest.db` (so the allow-list and audit rows of a test ingest never reach
+  your main database; the command refuses a remote `DATABASE_URL` for a test collection).
+  Do NOT set `UPSTASH_REDIS_URL` for this run: a test ingest never touches the cache.
+- **Step 1. Check the set (no call):**
+
+      uv run python -m app.eval check
+
+  You should see `dataset 2026-10-v1: 60 cases, 20 active` and a line saying which cases you
+  should read yourself, and exit code 0. If it prints `problem: ...` lines, send them back.
+- **Step 2. Create the local evaluation database and put the set in it (no call):**
+
+      uv run python -m app.eval migrate
+      uv run python -m app.eval cases-sync
+
+  You should see `applied 0001_evaluation.sql` and `local: 60 cases of dataset 2026-10-v1
+  written`. The file is `eval_data\eval.db` (git-ignored).
+- **Step 3. Create the test collection (REAL Qdrant, `documents_eval` only):**
+
+      uv run python -m app.vector.documents --ensure --collection documents_eval
+
+  You should see `collection 'documents_eval': created` and the payload indexes. The command
+  refuses `documents` and any name that does not end in `_eval`.
+- **Step 4. Make a local database for the test ingest, and ingest the three documents:**
+
+      $env:DATABASE_URL = "sqlite:///eval_data/ingest.db"
+      uv run python -m app.db.migrate
+      uv run python -m app.ingest ingest spec\samples\company\banking_rtl_standard_facility_agreement.pdf --doc-id banking-rtl-facility --doc-type policy --access-role staff --product-line banking --collection documents_eval
+      uv run python -m app.ingest ingest spec\samples\company\finserv_mutual_fund_ecas_and_servicing.pdf --doc-id mf-ecas-servicing --doc-type policy --access-role customer --product-line mutual_funds --collection documents_eval
+      uv run python -m app.ingest ingest spec\samples\company\insurance_flexi_commercial_property.pdf --doc-id insurance-flexi-property --doc-type policy --access-role customer --product-line insurance --collection documents_eval
+
+  Use `--dry-run` first on each if you like. These are the document ids, roles and product lines
+  of the corpus manifest (`app/eval/data/corpus_manifest.json`); the cases name them. If a held-
+  back item asks for review, use `uv run python -m app.ingest review entities --doc-id ... --collection documents_eval`.
+- **Step 5. See what is in the test collection:**
+
+      uv run python -m app.ingest status --doc-id mf-ecas-servicing --collection documents_eval
+
+  You should see counts of active chunks (no text). Do the same for the other two ids.
+- **If a line differs:** `refusing ... DATABASE_URL to be a local SQLite file` means step 4's
+  variable is missing; `must end in _eval` means the collection name was mistyped; a free-tier
+  message from the embedding or caption call is safe to repeat later.
+- **Send back:** the output of step 1, and for step 5 the three status outputs (counts only).
+- **Clear:** `Remove-Item Env:DATABASE_URL` and the key variables you set. `eval_data\` stays
+  (it is your local evaluation data).
+- **Real calls:** about 20 to 40 embedding calls and a few caption calls for the three documents.
+- **Safe to repeat:** yes (an unchanged document is a no-op).
+
+## Run 20. Evaluation calibration (needs your yes: real evaluation keys): PENDING
+
+- **Verifies:** the judge model works through the gateway on the evaluation key pool; how well the
+  judge model and Jev agree with the 30 hand labels; which metrics Jev may decide (85 % [T]).
+- **Before it:** Run 19. Review the 10 calibration items marked `review` in
+  `app/eval/data/calibration.json` (the file says which): they are the expert-review sample [T];
+  correct any label you disagree with, then run `uv run python -m app.eval check`.
+- **Needs (names only):** `EVAL_GROQ_API_KEYS`, `EVAL_GEMINI_API_KEYS`,
+  `EVAL_OPENROUTER_API_KEYS` (separate from the production keys), `JEV_OPENROUTER_API_KEY` (Jev's
+  own key), `GEMINI_EMBEDDING_KEY_A`, and `EVAL_JUDGE_MODEL`: an OpenRouter model of a DIFFERENT
+  family than Groq `gpt-oss`, Gemini and Gemma (not any OpenAI, Google or Gemma-family model;
+  for example a Llama, Qwen or Mistral model). The gateway refuses to start otherwise.
+  Set the keys with `Read-Secret`; `EVAL_JUDGE_MODEL` is a name and can be typed.
+- **Step 1. The estimate (no call):**
+
+      uv run python -m app.eval calibrate
+
+  You should see the requests and tokens for the judge model and for Jev against their daily
+  limits (about 30 and 30), and the line `To run it: calibrate --confirm CODE`.
+- **Step 2. Run it (about 60 model calls) only if the estimate looks right:**
+
+      uv run python -m app.eval calibrate --confirm CODE
+
+  You should see one line per metric (five): the judge's agreement, Jev's agreement and `Jev
+  trusted: yes` or `no`. The result is stored; the next evaluation runs use it.
+- **If a line differs:** `stopped by the cost guard` means the run used more than 25 % over its
+  estimate and stopped: send the numbers. A metric with `Jev agreement None` means Jev did not
+  answer (an outage or the key): that metric stays with the judge model.
+- **Send back:** the five lines (metric names and percentages).
+- **Clear:** unset the key variables.
+- **Real calls:** about 60 (30 to the judge model, 30 to Jev). The judge pool is OpenRouter's free
+  tier: 50 requests a day per key, 20 a minute.
+- **Safe to repeat:** yes; each repeat uses another 60 calls.
+
+## Run 21. The first baseline and the variance band (needs your yes: real keys): PENDING
+
+- **Verifies:** the whole system on the evaluation set with real models, the cost estimate against
+  the real use, and the noise band (the active set run three times, unchanged).
+- **Before it:** Run 20, and the same variables. Do this on a day you have not used the free tiers.
+  Do not change the set or the system between the three runs.
+- **Step 1. The estimate (no call). It also makes the run:**
+
+      uv run python -m app.eval estimate --set active
+
+  You should see a table of requests and tokens per provider against the daily limits, how many
+  days it needs (the judge pool's 50 requests a day per key is the tightest), the number of
+  batches, and `To start it, type the confirmation code: run RUN_ID --confirm CODE`. Nothing has
+  been called. Use `--no-judge` for a rules-only run that is cheap.
+- **Step 2. Start (one batch a day):**
+
+      uv run python -m app.eval run RUN_ID --confirm CODE
+
+  You should see `run RUN_ID: paused` (more batches wait) or `finished`, the cases done and the
+  requests and tokens used. The run saves every case: if it stops, run the same command again.
+  On the next day (UTC) run the same command again for the next batch.
+- **Step 3. The band:** make three runs with `--set variance` (an estimate for each, each started
+  with its own code, all three on the same system and the same set), then open Run 23's page.
+- **Step 4. Look at the numbers:**
+
+      uv run python -m app.eval status
+
+- **If a line differs:** `stopped by the cost guard` (used more than 25 % over the estimate): send
+  the numbers; the placeholders in the estimate are then corrected. `today's ... limit would be
+  passed; try tomorrow (UTC)` is the guard keeping the free tier safe.
+- **Send back:** the `status` lines and, for each finished run, the golden score.
+- **Clear:** unset the key variables.
+- **Real calls:** about 600 to 1,000 per full judged run of the active set (spread over several
+  days); a rules-only run is about 110.
+- **Safe to repeat:** yes, with a new estimate each time. A baseline changes the targets from
+  "baseline" to numbers only when you decide it.
+
+## Run 22. The production sample (needs your yes: real keys): PENDING
+
+- **Verifies:** the separate cloud evaluation database, the 5 % sample written by the running
+  service (masked text only), judging it on this machine, the weekly drift report and the
+  30-day purge.
+- **Before it:** Run 21. Create a second free Postgres database (Neon or Supabase) for evaluation
+  only: **not** the main database.
+- **Needs (names only):** `EVAL_DATABASE_URL` (its direct URL with `sslmode=require`; a secret:
+  `Read-Secret`), `EVAL_SAMPLE_RATE` (for this run set `1` so every answer is kept, then put it
+  back to the default 0.05).
+- **Step 1. Create its tables:**
+
+      uv run python -m app.eval migrate --production
+
+  You should see `applied 0001_evaluation.sql` for the production evaluation database.
+- **Step 2. Start the API with `EVAL_DATABASE_URL` and `EVAL_SAMPLE_RATE=1` set** as in Run 16,
+  ask three questions in the frontend (one with a made-up PAN in it).
+- **Step 3. Check the samples are masked:**
+
+      uv run python -m app.eval status --production
+      uv run python -m app.eval drift --production
+
+  `drift` should say `3 sample(s) this week` and `too few samples to compare` (it needs 20 in each
+  window). The made-up PAN must not appear anywhere: ask your advisor to run the log scan on the
+  API log, and look at the Evaluation page's Production view (no text is shown there).
+- **Step 4. Judge the queue (needs the evaluation keys; shows an estimate first):**
+
+      uv run python -m app.eval judge-samples --limit 20 --production
+      uv run python -m app.eval judge-samples --limit 20 --production --confirm CODE
+
+  You should see the estimate, then `judged 3 sample(s)`.
+- **Step 5. The purge:**
+
+      uv run python -m app.memory.retention --dry-run
+
+  With `EVAL_DATABASE_URL` set you should see a third line, `would delete 0 masked evaluation
+  samples older than 30 days`.
+- **If a line differs:** `eval_sample_failed` in the API window (a class name) means the sample
+  could not be written: check the address and that step 1 ran.
+- **Send back:** the `status` and `drift` lines and the judged count. Never the address.
+- **Clear:** unset `EVAL_DATABASE_URL` and `EVAL_SAMPLE_RATE`, and put `EVAL_SAMPLE_RATE` back on
+  Render (or leave it unset: the default is 5 %).
+- **Real calls:** three questions (about 12 calls) and the judging (about 60 calls).
+- **Safe to repeat:** yes.
+
+## Run 23. The Evaluation page, the "Run eval" button and "add to evaluation set": PENDING
+
+- **Verifies:** the admin Evaluation section in a browser: the two views, the tables beside the
+  charts, the estimate and the typed-code start, and the review queue's one-click add.
+- **Before it:** Run 17 (the frontend), Run 21 (some finished runs) and Run 22 for the production
+  view.
+- **Needs:** window A: the API as in Run 16 with the evaluation keys set too (the page's start
+  button runs `python -m app.eval run ...` as its own process with this window's settings);
+  window B: the frontend with `ADMIN_MACHINE=true`.
+- **Steps:**
+  1. Sign in as admin, open Evaluation. You should see the Local test view (and Production if
+     `EVAL_DATABASE_URL` is set): golden-set score, noise band, runs, per-category scores, the
+     stage latency, model mix, the guardrail table, calibration and drift, each with its table.
+  2. Under "Run an evaluation" press "Estimate (no call is made)": the table and a code appear.
+     Type the code and press "Start the run": the notice says it started; reload to see progress.
+  3. Review queue: pick an item, set a label, press "Add to evaluation set". You should see a
+     notice that it waits as a candidate. The set is unchanged (candidates join only when a new
+     dataset version is made).
+- **If a line differs:** "The evaluation keys are not set on this machine" means window A lacks
+  the evaluation variables; "That code does not match" means the code was mistyped.
+- **Send back:** what you saw for each of the three steps (a sentence each).
+- **Clear:** close both windows.
+- **Real calls:** the start button runs a real evaluation (see Run 21); the other steps make none.
+- **Safe to repeat:** yes.
+
 ---
 
 # C. Added by later phases
@@ -1246,7 +1451,7 @@ Known candidates, not yet written (the phase that creates the code writes the ru
 - Phase 10 (chat API): written above (Run 16).
 - Phase 11 (Streamlit): written above (Run 17).
 - Phase 12 (observability): written above (Run 18).
-- Phase 13 and 16 (evaluation, baseline): the evaluation runs (they use real provider keys and
-  need your approval first).
+- Phase 13 (evaluation): written above (Runs 19 to 23; the ones with real keys need your yes).
+- Phase 16 (baseline): the targets are set from Run 21's numbers and the pre-launch gate.
 - Phase 14 (load tests): the load run, with the free-tier limits it may hit.
 - Phase 15 (deployment): the Render deploy steps and the proxy-header test.

@@ -36,6 +36,7 @@ class ChatEnv(Env):
         trace_key: str | None = None,
         deleter=None,
         alert_config=None,
+        evaluation=None,
         **settings,
     ):
         self.rig = PipelineRig(tmp_path, documents=documents, gateway=gateway)
@@ -72,6 +73,7 @@ class ChatEnv(Env):
             self.settings,
             db_factory=lambda: connect(self.url),
             observability=self.observability,
+            evaluation=evaluation,
             cache=self.cache,
             gateway=self.gateway,
             vector_client=self.rig.deps.qdrant,

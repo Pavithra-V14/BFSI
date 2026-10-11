@@ -42,6 +42,7 @@ AUDITED_ACTIONS = frozenset(
         "memory_clear",  # summaries cleared on a document delete
         "retention_sweep",  # the 90-day chat sweep
         "audit_purge",  # the 30-day purge of audit, alert and hourly metric rows
+        "evaluation_run",  # an evaluation run estimated or started from the admin page (Phase 13)
     }
 )
 

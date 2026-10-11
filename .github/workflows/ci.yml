@@ -1,8 +1,9 @@
 name: CI
 
 # Skeleton for spec section 17.2 (tagged [P]). Phase 1 adds: lint, fast unit
-# tests, secret scan and pip-audit. The 20-case evaluation (an alert-only job)
-# arrives in Phase 13 and the deploy step in Phase 15.
+# tests, secret scan and pip-audit. Phase 13 adds the 20-case evaluation as an
+# alert-only job (a stubbed model: no key, no network). The deploy step arrives
+# in Phase 15.
 #
 # Quality gates are alerts only (build rule 5): a failing job shows a red cross,
 # but no branch protection rule is configured to block a merge or a release.
@@ -95,3 +96,26 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Audit runtime and development packages
         run: uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt -r requirements-dev.txt
+
+  # The 20-case evaluation (spec 17.2, Phase 13). ALERT ONLY: `continue-on-error` means a red
+  # cross here never blocks a merge or a release (build rule 5). It runs the active set through the
+  # real pipeline over a small copy of the sample corpus with a SCRIPTED model, so it needs no key
+  # and makes no network call: it proves the harness, the scenarios and the scoring still work
+  # together. It does not measure the quality of a real model. A run against real providers is an
+  # owner-run command (docs/OWNER_RUNS.md) and needs the owner's explicit yes; no provider key is
+  # configured for CI.
+  evaluation-core:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Create the environment and install packages
+        run: |
+          uv venv
+          uv pip install -r requirements.txt -r requirements-dev.txt
+      - name: Core set on the stubbed model (alert only)
+        run: uv run pytest tests/test_eval_runner.py -k stubbed_model -s -q

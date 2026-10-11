@@ -217,6 +217,27 @@ class ApiClient:
     def set_stage(self, stage: str) -> Reply:
         return self.request("PUT", "/admin/shadow", json={"stage": stage})
 
+    # ---- evaluation ---------------------------------------------------------------------
+    def eval_environments(self) -> Reply:
+        return self.request("GET", "/admin/evaluation/environments")
+
+    def eval_overview(self, environment: str) -> Reply:
+        return self.request(
+            "GET", "/admin/evaluation/overview", params={"environment": environment}
+        )
+
+    def eval_estimate(self, run_set: str, judged: bool = True) -> Reply:
+        return self.request(
+            "POST", "/admin/evaluation/estimates", json={"set": run_set, "judged": judged}
+        )
+
+    def eval_start(self, run_id: str, confirm_code: str) -> Reply:
+        return self.request(
+            "POST",
+            f"/admin/evaluation/runs/{run_id}/start",
+            json={"confirm_code": confirm_code},
+        )
+
     # ---- dashboards ---------------------------------------------------------------------
     def dash_deciders(self) -> Reply:
         return self.request("GET", "/admin/dashboards/deciders")

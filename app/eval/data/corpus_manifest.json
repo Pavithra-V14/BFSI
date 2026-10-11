@@ -1,0 +1,32 @@
+{
+  "corpus": "AuraVance sample documents (illustrative, spec section 20)",
+  "documents": [
+    {
+      "doc_id": "banking-rtl-facility",
+      "file": "spec/samples/company/banking_rtl_standard_facility_agreement.pdf",
+      "sha256": "aefb9de1b4dec91b5e1d53bcdd78ab7c9147925b54a251f651817bb267cc9a23",
+      "doc_type": "policy",
+      "access_role": "staff",
+      "product_line": "banking",
+      "title": "Rupee Term Loan Standard Facility Agreement"
+    },
+    {
+      "doc_id": "mf-ecas-servicing",
+      "file": "spec/samples/company/finserv_mutual_fund_ecas_and_servicing.pdf",
+      "sha256": "10a5c9e1e3b47295d83f567338e427d5c975443ec7ed2e4970c05587470d3cbd",
+      "doc_type": "policy",
+      "access_role": "customer",
+      "product_line": "mutual_funds",
+      "title": "eCAS and Investor Servicing Guide"
+    },
+    {
+      "doc_id": "insurance-flexi-property",
+      "file": "spec/samples/company/insurance_flexi_commercial_property.pdf",
+      "sha256": "c84dad98b49f454e138e7f7644943812dce96f0af9db277fae3201ad70da51c0",
+      "doc_type": "policy",
+      "access_role": "customer",
+      "product_line": "insurance",
+      "title": "Flexi Commercial Property Policy and Servicing Guide"
+    }
+  ]
+}
