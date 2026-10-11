@@ -65,6 +65,22 @@ RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
 )
 
 
+# Values this process knows to be secret (the configured webhook address): they are found and
+# replaced EXACTLY, whatever host they point at (the shape rules above only know some hosts).
+_SECRETS: set[str] = set()
+MIN_SECRET_LENGTH = 8
+
+
+def register_secret(value: str) -> None:
+    text = (value or "").strip()
+    if len(text) >= MIN_SECRET_LENGTH:
+        _SECRETS.add(text)
+
+
+def forget_secrets() -> None:
+    _SECRETS.clear()
+
+
 @dataclass(frozen=True)
 class Finding:
     rule: str
@@ -72,7 +88,9 @@ class Finding:
 
 
 def scrub(text: str) -> str:
-    """The text with every match of a rule replaced by a fixed word."""
+    """The text with every registered secret and every match of a rule replaced by a fixed word."""
+    for secret in sorted(_SECRETS, key=len, reverse=True):
+        text = text.replace(secret, "[secret]")
     for _, pattern, word in RULES:
         text = pattern.sub(word, text)
     return text
@@ -81,6 +99,8 @@ def scrub(text: str) -> str:
 def scan_text(text: str) -> list[Finding]:
     found: list[Finding] = []
     for number, line in enumerate(text.splitlines(), start=1):
+        if any(secret in line for secret in _SECRETS):
+            found.append(Finding("configured-secret", number))
         for rule, pattern, _ in RULES:
             if pattern.search(line):
                 found.append(Finding(rule, number))
@@ -101,6 +121,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", help="the log or trace file to read")
     parser.add_argument("--max", type=int, default=50, help="most findings to list (default 50)")
     args = parser.parse_args(argv)
+    import os
+
+    register_secret(os.environ.get("ALERT_WEBHOOK_URL", ""))  # found exactly, on any host
     path = Path(args.file)
     if not path.is_file():
         print("error: no such file", file=sys.stderr)

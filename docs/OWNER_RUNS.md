@@ -1194,7 +1194,9 @@ It asks you to type the id.
      Langfuse project that one trace appeared with a `sessionId` of 64 hex characters).
   2. Delete that chat in the frontend (My chats, Delete this chat).
   3. Wait up to two minutes (the worker runs every minute).
-  You should see the trace gone in Langfuse. If it is still there after five minutes: open the
+  You should see the trace gone in Langfuse. (The service keeps its own note of the chat for at
+  least 10 minutes and looks once more before dropping it, so a late trace is caught; that note
+  holds only a hash and is not visible in Langfuse.) If it is still there after five minutes: open the
   API window, look for `trace_deletion_failed` after five failed tries (an alert), and send back
   the status words only (for example `401`, `404`, `405`). A `404` or `405` from the list or
   delete route means the documented route differs in your Langfuse version: send it back and the

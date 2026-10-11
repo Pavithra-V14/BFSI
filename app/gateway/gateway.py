@@ -79,6 +79,7 @@ from app.gateway.rerank import (
 )
 from app.gateway.stats import DeciderStats
 from app.gateway.tokens import TokenCounter
+from app.observability.logs import fx
 
 log = logging.getLogger("app.gateway")
 
@@ -230,7 +231,7 @@ class Gateway:
 
     def _emit(self, name: str, **fields: Any) -> None:
         self.events.append((name, fields))
-        log.info("gateway event %s %s", name, fields)
+        log.info("gateway event %s", name, extra=fx(fields))
         if self._on_event:
             self._on_event(name, fields)
 

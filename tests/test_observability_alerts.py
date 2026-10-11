@@ -343,6 +343,60 @@ def test_a_bad_threshold_names_the_variable(value):
         alerts.config_from_env({"ALERT_ERROR_RATE": value})
 
 
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("ALERT_ERROR_RATE", "nan"),
+        ("ALERT_ERROR_RATE", "inf"),
+        ("ALERT_ERROR_RATE", "25"),  # a percentage typed where a share (0 to 1) belongs
+        ("ALERT_FALLBACK_RATE", "1.5"),
+        ("ALERT_GUARDRAIL_RATE", "0"),
+        ("ALERT_MIN_REQUESTS", "5"),  # below the floor of 20: it would fire on noise
+        ("ALERT_MIN_REQUESTS", "20.5"),
+        ("ALERT_WINDOW_MINUTES", "-1"),
+        ("ALERT_DAILY_TOKEN_PLAN", "-100"),
+        ("ALERT_BUDGET_VARIANCE", "-inf"),
+        ("ALERT_WEBHOOK_DAILY_CAP", "0"),
+    ],
+)
+def test_an_unusable_threshold_is_refused_naming_only_the_variable(variable, value):
+    with pytest.raises(ValueError) as caught:
+        alerts.config_from_env({variable: value})
+    assert variable in str(caught.value)
+
+
+def test_a_refused_threshold_never_echoes_its_value():
+    with pytest.raises(ValueError) as caught:
+        alerts.config_from_env({"ALERT_ERROR_RATE": "7654.321"})
+    assert "7654" not in str(caught.value) and "ALERT_ERROR_RATE" in str(caught.value)
+
+
+def test_the_minimum_requests_floor_is_twenty_and_a_rate_of_one_is_allowed():
+    config = alerts.config_from_env({"ALERT_MIN_REQUESTS": "20", "ALERT_ERROR_RATE": "1"})
+    assert config.min_requests == 20 and config.error_rate == 1.0
+
+
+# ============================================================================ counting once ====
+def test_a_rule_that_stays_above_its_threshold_adds_only_the_rise_not_the_window(database):
+    clock = Clock()
+    mgr = manager(database, clock, Recorder())
+    feed(mgr, clock, 14, kind="answer")
+    feed(mgr, clock, 6, kind="unavailable")
+    assert rows(database) == [("error_rate", "critical", 6, 1)]
+    feed(mgr, clock, 4, kind="unavailable")  # the window now holds 10 failures
+    assert rows(database) == [("error_rate", "critical", 10, 1)]
+    feed(mgr, clock, 3, kind="answer")  # still above 25 %, no new failure: nothing is added
+    assert rows(database) == [("error_rate", "critical", 10, 1)]
+
+
+def test_an_early_start_up_failure_counts_in_the_error_rate_window(database):
+    clock = Clock()
+    mgr = manager(database, clock, Recorder())
+    feed(mgr, clock, 14, kind="answer")
+    feed(mgr, clock, 6, kind="starting_up")
+    assert [r[0] for r in rows(database)] == ["error_rate"]
+
+
 # ================================================================================ the webhook ====
 def test_the_text_format_is_a_text_body_and_discord_is_a_content_body():
     assert webhook.WebhookSender(GOOD_URL).body("hi") == {"text": "hi"}

@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -31,6 +31,9 @@ from app.accounts.tokens import utc_text
 from app.db.connection import Database
 
 MAX_ATTEMPTS = 5
+# A chat's row stays at least this long, and goes only when a pass at or after this age lists ZERO
+# traces: a trace still being written (the sink sends in the background) would otherwise outlive it.
+GRACE_SECONDS = 600
 PAGE_SIZE = 100
 MAX_PAGES = 10  # at most 1,000 traces of one chat are removed in one pass
 TIMEOUT_SECONDS = 5.0
@@ -62,7 +65,13 @@ class TraceDeleter:
         return httpx.Client(timeout=TIMEOUT_SECONDS, transport=TRANSPORT, auth=self._auth)
 
     def trace_ids(self, hash_value: str) -> list[str]:
+        return self.list_traces(hash_value)[0]
+
+    def list_traces(self, hash_value: str) -> tuple[list[str], bool]:
+        """The trace ids of one chat, and whether the listing hit the cap of one pass (there may
+        be more behind it)."""
         ids: list[str] = []
+        capped = False
         with self._client() as client:
             for page in range(1, MAX_PAGES + 1):
                 response = client.get(
@@ -75,7 +84,9 @@ class TraceDeleter:
                 ids.extend(found)
                 if len(found) < PAGE_SIZE:
                     break
-        return ids
+                if page == MAX_PAGES:
+                    capped = True
+        return ids, capped
 
     def delete(self, trace_ids: Iterable[str]) -> int:
         removed = 0
@@ -90,6 +101,11 @@ class TraceDeleter:
 
     def delete_session(self, hash_value: str) -> int:
         return self.delete(self.trace_ids(hash_value))
+
+    def sweep(self, hash_value: str) -> tuple[int, int, bool]:
+        """One look at a chat: (traces found, traces removed, listing capped)."""
+        ids, capped = self.list_traces(hash_value)
+        return len(ids), self.delete(ids), capped
 
 
 # ---- the queue -------------------------------------------------------------------------------
@@ -136,9 +152,10 @@ def process_pending(
             (int(limit),),
         )
     removed = failed = alerted = 0
+    old_enough = utc_text(now - timedelta(seconds=GRACE_SECONDS))
     for row_id, hash_value, attempts, already_alerted in rows:
         try:
-            deleter.delete_session(hash_value)
+            found, _deleted, capped = deleter.sweep(hash_value)
         except Exception as error:
             failed += 1
             attempts = int(attempts) + 1
@@ -160,9 +177,20 @@ def process_pending(
                     except Exception:
                         pass
             continue
+        if capped and on_event is not None:
+            try:  # more traces than one pass removes: the row stays and the next pass goes on
+                on_event("trace_deletion_cap_reached", {"total": found})
+            except Exception:
+                pass
+        if found or capped:
+            continue  # traces were there: look again later (a late one may still arrive)
         with db.transaction(write=True):
-            db.execute("DELETE FROM trace_deletions WHERE id = ?", (row_id,))
-        removed += 1
+            gone = db.execute(
+                "DELETE FROM trace_deletions WHERE id = ? AND created_at <= ?",
+                (row_id, old_enough),
+            )
+        if getattr(gone, "rowcount", 1):
+            removed += 1
     return PassResult(removed, failed, alerted)
 
 

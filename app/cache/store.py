@@ -43,6 +43,7 @@ import redis
 
 from app.gateway.embeddings import running_on_render
 from app.isolation import is_local_url
+from app.observability.logs import fx
 
 log = logging.getLogger("app.cache")
 
@@ -247,7 +248,7 @@ class CacheStore:
         return f"{self._ns}{key}"
 
     def _emit(self, name: str, **fields: Any) -> None:
-        log.warning("cache event %s %s", name, fields)
+        log.warning("cache event %s", name, extra=fx(fields))
         if self._on_event:
             try:
                 self._on_event(name, fields)

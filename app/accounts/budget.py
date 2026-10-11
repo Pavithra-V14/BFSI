@@ -22,6 +22,7 @@ from typing import Any
 
 from app.api.settings import ApiSettings
 from app.cache.store import CacheStore, RateDecision
+from app.observability.logs import fx
 
 log = logging.getLogger("app.accounts")
 
@@ -56,7 +57,7 @@ class UsageLimits:
         self._on_event = on_event
 
     def _alert(self, name: str, **fields: Any) -> None:
-        log.warning("accounts event %s %s", name, fields)
+        log.warning("accounts event %s", name, extra=fx(fields))
         if self._on_event:
             try:
                 self._on_event(name, fields)

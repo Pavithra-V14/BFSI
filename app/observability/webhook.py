@@ -24,14 +24,49 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.observability.scan import register_secret
+
 ENV_URL = "ALERT_WEBHOOK_URL"
 ENV_FORMAT = "ALERT_WEBHOOK_FORMAT"
 FORMATS = ("text", "discord")
 SEND_TIMEOUT_SECONDS = 3.0
-_PLACEHOLDER = re.compile(
-    r"your|example|placeholder|changeme|change-me|dummy|fake|sample|redacted|todo|tbd|xxxx|<|>|\$\{",
-    re.IGNORECASE,
-)
+# A placeholder is a WHOLE value or segment that is one of these words (or a "your-..." style
+# name, "xxxx", an angle-bracket or ${...} template), or an example domain. A real token that only
+# CONTAINS "todo" or "fake" inside is accepted.
+_PLACEHOLDER_WORDS = frozenset(
+    {"your", "example", "placeholder", "changeme", "dummy", "fake", "sample", "redacted", "todo",
+     "tbd"}
+)  # fmt: skip
+_EXAMPLE_HOST_SUFFIXES = (
+    "example.com", "example.org", "example.net", ".example", ".test", ".invalid", ".localhost",
+)  # fmt: skip
+_TEMPLATE = re.compile(r"[<>]|\$\{|\{\{|\*{3,}")
+
+
+def _looks_like_placeholder_word(part: str) -> bool:
+    lowered = part.lower().strip("-_ ")
+    if not lowered:
+        return False
+    if lowered in _PLACEHOLDER_WORDS or re.fullmatch(r"x{3,}", lowered):
+        return True
+    return re.match(r"^your[-_]", lowered) is not None or lowered == "your"
+
+
+def is_placeholder(url: str) -> bool:
+    if _TEMPLATE.search(url):
+        return True
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host in ("example.com", "example.org", "example.net") or host.endswith(
+        _EXAMPLE_HOST_SUFFIXES
+    ):
+        return True
+    if any(_looks_like_placeholder_word(label) for label in host.split(".")):
+        return True
+    segments = [s for s in re.split(r"[/?#&=]", f"{parts.path}?{parts.query}") if s]
+    return any(_looks_like_placeholder_word(segment) for segment in segments)
+
+
 _NAME = re.compile(r"^[a-z0-9_]{1,60}$")
 
 # Tests put an `httpx.MockTransport` here; the running service leaves it None (real network).
@@ -87,8 +122,11 @@ def sender_from_env(env: Mapping[str, str]) -> WebhookSender | None:
         raise WebhookConfigError(f"{ENV_URL} must be an https address")
     if parts.username or parts.password:
         raise WebhookConfigError(f"{ENV_URL} must not carry a user name or password")
-    if _PLACEHOLDER.search(url):
+    if is_placeholder(url):
         raise WebhookConfigError(f"{ENV_URL} is still a placeholder")
+    register_secret(url)  # found and scrubbed exactly in every log line, whatever the host
+    if len(parts.path) >= 8:
+        register_secret(parts.path)  # the token part alone, in case a library prints only that
     return WebhookSender(url, fmt)
 
 

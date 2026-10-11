@@ -84,6 +84,10 @@ def alerts_banner(client: ApiClient) -> None:
         render.show_notice(
             "danger", "Alert: something needs attention", f"Critical events: {names}", urgent=True
         )
+    elif reply.ok and isinstance(reply.data, dict) and reply.data.get("warnings"):
+        # a warning is information, not an emergency: a calm line, not a red banner
+        names = ", ".join(str(n) for n in reply.data.get("warnings") or [])
+        render.show_notice("info", "Heads-up", f"Warnings in the last 24 hours: {names}")
 
 
 # ---- sections --------------------------------------------------------------------------------
@@ -280,12 +284,31 @@ def alerts(client: ApiClient) -> None:
     if data.get("banner"):
         names = ", ".join(str(n) for n in data.get("critical") or [])
         render.show_notice("danger", "Critical events", names, urgent=True)
+    elif data.get("warnings"):
+        names = ", ".join(str(n) for n in data.get("warnings") or [])
+        render.show_notice("info", "Warnings", names)
     else:
         render.show_notice("ok", "All quiet", "No critical event among the recent ones.")
+    st.subheader("Alerts of the last 24 hours")
+    recent = [a for a in data.get("recent") or [] if isinstance(a, dict)]
+    _table(
+        [
+            {
+                "alert": a.get("name"),
+                "severity": a.get("severity"),
+                "count": a.get("count"),
+                "sent to webhook": "yes" if a.get("notified") else "no",
+                "at": a.get("at"),
+            }
+            for a in recent
+        ]
+    )
+    st.subheader("Events seen by this running service")
     _table([{"event": e.get("name"), "count": e.get("count")} for e in data.get("events") or []])
     render.caption(
-        f"Counts of the last {number(data.get('window'))} events, kept in memory by the running "
-        "service (a restart clears them)."
+        f"The alerts above are saved in the database and survive a restart. The event counts "
+        f"(the last {number(data.get('window'))} events of the past 24 hours) are kept in memory "
+        "by the running service and a restart clears them."
     )
 
 

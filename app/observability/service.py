@@ -25,6 +25,11 @@ from app.pipeline import langfuse_sink
 
 log = logging.getLogger("app.observability")
 
+
+def day_floor(moment: datetime) -> datetime:
+    return metrics.day_start(moment)
+
+
 ROLLUP_SECONDS = 300.0
 TRACE_SECONDS = 60.0
 AUDIT_RETENTION_DAYS = 30  # the pilot value (spec 12.1); to be revisited in Phase 16
@@ -58,6 +63,22 @@ class Observability:
         """Called once per finished chat request. Never raises."""
         try:
             obs = metrics.observation_from(ctx, result, self._now().timestamp())
+            self.hub.observe(obs)
+            self.alerts.observe(obs)
+        except Exception as error:
+            self._event("observability_failed", {"reason": type(error).__name__})
+
+    def observe_early(self, request: Any, result: Any) -> None:
+        """A request that ended before the graph ran (service starting, masker or setup failed).
+        It counts as an unavailable answer in the metrics and the error-rate window.
+        Never raises."""
+        try:
+            obs = metrics.RequestObservation(
+                at=self._now().timestamp(),
+                role=str(getattr(request, "role", "")),
+                kind="unavailable",
+                reason=str(result.reason) if getattr(result, "reason", None) else None,
+            )
             self.hub.observe(obs)
             self.alerts.observe(obs)
         except Exception as error:
@@ -112,9 +133,24 @@ class Observability:
         self.alerts.on_event(name, fields)
         self._event(name, fields)
 
+    def seed_tokens(self) -> None:
+        """Today's tokens already saved (hourly rows) become the start of the day's total."""
+        db = self._db_factory()
+        try:
+            today = day_floor(self._now())
+            totals = metrics.hourly_totals(db, today, today + timedelta(days=1))
+            used = totals.get(("all", "tokens_in"), 0.0) + totals.get(("all", "tokens_out"), 0.0)
+            self.hub.seed_tokens(today, int(used))
+        finally:
+            db.close()
+
     def start(self) -> None:
         if self._threads:
             return
+        try:
+            self.seed_tokens()
+        except Exception as error:  # a down database must not stop the service from starting
+            self._event("observability_failed", {"reason": type(error).__name__})
         self.alerts.start()
         for target, seconds, name in (
             (self.rollup_once, ROLLUP_SECONDS, "rollup-writer"),

@@ -6,6 +6,7 @@ day can be read. The dashboard itself is built in a later phase.
 
 from __future__ import annotations
 
+import threading
 from collections import Counter, deque
 
 from app.gateway.clock import Clock
@@ -18,23 +19,26 @@ class DeciderStats:
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
         self._records: deque[tuple[float, str, str]] = deque()
+        self._lock = threading.Lock()  # the gateway appends while a dashboard reads
 
     def record(self, step: str, decider: str) -> None:
         now = self._clock.now()
-        self._records.append((now, step, decider))
-        while self._records and now - self._records[0][0] > DAY:
-            self._records.popleft()
+        with self._lock:
+            self._records.append((now, step, decider))
+            while self._records and now - self._records[0][0] > DAY:
+                self._records.popleft()
 
     def steps(self) -> list[str]:
         """The steps that have a decision on record (last day)."""
-        return sorted({name for _, name, _ in self._records})
+        with self._lock:
+            return sorted({name for _, name, _ in self._records})
 
     def shares(self, step: str, window_seconds: float = HOUR) -> dict[str, float]:
         now = self._clock.now()
+        with self._lock:
+            records = list(self._records)
         counts = Counter(
-            decider
-            for at, name, decider in self._records
-            if name == step and now - at <= window_seconds
+            decider for at, name, decider in records if name == step and now - at <= window_seconds
         )
         total = sum(counts.values())
         return {decider: count / total for decider, count in counts.items()} if total else {}

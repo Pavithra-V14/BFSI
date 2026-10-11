@@ -47,6 +47,35 @@ def clean_clause_ref(value: Any) -> str | None:
     return text
 
 
+# Three lists are recorded in the same order, one entry per chunk that reached the generator. An
+# entry that cannot be recorded (no clause reference, no hash, an odd or too long value) is the
+# empty string, so the lists stay aligned and one empty entry never costs the others. Each entry is
+# checked on its own: a chunk id is an identifier, a content hash is hex, a clause reference passes
+# `clean_clause_ref` (up to six words).
+ALIGNED_FIELDS = ("chunk_ids", "content_hashes", "clause_refs")
+MAX_ALIGNED = 50
+_CHUNK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+_HEX_HASH = re.compile(r"^[A-Fa-f0-9]{8,128}$")
+
+
+def aligned_entry(field_name: str, value: Any) -> str:
+    """One entry of an aligned list: the value if it passes its rule, else the empty string."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if field_name == "clause_refs":
+        return clean_clause_ref(text) or ""
+    if field_name == "content_hashes":
+        return text if _HEX_HASH.match(text) else ""
+    return text if _CHUNK_ID.match(text) else ""
+
+
+def aligned_list(field_name: str, values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [aligned_entry(field_name, v) for v in list(values)[:MAX_ALIGNED]]
+
+
 def safe_value(value: Any) -> Any:
     """The value if it is safe to record, else None. Numbers and booleans pass; a string passes
     only if it looks like an id, a hash, a clause reference or a name (never a sentence)."""
@@ -115,6 +144,9 @@ class Trace:
 
     def record(self, **fields: Any) -> None:
         for name, value in fields.items():
+            if name in ALIGNED_FIELDS:  # positional lists: an empty entry is a placeholder
+                self.audit[name] = aligned_list(name, value)
+                continue
             cleaned = safe_value(value)
             if cleaned is not None or value is None:
                 self.audit[name] = cleaned

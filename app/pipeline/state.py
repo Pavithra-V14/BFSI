@@ -96,6 +96,9 @@ class Deps:
     observer: Callable[[Any, Any], None] | None = None  # (ctx, result): metrics and alert rules
     on_finish: Callable[[Any, Any], None] | None = None  # (ctx, result): the dev stage printer
     on_stage_start: Callable[[str], None] | None = None  # the dev stage printer
+    # (request, result) of a request that ended before the graph ran: the masker still loading or
+    # failed, a setup that failed. Counted in the error-rate window like any other outcome.
+    observer_early: Callable[[Any, Any], None] | None = None
     memory: Any = None  # memory.config.MemoryConfig (made by Pipeline when not given)
 
 

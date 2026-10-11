@@ -123,6 +123,16 @@ class MetricsHub:
         self._lock = threading.Lock()
         self._items: deque[RequestObservation] = deque(maxlen=KEEP)
         self._pending = _Pending()
+        # tokens already saved for a day before this process started (see `seed_tokens`)
+        self._seed_day: float | None = None
+        self._seed_tokens = 0
+
+    def seed_tokens(self, day: datetime, tokens: int) -> None:
+        """At start-up: the tokens the saved hourly rows hold for `day`. Without this the day's
+        total restarts at zero with every restart and the budget rule goes quiet."""
+        with self._lock:
+            self._seed_day = day_start(day).timestamp()
+            self._seed_tokens = max(0, int(tokens))
 
     # ---- feeding -------------------------------------------------------------------
     def observe(self, obs: RequestObservation) -> None:
@@ -216,7 +226,9 @@ class MetricsHub:
     def tokens_today(self) -> int:
         start = day_start(self._now()).timestamp()
         with self._lock:
-            return sum(o.tokens for o in self._items if o.at >= start)
+            live = sum(o.tokens for o in self._items if o.at >= start)
+            seed = self._seed_tokens if self._seed_day == start else 0
+            return seed + live
 
     # ---- saving --------------------------------------------------------------------
     def restore(self, pending: dict[tuple[datetime, str, str], float]) -> None:
@@ -325,6 +337,15 @@ def daily_from_tables(db: Database, day: datetime) -> dict[tuple[str, str], floa
     return values
 
 
+def _utc_day_expression(db: Database) -> str:
+    """SQL for the UTC calendar day (YYYY-MM-DD) of `period_start`. Postgres would cast a
+    timestamptz in the SESSION's time zone, so it is converted to UTC explicitly; SQLite holds the
+    UTC text already."""
+    if db.kind == "postgres":
+        return "to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+    return "substr(CAST(period_start AS TEXT), 1, 10)"
+
+
 def daily_series(db: Database, days: int, *, now: datetime) -> list[dict[str, Any]]:
     """The last `days` UTC days (oldest first), per role (customer, staff, all), from the saved
     rows: the day counts and the sums of that day's hourly rows, plus the ratios. Numbers only."""
@@ -336,13 +357,16 @@ def daily_series(db: Database, days: int, *, now: datetime) -> list[dict[str, An
             "WHERE period = 'day' AND period_start >= ? ORDER BY period_start, role, metric",
             (utc_text(first),),
         )
+        day = _utc_day_expression(db)
         hours = db.query_all(
-            "SELECT substr(CAST(period_start AS TEXT), 1, 10), role, metric, SUM(value) "
+            f"SELECT {day}, role, metric, SUM(value) "
             "FROM metric_rollups WHERE period = 'hour' AND period_start >= ? "
-            "GROUP BY substr(CAST(period_start AS TEXT), 1, 10), role, metric",
+            f"GROUP BY {day}, role, metric",
             (utc_text(first),),
         )
     for start, role, metric, value in rows:
+        if hasattr(start, "astimezone"):  # a Postgres timestamptz: its UTC day
+            start = start.astimezone(UTC).strftime("%Y-%m-%d")
         by_day.setdefault(str(start)[:10], {}).setdefault(role, {})[metric] = float(value)
     for label, role, metric, value in hours:
         by_day.setdefault(str(label), {}).setdefault(role, {})[metric] = float(value or 0.0)

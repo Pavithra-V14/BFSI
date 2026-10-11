@@ -73,7 +73,10 @@ def keep_logging_as_it_was():
         name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate)
         for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
     }
+    quiet = {n: logging.getLogger(n).level for n in ("httpx", "httpcore")}
     yield
+    for name, was in quiet.items():  # `configure_logging` quiets the HTTP clients' loggers
+        logging.getLogger(name).setLevel(was)
     for handler in list(root.handlers):
         if handler not in handlers:
             root.removeHandler(handler)

@@ -261,3 +261,21 @@ def test_no_user_or_session_id_is_stored_in_the_rollups(db):
     metrics.set_daily(db, day, metrics.daily_from_tables(db, day))
     stored = str(db.query_all("SELECT * FROM metric_rollups"))
     assert user not in stored and session not in stored
+
+
+def test_billed_and_shadow_cost_per_answer_are_kept_apart_in_the_daily_ratios():
+    ratios = metrics.derived({"answered": 4.0, "billed_cost": 0.02, "shadow_cost": 0.08})
+    assert ratios["billed_per_answer"] == 0.005 and ratios["shadow_per_answer"] == 0.02
+
+
+def test_hourly_totals_include_the_start_hour_and_exclude_the_end_hour(db):
+    first = NOW.replace(hour=8, minute=0)
+    metrics.add_hourly(
+        db,
+        {
+            (first, "all", "requests"): 1.0,
+            (first + timedelta(hours=1), "all", "requests"): 10.0,
+        },
+    )
+    totals = metrics.hourly_totals(db, first, first + timedelta(hours=1))
+    assert totals[("all", "requests")] == 1.0

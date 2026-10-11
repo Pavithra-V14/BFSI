@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ from app.api.rollout import Rollout
 from app.api.settings import ApiSettings
 from app.cache.store import CacheStore
 from app.db.connection import Database
+from app.observability.logs import fx
 
 log = logging.getLogger("app.api")
 EVENT_BUFFER = 1_000
@@ -80,11 +82,16 @@ class Services:
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))
+    # When each event in `events` happened (same length, same order), so the banner can let an
+    # old one expire (24 hours) instead of showing it until the buffer is pushed out.
+    event_times: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))
+    clock: Callable[[], float] = time.time
 
     def emit(self, name: str, **fields: Any) -> None:
         """Record an alert event: names and counts only, never a name, an address or a secret."""
         self.events.append((name, fields))
-        log.warning("api event %s %s", name, fields, extra={"fx": {"event": name}})
+        self.event_times.append(self.clock())
+        log.warning("api event %s", name, extra=fx({"event": name, **fields}))
         if self.observability is not None:  # alert rules and persistence (never raises)
             try:
                 self.observability.alerts.on_event(name, fields)

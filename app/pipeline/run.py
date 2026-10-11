@@ -31,6 +31,10 @@ from app.pipeline.state import Deps, PipelineState, Request, Result
 from app.pipeline.trace import Trace
 from app.vector.documents import sparse_check
 
+# Results that end before the graph runs and count as errors in the error-rate window. A "busy"
+# session is the user's own doing, not a fault of the service.
+EARLY_ERROR_REASONS = frozenset({"starting_up", "masker_failed", "setup_failed"})
+
 
 class Pipeline:
     def __init__(self, deps: Deps) -> None:
@@ -73,7 +77,14 @@ class Pipeline:
         connection. When a result is returned the caller closes via `result.on_db_idle`."""
         running: list[PipelineState] = []
         try:
-            return await self._answer(request, db, running)
+            result = await self._answer(request, db, running)
+            early = self.deps.observer_early
+            if not running and early is not None and result.reason in EARLY_ERROR_REASONS:
+                try:
+                    early(request, result)
+                except Exception:  # a broken observer must never reach the answer
+                    pass
+            return result
         except BaseException:
             if close_db is not None:
                 if running:

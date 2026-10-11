@@ -40,6 +40,8 @@ ALLOWED_FIELDS = frozenset(
         "event", "name", "count", "stage", "code", "reason", "status", "kind", "severity",
         "store", "scope", "tier", "provider", "model", "decider", "key_fingerprint", "tokens",
         "duration_ms", "method", "path", "status_code", "attempts", "queued", "window",
+        "operation", "error", "available", "chunks", "answers", "variables", "failed",
+        "patterns", "dropped", "missing", "out_of_date", "total",
     }
 )  # fmt: skip
 MAX_MESSAGE = 300
@@ -69,9 +71,17 @@ def clean_fields(raw: Any) -> dict[str, Any]:
             continue
         if isinstance(value, bool | int | float):
             out[name] = value
-        elif isinstance(value, str) and _WORD.match(value):
-            out[name] = value
+        elif isinstance(value, str):
+            shown = scrub(value)  # a string is scrubbed, and only then must it still be a word
+            if _WORD.match(shown):
+                out[name] = shown
     return out
+
+
+def fx(fields: Any) -> dict[str, Any]:
+    """`extra=` for a log call: only the allow-listed fields, with string values scrubbed. Every
+    place that logs an event's fields goes through this, never `%s` of a whole dict."""
+    return {"fx": clean_fields(fields)}
 
 
 class JsonFormatter(logging.Formatter):
@@ -131,6 +141,9 @@ def configure_logging(level: str = "INFO", stream: TextIO | None = None) -> logg
     handler._bfsi_json = True  # type: ignore[attr-defined]
     root.addHandler(handler)
     root.setLevel(level.upper() if isinstance(level, str) else "INFO")
+    for noisy in ("httpx", "httpcore"):
+        # their INFO line prints the full request address: that is where a webhook token would go
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         library = logging.getLogger(name)
         library.handlers = []  # their own plain-text handlers would print the request line

@@ -58,12 +58,17 @@ EVENT_SEVERITY: dict[str, str] = {
     "persist_queue_overflow": CRITICAL,
     "persist_job_dead_lettered": CRITICAL,
     "trace_deletion_failed": CRITICAL,
+    "trace_queue_failed": CRITICAL,  # a chat was deleted but its traces could not be queued
+    "trace_deletion_cap_reached": CRITICAL,  # a chat has more traces than one pass removes
     "jev_unavailable": WARNING,
     "decision_fell_to_rules": WARNING,
     "rerank_failed": WARNING,
     "langfuse_failed": WARNING,
     "alert_webhook_failed": WARNING,
 }
+
+# Outcomes that count as errors in the error-rate window ("busy" is the user's own doing).
+ERROR_KINDS = frozenset({"unavailable", "starting_up"})
 
 # Result reasons that are the guardrails saying no (not "out of domain" or "no context").
 GUARDRAIL_REASONS = frozenset(
@@ -86,22 +91,29 @@ class AlertConfig:
     per_name_seconds: float = 3_600.0  # one alert per name per hour
 
 
+MIN_REQUESTS_FLOOR = 20  # a rule never fires on fewer requests than this (spec: [T] 20)
+
+
 def config_from_env(env: Mapping[str, str]) -> AlertConfig:
-    """Overrides by name (numbers only). A value that is not a number keeps the default and the
-    caller is told by `ValueError` naming the variable."""
+    """Overrides by name. Every value is checked: a number that is finite and inside its range.
+    A bad one raises `ValueError` naming the variable (never its value), so the service does not
+    start with an alert that can never fire (a rate of 25, "nan") or one that fires on noise."""
+    import math
+
     base = AlertConfig()
-    names = {
-        "ALERT_WINDOW_MINUTES": ("window_seconds", 60.0),
-        "ALERT_MIN_REQUESTS": ("min_requests", 1),
-        "ALERT_ERROR_RATE": ("error_rate", 1.0),
-        "ALERT_FALLBACK_RATE": ("fallback_rate", 1.0),
-        "ALERT_GUARDRAIL_RATE": ("guardrail_rate", 1.0),
-        "ALERT_DAILY_TOKEN_PLAN": ("daily_token_plan", 1),
-        "ALERT_BUDGET_VARIANCE": ("budget_variance", 1.0),
-        "ALERT_WEBHOOK_DAILY_CAP": ("webhook_daily_cap", 1),
+    # variable: (field, low, high, whole number?, factor to the field's unit)
+    rules: dict[str, tuple[str, float, float, bool, float]] = {
+        "ALERT_WINDOW_MINUTES": ("window_seconds", 1.0, 1440.0, False, 60.0),
+        "ALERT_MIN_REQUESTS": ("min_requests", float(MIN_REQUESTS_FLOOR), 100_000.0, True, 1.0),
+        "ALERT_ERROR_RATE": ("error_rate", 0.0001, 1.0, False, 1.0),
+        "ALERT_FALLBACK_RATE": ("fallback_rate", 0.0001, 1.0, False, 1.0),
+        "ALERT_GUARDRAIL_RATE": ("guardrail_rate", 0.0001, 1.0, False, 1.0),
+        "ALERT_DAILY_TOKEN_PLAN": ("daily_token_plan", 1.0, 1e9, True, 1.0),
+        "ALERT_BUDGET_VARIANCE": ("budget_variance", 1.0, 100.0, False, 1.0),
+        "ALERT_WEBHOOK_DAILY_CAP": ("webhook_daily_cap", 1.0, 1000.0, True, 1.0),
     }
     values: dict[str, Any] = {}
-    for variable, (field_name, factor) in names.items():
+    for variable, (field_name, low, high, whole, factor) in rules.items():
         raw = (env.get(variable) or "").strip()
         if not raw:
             continue
@@ -109,12 +121,11 @@ def config_from_env(env: Mapping[str, str]) -> AlertConfig:
             number = float(raw)
         except ValueError:
             raise ValueError(f"{variable} must be a number") from None
-        if number <= 0:
-            raise ValueError(f"{variable} must be more than zero")
-        current = getattr(base, field_name)
-        values[field_name] = (
-            int(number * factor) if isinstance(current, int) else float(number * factor)
-        )
+        if not math.isfinite(number) or not low <= number <= high:
+            raise ValueError(f"{variable} must be a number from {low:g} to {high:g}")
+        if whole and number != int(number):
+            raise ValueError(f"{variable} must be a whole number")
+        values[field_name] = int(number) if whole else number * factor
     return AlertConfig(**{**base.__dict__, **values})
 
 
@@ -211,15 +222,6 @@ class AlertStore:
         return self._run(work)
 
 
-def purge_alert_events(db: Database, cutoff: datetime) -> int:
-    """Delete alert rows older than the cutoff (the retention command calls this)."""
-    row = db.query_one(
-        "SELECT COUNT(*) FROM alert_events WHERE created_at < ?", (utc_text(cutoff),)
-    )
-    db.execute("DELETE FROM alert_events WHERE created_at < ?", (utc_text(cutoff),))
-    return int(row[0]) if row else 0
-
-
 # ---- the manager -----------------------------------------------------------------------------
 class AlertManager:
     def __init__(
@@ -245,7 +247,8 @@ class AlertManager:
         self._recent: dict[str, tuple[str | None, datetime]] = {}  # name -> (row id, time)
         self._window: deque[RequestObservation] = deque(maxlen=20_000)
         self._last_failure_event = -1e9
-        self._queue: queue.Queue[tuple[str, str, int, int | None]] = queue.Queue(QUEUE_SIZE)
+        self._queue: queue.Queue[tuple[str, str, int, int | None, bool]] = queue.Queue(QUEUE_SIZE)
+        self._last_count: dict[str, int] = {}  # a rule's count at the last write
         self.dropped = 0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -309,7 +312,7 @@ class AlertManager:
             (
                 "error_rate",
                 CRITICAL,
-                sum(1 for o in items if o.kind == "unavailable"),
+                sum(1 for o in items if o.kind in ERROR_KINDS),
                 cfg.error_rate,
             ),
             ("fallback_rate", WARNING, sum(1 for o in items if o.degraded), cfg.fallback_rate),
@@ -322,7 +325,7 @@ class AlertManager:
         )
         for name, severity, count, threshold in rules:
             if count / total >= threshold:
-                self._submit(name, severity, count, minutes)
+                self._submit(name, severity, count, minutes, cumulative=True)
 
     def _budget_rule(self) -> None:
         if self._tokens_today is None:
@@ -336,24 +339,40 @@ class AlertManager:
             self._submit("budget_variance", WARNING, 1, None)
 
     # ---- firing --------------------------------------------------------------------
-    def _submit(self, name: str, severity: str, count: int, window: int | None) -> None:
+    def _submit(
+        self,
+        name: str,
+        severity: str,
+        count: int,
+        window: int | None,
+        cumulative: bool = False,
+    ) -> None:
+        """`cumulative`: `count` is the size of the window (a rule), not one new occurrence."""
         try:
-            self._queue.put_nowait((name, severity, count, window))
+            self._queue.put_nowait((name, severity, count, window, cumulative))
         except queue.Full:
             self.dropped += 1
             return
         if not self._background:
             self.flush()
 
-    def _process(self, name: str, severity: str, count: int, window: int | None) -> None:
+    def _process(
+        self, name: str, severity: str, count: int, window: int | None, cumulative: bool = False
+    ) -> None:
         now = self._now()
         try:
-            self._fire(name, severity, count, window, now)
+            self._fire(name, severity, count, window, now, cumulative)
         except Exception as error:  # the database or the channel: an event, never an exception
             self._report_failure(error)
 
     def _fire(
-        self, name: str, severity: str, count: int, window: int | None, now: datetime
+        self,
+        name: str,
+        severity: str,
+        count: int,
+        window: int | None,
+        now: datetime,
+        cumulative: bool = False,
     ) -> None:
         cfg = self.config
         with self._lock:
@@ -363,11 +382,21 @@ class AlertManager:
             if found is not None:
                 known = (found[0], found[1])
         if known is not None and (now - known[1]).total_seconds() < cfg.per_name_seconds:
-            # one alert per name per hour: the rows already written only get a bigger count
-            if self._store is not None and known[0] is not None:
-                self._store.bump(known[0], count)
+            # one alert per name per hour: the rows already written only get a bigger count. A
+            # rule's count is the size of its window, so only the rise since the last write is
+            # added (a rule that stays above its threshold does not add the whole window again
+            # on every request); an event is one occurrence, so it adds its own count.
             with self._lock:
+                last = self._last_count.get(name)
+                # after a restart the row is known but not its last count: add nothing, then track
+                delta = (
+                    max(0, count - (last if last is not None else count)) if cumulative else count
+                )
+                if cumulative:
+                    self._last_count[name] = max(count, last or 0)
                 self._recent[name] = known
+            if delta > 0 and self._store is not None and known[0] is not None:
+                self._store.bump(known[0], delta)
             return
         notify = severity == CRITICAL and self._sender is not None
         if notify and self._store is not None:
@@ -379,6 +408,8 @@ class AlertManager:
             row_id = self._store.insert(name, severity, count, False, now)
         with self._lock:
             self._recent[name] = (row_id, now)
+            if cumulative:
+                self._last_count[name] = count
         if notify and self._sender is not None:
             try:
                 self._sender.send(message_for(name, severity, count, window))

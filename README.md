@@ -806,6 +806,21 @@ that enters it holds a question, an answer, a username or a key.
   the Langfuse project settings). Trace deletion uses two Langfuse public routes that Run 18 checks
   against the real service. Rows written before migration 0008 (greetings and refusals) count as
   answers in "verified answers" only when they were grounded and cited, which they never are.
+- **Phase 15.** A rollup save whose commit succeeds but whose acknowledgement fails is put back
+  and saved again, so one hour's increment can be counted twice (an overcount of at most one
+  five-minute batch; the daily rows are recomputed from the tables, so only the hourly sums and
+  the dashboards built on them can be off).
+- **Phase 14.** A webhook that answers slowly can hold the single alert-writer thread for up to
+  its 3-second limit per message. The request path is not affected; a full queue drops alerts and
+  only a counter records it (no event).
+- **Phase 15.** The retention command and a deactivated account's trace removal need
+  `LANGFUSE_USER_HASH_KEY` in the shell; without it only a printed note appears and the trace rows
+  are not queued (the DEPLOY.md schedule must set it).
+- **Recorded (Phase 12 hardening).** The first audit of Phase 12 did not read the metrics, audit,
+  retention, stage-printer, webhook-command, dashboards, secret-guard and event-loop tests. They
+  were re-checked by removing each rule in turn; two rules were not guarded (billed against shadow
+  cost per answer, and the end bound of the hourly sum) and now are. The `isfinite` test in the
+  threshold check is redundant, because the range test already refuses nan and infinity.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

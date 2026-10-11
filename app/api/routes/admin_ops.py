@@ -39,6 +39,7 @@ DOCUMENT_PAGE = page_params(default=50, maximum=200)
 ENTITY_PAGE = page_params(default=50, maximum=200)
 SHADOW_PAGE = page_params(default=20, maximum=100)
 ALERT_WINDOW = 1_000
+ALERT_EXPIRY_SECONDS = 24 * 3600  # an in-process event leaves the banner after a day
 
 # Alert events that make the banner show (Phase 12 adds the webhook and the dashboards).
 CRITICAL_ALERTS = frozenset(
@@ -336,7 +337,10 @@ def alerts(request: Request, current: CurrentUser = Depends(require_admin)) -> d
     """The recent alert events as counts by name (the last ALERT_WINDOW events; Phase 12 adds the
     webhook, persistence and the dashboards). Names and counts only."""
     svc = services(request)
-    events = list(svc.events)[-ALERT_WINDOW:]
+    # Only events of the last 24 hours: an old one does not keep the banner up for ever.
+    cutoff = svc.clock() - ALERT_EXPIRY_SECONDS
+    paired = list(zip(svc.events, svc.event_times, strict=False))[-ALERT_WINDOW:]
+    events = [item for item, at in paired if at >= cutoff]
     counts: dict[str, int] = {}
     for name, _fields in events:
         counts[name] = counts.get(name, 0) + 1
@@ -345,9 +349,11 @@ def alerts(request: Request, current: CurrentUser = Depends(require_admin)) -> d
     # time only. A critical one keeps the banner up.
     recent = svc.observability.alerts.recent() if svc.observability is not None else []
     critical |= {a["name"] for a in recent if a["severity"] == "critical"}
+    warnings = {a["name"] for a in recent if a["severity"] == "warning"} - critical
     return {
         "banner": bool(critical),
         "critical": sorted(critical),
+        "warnings": sorted(warnings),
         "events": [{"name": n, "count": c} for n, c in sorted(counts.items())],
         "window": len(events),
         "recent": recent,

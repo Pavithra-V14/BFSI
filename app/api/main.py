@@ -162,6 +162,7 @@ def create_app(
         pipeline.deps.on_event = relay
     if pipeline is not None and observability is not None and getattr(pipeline, "deps", None):
         pipeline.deps.observer = observability.observe
+        pipeline.deps.observer_early = observability.observe_early
     install_error_handlers(app)
     app.include_router(auth.router)
     app.include_router(admin.router)

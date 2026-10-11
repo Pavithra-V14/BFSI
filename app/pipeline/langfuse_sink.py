@@ -53,6 +53,7 @@ import httpx
 from app.accounts.audit import keyed_hash
 from app.api.settings import SettingsError, check_secret, keys_are_related
 from app.isolation import is_local_url
+from app.pipeline.trace import ALIGNED_FIELDS, aligned_list
 
 ENV_PUBLIC = "LANGFUSE_PUBLIC_KEY"
 ENV_SECRET = "LANGFUSE_SECRET_KEY"
@@ -207,7 +208,15 @@ def build_record(ctx: Any, result: Any, user_key: str) -> TraceRecord:
                 output_tokens=int(span.output_tokens or 0),
             )
         )
-    audit = {k: v for k, v in trace.audit.items() if k in TRACE_AUDIT}
+    audit = {k: v for k, v in trace.audit.items() if k in TRACE_AUDIT and k not in ALIGNED_FIELDS}
+    # the aligned lists are checked again here, entry by entry (an empty entry is a placeholder);
+    # a list with no real entry at all is left out
+    aligned = {
+        name: aligned_list(name, trace.audit.get(name))
+        for name in ALIGNED_FIELDS
+        if isinstance(trace.audit.get(name), (list, tuple))
+    }
+    aligned = {name: values for name, values in aligned.items() if any(values)}
     billed = sum(float(s.cost_billed or 0.0) for s in trace.spans)
     shadow = sum(float(s.shadow_cost or 0.0) for s in trace.spans)
     flags = {
@@ -233,6 +242,7 @@ def build_record(ctx: Any, result: Any, user_key: str) -> TraceRecord:
             "stages": len(spans),
         }
     )
+    metadata.update(aligned)
     tags = [ident(result.kind, "unknown") or "unknown"] + [name for name, on in flags.items() if on]
     return TraceRecord(
         trace_id=ident(ctx.request.correlation_id) or uuid.uuid4().hex,
