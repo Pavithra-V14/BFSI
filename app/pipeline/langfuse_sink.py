@@ -94,7 +94,8 @@ TRACE_AUDIT = frozenset(
     "decider in_domain injection_score injection_action injection_detector cache_status "
     "corpus_version "
     "filters_applied context_kept context_dropped reranker best_score low_confidence prompt_answer "
-    "prompt_rewrite prompt_set grounded numeric_ok citation_ok coverage cacheable".split()
+    "prompt_rewrite prompt_set grounded numeric_ok citation_ok coverage cacheable "
+    "chunk_ids content_hashes clause_refs".split()
 )
 
 

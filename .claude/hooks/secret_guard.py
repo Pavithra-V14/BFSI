@@ -42,6 +42,17 @@ PLACEHOLDER_WORDS = (
 OPENROUTER_KEY = re.compile(r"\bsk-or-v1-[A-Za-z0-9]{16,}")
 LANGFUSE_SECRET = re.compile(r"\bsk-lf-[A-Za-z0-9\-]{16,}")
 PEM_PRIVATE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+# The alert webhook address is a secret: anyone who has it can post to the team's chat. Its
+# variable name is ALERT_WEBHOOK_URL (Phase 12); Slack, Discord and Teams incoming-webhook
+# addresses carry their secret in the path, so they are recognised by shape as well.
+ALERT_WEBHOOK_ASSIGNMENT = re.compile(
+    r"\bALERT_WEBHOOK_URL\b[\"'\])]*\s*[:=]\s*[\"']?(https?://[^\s\"'#;&|<>,]{8,})", re.IGNORECASE
+)
+CHAT_WEBHOOK_URL = re.compile(
+    r"https://(?:hooks\.slack\.com/services/|discord(?:app)?\.com/api/(?:v\d+/)?webhooks/"
+    r"|[a-z0-9.\-]+\.webhook\.office\.com/)[A-Za-z0-9/_\-]{8,}",
+    re.IGNORECASE,
+)
 BEARER = re.compile(r"\bbearer\s+([A-Za-z0-9._~+/=\-]{20,})", re.IGNORECASE)
 URL_PASSWORD = re.compile(
     r"\b[a-z][a-z0-9+.\-]*://[^\s:/@\"'<>]+:([^\s@/\"'<>]{6,})@", re.IGNORECASE
@@ -169,6 +180,13 @@ def scan_text(text):
         ):
             match = pattern.search(line)
             if match and not _is_placeholder(match.group(0)):
+                return rule, number
+        for rule, pattern in (
+            ("alert-webhook-url", ALERT_WEBHOOK_ASSIGNMENT),
+            ("chat-webhook-url", CHAT_WEBHOOK_URL),
+        ):
+            match = pattern.search(line)
+            if match and not _is_placeholder(match.group(match.lastindex or 0)):
                 return rule, number
         for match in BEARER.finditer(line):
             if _looks_like_secret(match.group(1)):

@@ -87,6 +87,11 @@ def make_node(name: str, fn: Stage, fallback: Callable[[PipelineState], None] | 
         began = ctx.deps.clock()
         span = Span(name, started_ms=round((began - ctx.started) * 1000, 1))
         failure: str | None = None
+        if ctx.deps.on_stage_start is not None:  # the dev stage printer (off by default)
+            try:
+                ctx.deps.on_stage_start(name)
+            except Exception:
+                pass
         try:
             if left < minimum:  # never start what cannot finish
                 raise StageError(name, "no_time")

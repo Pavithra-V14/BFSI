@@ -92,6 +92,10 @@ class Deps:
     locks: SessionLocks = field(default_factory=SessionLocks)
     queue: Any = None  # persist.PersistQueue (made by Pipeline when not given)
     langfuse: Any | None = None  # langfuse_sink.LangfuseSink, or None: the sink is off
+    # Phase 12 hooks. None of them can affect an answer: each is called inside a try.
+    observer: Callable[[Any, Any], None] | None = None  # (ctx, result): metrics and alert rules
+    on_finish: Callable[[Any, Any], None] | None = None  # (ctx, result): the dev stage printer
+    on_stage_start: Callable[[str], None] | None = None  # the dev stage printer
     memory: Any = None  # memory.config.MemoryConfig (made by Pipeline when not given)
 
 

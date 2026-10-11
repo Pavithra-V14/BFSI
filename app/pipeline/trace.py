@@ -29,6 +29,24 @@ class StageError(Exception):
         self.code = code
 
 
+# A clause reference (or, where a chunk has none, the last heading of its heading path) goes into a
+# trace only if it is short and made of a small set of characters. A longer or odd value is DROPPED,
+# never truncated: a cut sentence could still be a sentence.
+_CLAUSE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .()/§_,-]{0,39}$")
+MAX_CLAUSE_WORDS = 6
+
+
+def clean_clause_ref(value: Any) -> str | None:
+    """The clause reference if it is at most 40 characters of letters, digits, spaces and
+    `. ( ) / § _ , -`, with at most six words; else None (the caller records an empty entry)."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not _CLAUSE.match(text) or len(text.split()) > MAX_CLAUSE_WORDS:
+        return None
+    return text
+
+
 def safe_value(value: Any) -> Any:
     """The value if it is safe to record, else None. Numbers and booleans pass; a string passes
     only if it looks like an id, a hash, a clause reference or a name (never a sentence)."""

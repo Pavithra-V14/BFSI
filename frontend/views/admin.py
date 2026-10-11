@@ -29,6 +29,7 @@ SECTIONS = (
     "Review queue",
     "Users",
     "Alerts",
+    "Dashboards",
     "Rollout",
     "Evaluation",
 )
@@ -346,6 +347,10 @@ def render_section(name: str, client: ApiClient, settings: Settings) -> None:
         users(client)
     elif name == "Alerts":
         alerts(client)
+    elif name == "Dashboards":
+        from frontend.views.dashboards import render_dashboards
+
+        render_dashboards(client)
     elif name == "Rollout":
         rollout(client)
     elif name == "Evaluation":

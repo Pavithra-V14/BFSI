@@ -28,7 +28,7 @@ from app.guardrails.output import check_output, parse_answer
 from app.guardrails.prompts import assemble_answer, get_prompt, prompt_set_version
 from app.pipeline import messages
 from app.pipeline.state import PersistPlan, PipelineState, Result
-from app.pipeline.trace import Span, StageError
+from app.pipeline.trace import Span, StageError, clean_clause_ref
 
 
 def floor_for(ctx: PipelineState) -> float:
@@ -40,6 +40,12 @@ def context_stage(ctx: PipelineState) -> None:
     """Stage 11. Sets `kept`, `labels` and `block`, or ends the request with the fixed refusal."""
     verdict = context_guard(ctx.candidates, floor=floor_for(ctx))
     ctx.trace.record(
+        chunk_ids=[c.chunk_id for c in verdict.kept],
+        content_hashes=[c.content_hash or "" for c in verdict.kept],
+        clause_refs=[
+            clean_clause_ref(c.clause_ref or (c.heading_path[-1] if c.heading_path else None)) or ""
+            for c in verdict.kept
+        ],
         context_kept=len(verdict.kept),
         context_dropped=len(verdict.dropped),
         context_drop_patterns=sorted({p for d in verdict.dropped for p in d.patterns}),

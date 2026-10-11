@@ -58,3 +58,27 @@ def db(env):
     connection = env.db()
     yield connection
     connection.close()
+
+
+@pytest.fixture(autouse=True)
+def keep_logging_as_it_was():
+    """`create_app_from_env` switches the process to JSON logs (Phase 12), which is right for the
+    service and wrong for the rest of a test run: it would put every later test's log lines through
+    the scrubber. Whatever a test did to the root logger and to uvicorn's loggers is undone."""
+    import logging
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    library = {
+        name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate)
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+    }
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+    root.setLevel(level)
+    for name, (kept, propagate) in library.items():
+        logger = logging.getLogger(name)
+        logger.handlers = kept
+        logger.propagate = propagate

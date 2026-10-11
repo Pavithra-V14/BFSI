@@ -25,6 +25,10 @@ class DeciderStats:
         while self._records and now - self._records[0][0] > DAY:
             self._records.popleft()
 
+    def steps(self) -> list[str]:
+        """The steps that have a decision on record (last day)."""
+        return sorted({name for _, name, _ in self._records})
+
     def shares(self, step: str, window_seconds: float = HOUR) -> dict[str, float]:
         now = self._clock.now()
         counts = Counter(

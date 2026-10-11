@@ -335,16 +335,22 @@ def review_entity(
 def alerts(request: Request, current: CurrentUser = Depends(require_admin)) -> dict[str, Any]:
     """The recent alert events as counts by name (the last ALERT_WINDOW events; Phase 12 adds the
     webhook, persistence and the dashboards). Names and counts only."""
-    events = list(services(request).events)[-ALERT_WINDOW:]
+    svc = services(request)
+    events = list(svc.events)[-ALERT_WINDOW:]
     counts: dict[str, int] = {}
     for name, _fields in events:
         counts[name] = counts.get(name, 0) + 1
-    critical = sorted(name for name in counts if name in CRITICAL_ALERTS)
+    critical = {name for name in counts if name in CRITICAL_ALERTS}
+    # The persisted alerts of the last 24 hours (they survive a restart): name, severity, count and
+    # time only. A critical one keeps the banner up.
+    recent = svc.observability.alerts.recent() if svc.observability is not None else []
+    critical |= {a["name"] for a in recent if a["severity"] == "critical"}
     return {
         "banner": bool(critical),
-        "critical": critical,
+        "critical": sorted(critical),
         "events": [{"name": n, "count": c} for n, c in sorted(counts.items())],
         "window": len(events),
+        "recent": recent,
     }
 
 

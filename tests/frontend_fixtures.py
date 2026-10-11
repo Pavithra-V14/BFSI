@@ -55,6 +55,7 @@ class FakeApi:
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Any, str | None]] = []
+        self.queries: list[tuple[str, dict[str, str]]] = []  # (path, query parameters)
         self.routes: dict[tuple[str, str], Any] = {
             ("GET", "/live"): json_response(200, {"status": "ok"}),
             ("POST", "/auth/login"): json_response(
@@ -90,6 +91,7 @@ class FakeApi:
         self.requests.append(
             (request.method, request.url.path, body, request.headers.get("authorization"))
         )
+        self.queries.append((request.url.path, dict(request.url.params)))
         route = self.routes.get((request.method, request.url.path))
         if route is None:
             return error(404, "not_found", "Not found.")

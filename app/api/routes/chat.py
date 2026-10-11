@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
@@ -31,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.deps import is_uuid, open_user_context, services
 from app.api.errors import ApiError
 from app.api.rollout import SHADOW_NOTICE, answers_visible
+from app.observability.logs import current_correlation
 from app.pipeline.state import Request as PipelineRequest
 
 log = logging.getLogger("app.api")
@@ -142,6 +144,7 @@ async def chat(
                 session_id=session_id,
                 shadowed=not visible,
                 rate_counted=True,
+                correlation_id=current_correlation() or uuid.uuid4().hex,
             ),
             db,
             close_db=db.close,

@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 10 closed; Phase 11 (Streamlit frontend) committed (0dd9ffd), round 2 "Phase 11 hardening" built, awaiting the owner's "commit" and approval (next is Phase 12)
+Current phase: Phase 11 closed; Phase 12 (observability) built, awaiting the owner's "commit" and approval (next is Phase 13)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -760,6 +760,52 @@ at every screen.
 - **Not seen in a browser yet.** The tests use Streamlit's own test runner, which does not draw the
   page: the look, the 360 px layout and the keyboard focus are checked by their CSS rules and by
   Run 17, which you do in a browser.
+
+## Observability (Phase 12)
+The parts are in `app/observability/`. Everything there handles names, counts and times; nothing
+that enters it holds a question, an answer, a username or a key.
+
+- **Logs.** Every log line is one JSON object with a correlation id (one per request; it is internal,
+  never shown to a user, and it is the id of the Langfuse trace too). No request body, header or
+  query string is ever logged; only allow-listed fields pass, messages are scrubbed, an exception is
+  its class name only. To check a real log file: `uv run python -m app.observability.scan LOGFILE`
+  (it prints rule names and line numbers, never the text; Run 12 and Run 18 use it).
+- **Traces.** The Langfuse sink also sends the retrieved chunk ids, their content hashes and the
+  clause references (a long or odd one is dropped, not cut). No masked text is sent. When a chat is
+  deleted (one, all, or by the 90-day sweep) its traces are removed by the keyed session hash, in
+  the background, with a persisted queue and bounded retries (5, then one critical alert).
+- **Alerts.** Persisted for 30 days and shown in the banner (`/admin/alerts`). `critical` also goes
+  to the chat webhook; `warning` is banner only. Rules (error rate, fallback rate, guardrail spike,
+  budget variance) need at least 20 requests in the window first; one alert per name per hour;
+  at most 20 webhook messages a day. Thresholds are placeholders [T] (`.env.example`).
+- **The webhook.** `ALERT_WEBHOOK_URL` is a secret (https only; the secret guard knows its name and
+  the Slack, Discord and Teams address shapes). `ALERT_WEBHOOK_FORMAT` is `text` (default) or
+  `discord`.
+- **Dashboards.** `GET /admin/dashboards/{deciders,keys,usage,cache,ingestion,daily}` and the
+  Dashboards section of the frontend: decider in use, key pools, tokens and cost (billed and shadow
+  cost apart), cache, ingestion health, and daily customer and staff metrics. A text table beside
+  every chart. Live numbers are per process; the saved rollups (`metric_rollups`, counts only) feed
+  the daily series.
+- **Purge.** `uv run python -m app.memory.retention` (owner-run, never automatic) now also deletes
+  audit rows, alert rows and hourly rollups older than 30 days (a pilot value, revisit in Phase 16)
+  and writes one `audit_purge` row. Apply migration `0009` first.
+- **Dev stage printer.** `DEV_STAGE_TRACE=true` on your machine prints stages, timings and a
+  waterfall in the terminal; it is refused on Render.
+- **Audit completeness.** `AUDITED_ACTIONS` lists every audited action; a test fails if an audit call,
+  a listed action or an admin route that changes state falls out of step.
+
+**Known limitations (recorded in Phase 12)**
+- **Phase 15.** The live numbers and the alert rules' windows are per process (one instance), and
+  they restart empty after a deploy; the rollups and persisted alerts survive. Several instances
+  need a shared window. Scheduling the retention command is part of `DEPLOY.md`.
+- **Phase 16.** The alert thresholds, the daily webhook cap, the 30-day audit retention and the
+  daily token plan are placeholders until the baseline run.
+- **Phase 13.** The evaluation-run audit action and the evaluation dashboards.
+- **Recorded.** Chats deleted before this phase left traces under their hashed session id; there is
+  no way to find them without the chat id, so they age out with Langfuse's own retention (set it in
+  the Langfuse project settings). Trace deletion uses two Langfuse public routes that Run 18 checks
+  against the real service. Rows written before migration 0008 (greetings and refusals) count as
+  answers in "verified answers" only when they were grounded and cited, which they never are.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

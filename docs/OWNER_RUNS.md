@@ -82,6 +82,7 @@ never set.)
 | 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
 | 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | PENDING |
 | 17 | Look at every screen of the Streamlit frontend, with the API running | Phase 11 | PENDING |
+| 18 | Observability: migration 0009, the webhook, the log scan, trace deletion on real Langfuse, the purge and the dashboards | Phase 12 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much.
@@ -614,6 +615,14 @@ after (g), with the same variables. It adds a document; it does not change the o
   key allows about 10 rerank calls a minute and a monthly cap; Groq about 30 requests a minute;
   Jev is paid. Qdrant: 3 to 4 reads per question.
 - **Safe to repeat:** yes. It writes nothing to Qdrant; its SQLite file is deleted.
+- **Added in Phase 12: scan what it printed.** Copy the whole output of one run into a text file
+  (for example `smoke.txt`; the smoke prints names and counts only) and run:
+
+      uv run python -m app.observability.scan smoke.txt
+
+  You should see `nothing found` and exit code 0. Any `line N: rule` means something that looks
+  like an e-mail address, a number, a token or a key was printed: send back the rule names and
+  line numbers only (the command never prints the text itself), and do not paste the file.
 - **To test Jina alone:** run the customer command once with `COHERE_API_KEY` removed
   (`Remove-Item Env:COHERE_API_KEY`) and look at the `rerank` line's model.
 
@@ -1094,12 +1103,14 @@ It asks you to type the id.
 - **Step 7c. The settings file.** In window B, stop the frontend and start it from a different
   folder: `cd frontend` then `uv run streamlit run app.py`. The page should show "Safety settings
   may not be active". Go back to the project folder and start it again: the notice is gone.
-- **Step 8. Admin view.** Sign out. Sign in as your admin account. You should see a row of
-  sections: Chat, Documents, Entities, Review queue, Users, Alerts, Rollout, Evaluation. Open each:
-  Documents shows your three documents with counts and says "done on the admin machine"; Entities
-  is read-only; Review queue lists items and has a "Label" box with five fixed labels; Users shows
-  accounts (no hashes or emails); Alerts shows "All quiet" or the critical events; Rollout shows
-  the stage and lets you change it; Evaluation says "Not available yet".
+- **Step 8. Admin view.** Sign out. Sign in as your admin account. You should see a row of NINE
+  sections: Chat, Documents, Entities, Review queue, Users, Alerts, Dashboards, Rollout,
+  Evaluation. Open each: Documents shows your three documents with counts and says "done on the
+  admin machine"; Entities is read-only; Review queue lists items and has a "Label" box with five
+  fixed labels; Users shows accounts (no hashes or emails); Alerts shows "All quiet" or the
+  critical events; Dashboards shows six panels (Decider in use, Key pools, Tokens and cost, Cache,
+  Ingestion health, Daily metrics), each with a table above its chart (Run 18 looks at them
+  closely); Rollout shows the stage and lets you change it; Evaluation says "Not available yet".
 - **Step 9. The admin machine view.** Stop the frontend (Ctrl+C in window B) and start it as the
   admin machine:
 
@@ -1130,6 +1141,93 @@ It asks you to type the id.
   six questions in all.
 - **Safe to repeat:** yes.
 
+
+## Run 18. Observability: the webhook, the log scan, trace deletion, the purge, the dashboards
+
+- **Verifies:** Phase 12 on your real services: migration 0009, the chat webhook (one critical test
+  alert arrives, in the shape you chose), the PII and secret scan on a real log file, the removal
+  of a deleted chat's traces from real Langfuse (this checks the two Langfuse routes the code
+  uses), the owner-run purge, the dev stage printer and the Dashboards section.
+- **Before it:** Run 16 (the API runs locally with the migrations), Run 17 (the frontend), Run 13
+  (Langfuse receives traces: the four `LANGFUSE_` variables set) and a chat tool where you can make
+  an incoming webhook (a throw-away test channel is best). Two PowerShell windows: A (API), B
+  (frontend and commands).
+- **Needs (names only), in addition to Run 16:** `ALERT_WEBHOOK_URL` (a secret: set it with
+  `Read-Secret`, never type it where it is shown), optionally `ALERT_WEBHOOK_FORMAT` (`text` or
+  `discord`), and for step 6 `LANGFUSE_USER_HASH_KEY` and the other three Langfuse names in
+  window B too. `DEV_STAGE_TRACE` for step 8.
+- **Step 1. Apply migration 0009 (window A):**
+
+      uv run python -m app.db.migrate --dry-run
+      uv run python -m app.db.migrate
+
+  You should see `pending 0009_observability.sql`, then `applied 0009_observability.sql`.
+- **Step 2. Start the API with the webhook (window A):** set the variables, then
+  `uv run uvicorn app.api.main:create_app_from_env --factory`. You should see JSON log lines (one
+  object per line). If you see `refusing to start: ALERT_WEBHOOK_URL must be an https address` (or
+  `is still a placeholder`), fix the address; the message never shows it.
+- **Step 3. A test message reaches the chat.** In window B, with `ALERT_WEBHOOK_URL` (and
+  `ALERT_WEBHOOK_FORMAT`) set as in window A:
+
+      uv run python -m app.observability.webhook --test
+
+  You should see `sent` and one message in the chat tool, `BFSI assistant [test] webhook check`.
+  If you see a class name instead (for example `HTTPStatusError` or `ConnectError`) the address or
+  the format is wrong for that tool. The command never prints the address. This sends nothing to
+  the banner and writes nothing to the database. (A real alert is sent when a critical event or the
+  error-rate rule fires; the tests cover the rules, and the banner shows them in Alerts.)
+- **Step 4. Look at the log with the scan.** Redirect window A's output to a file when you start the
+  API (`... 2> api.log`), ask two or three questions in the frontend, stop it, then:
+
+      uv run python -m app.observability.scan api.log
+
+  You should see `nothing found` and exit code 0. If it lists `line N: rule`, send back those
+  lines (rule names and numbers only).
+- **Step 5. The dashboards.** Start the frontend as in Run 17 and sign in as admin. Open
+  Dashboards: each panel has a table above its chart. Decider in use shows the providers and
+  their state; Key pools shows counts only; Tokens and cost shows billed cost and shadow cost in
+  separate columns; Daily metrics shows today's row after about five minutes (the service saves
+  numbers every five minutes).
+- **Step 6. Trace deletion on the real Langfuse (the check of its routes).** In window B, with
+  the four Langfuse names set to the same values as the API:
+  1. Ask one question as the test customer so that a trace is made (wait a minute; check in the
+     Langfuse project that one trace appeared with a `sessionId` of 64 hex characters).
+  2. Delete that chat in the frontend (My chats, Delete this chat).
+  3. Wait up to two minutes (the worker runs every minute).
+  You should see the trace gone in Langfuse. If it is still there after five minutes: open the
+  API window, look for `trace_deletion_failed` after five failed tries (an alert), and send back
+  the status words only (for example `401`, `404`, `405`). A `404` or `405` from the list or
+  delete route means the documented route differs in your Langfuse version: send it back and the
+  routes in `app/observability/traces.py` are adjusted.
+- **Step 7. The purge (owner-run).** In window B:
+
+      uv run python -m app.memory.retention --dry-run
+      uv run python -m app.memory.retention
+
+  You should see two lines, `would delete N chats (M messages)` and `would delete N audit rows, N
+  alert rows and N hourly metric rows older than 30 days`; then the same with `deleted`. A
+  `traces:` line appears when chats were queued.
+- **Step 8. The stage printer.** In window A (not on Render) set `DEV_STAGE_TRACE` to `true`, start
+  the API, ask one question. You should see lines `> triage`, `< triage ... ms ...` for every
+  stage, then a `waterfall:` with the slowest stage and the unaccounted time, and never the text of
+  your question. Unset it again.
+- **If a line differs:**
+  - No message in the chat tool but the banner shows the alert: the webhook address or format is
+    wrong for that tool; the API window shows `alert_webhook_failed` with a class name (for
+    example `HTTPStatusError`). Send the class name.
+  - A line of the log scan: send the rule name and line number only.
+  - A dashboard panel empty after questions: the numbers are per process and restart empty: ask a
+    question again after a restart.
+- **Send back:** for each step "ok" or what differed (status words, class names, rule names and
+  line numbers). Never the webhook address, a token or any text from the logs.
+- **Clear:** unset `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_FORMAT`, `DEV_STAGE_TRACE` and the Langfuse
+  names; delete `api.log` (it holds nothing sensitive by design, but it is a log); revoke or delete
+  the test webhook in the chat tool; put the key variables you changed in step 3 back.
+- **Real calls:** about 4 model calls per question; step 3 makes no model call that succeeds (the
+  keys are invalid on purpose); one question for step 6 and one for step 8: about 10 calls in all.
+  One webhook message. A few Langfuse list and delete calls.
+- **Safe to repeat:** yes. Use a throw-away channel for the webhook.
+
 ---
 
 # C. Added by later phases
@@ -1145,7 +1243,7 @@ Known candidates, not yet written (the phase that creates the code writes the ru
 - Phase 9 (cache hardening): written above (Runs 14 and 15).
 - Phase 10 (chat API): written above (Run 16).
 - Phase 11 (Streamlit): written above (Run 17).
-- Phase 12 (observability): the Langfuse retention and dashboard check.
+- Phase 12 (observability): written above (Run 18).
 - Phase 13 and 16 (evaluation, baseline): the evaluation runs (they use real provider keys and
   need your approval first).
 - Phase 14 (load tests): the load run, with the free-tier limits it may hit.

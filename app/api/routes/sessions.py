@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 
-from app.api.deps import CurrentUser, Page, authenticated, get_db, is_uuid, page_params
+from app.api.deps import CurrentUser, Page, authenticated, get_db, is_uuid, page_params, services
 from app.api.errors import ApiError
 from app.api.rollout import SHADOW_NOTICE, WITHDRAWN_NOTICE
 from app.db.connection import Database
@@ -122,13 +122,31 @@ def resume_session(
     }
 
 
+def _queue_traces(request: Request, db: Database, session_ids: list[str]) -> None:
+    """Remember that the Langfuse traces of these chats (of THIS user: the caller checked) must be
+    removed. Best effort: a failure here never stops the user deleting their chat."""
+    observability = services(request).observability
+    if observability is None:
+        return
+    try:
+        observability.queue_chat_traces(db, session_ids)
+    except Exception:
+        services(request).emit("trace_queue_failed")
+
+
 @router.delete("/sessions/{session_id}", status_code=204)
 def delete_my_session(
+    request: Request,
     session_id: str,
     current: CurrentUser = Depends(authenticated),
     db: Database = Depends(get_db),
 ) -> Response:
     _check_id(session_id)
+    try:
+        store.owned_session(db, current.user.id, session_id)
+    except store.SessionNotFound:
+        raise _not_found() from None
+    _queue_traces(request, db, [session_id])
     if not store.delete_own_session(db, current.user.id, session_id):
         raise _not_found()
     return Response(status_code=204)
@@ -136,7 +154,9 @@ def delete_my_session(
 
 @router.delete("/sessions")
 def delete_all_my_sessions(
-    current: CurrentUser = Depends(authenticated), db: Database = Depends(get_db)
+    request: Request,
+    current: CurrentUser = Depends(authenticated),
+    db: Database = Depends(get_db),
 ) -> dict[str, int]:
     """Delete every chat of the signed-in user (spec 13.6)."""
     deleted = 0
@@ -145,6 +165,7 @@ def delete_all_my_sessions(
         if not batch:
             return {"deleted": deleted}
         progress = 0
+        _queue_traces(request, db, [item.id for item in batch])
         for item in batch:
             if store.delete_own_session(db, current.user.id, item.id):
                 progress += 1

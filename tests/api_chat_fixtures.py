@@ -31,6 +31,11 @@ class ChatEnv(Env):
         entity_review_enabled: bool = False,
         pipeline: bool = True,
         rollout_cache_seconds: float | None = 0.0,
+        observability: bool = False,
+        sender=None,
+        trace_key: str | None = None,
+        deleter=None,
+        alert_config=None,
         **settings,
     ):
         self.rig = PipelineRig(tmp_path, documents=documents, gateway=gateway)
@@ -42,9 +47,31 @@ class ChatEnv(Env):
         self.gateway = self.rig.gateway
         self.limits = UsageLimits(self.cache, self.settings)
         self.rig.deps.usage = self.limits
+        self.observability = None
+        if observability:
+            from app.observability.alerts import AlertConfig, AlertManager, AlertStore
+            from app.observability.service import Observability
+
+            factory = lambda: connect(self.url)  # noqa: E731
+            hub_holder: list = []
+            manager = AlertManager(
+                store=AlertStore(factory),
+                sender=sender,
+                config=alert_config or AlertConfig(),
+                background=False,  # processed in the calling thread: tests need no waiting
+                tokens_today=lambda: hub_holder[0].tokens_today() if hub_holder else 0,
+            )
+            self.observability = Observability(
+                db_factory=factory,
+                alerts=manager,
+                deleter=deleter,
+                trace_key=trace_key,
+            )
+            hub_holder.append(self.observability.hub)
         self.app = create_app(
             self.settings,
             db_factory=lambda: connect(self.url),
+            observability=self.observability,
             cache=self.cache,
             gateway=self.gateway,
             vector_client=self.rig.deps.qdrant,

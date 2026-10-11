@@ -801,7 +801,7 @@ def test_a_document_version_that_is_not_a_number_does_not_break_the_list(env, ad
 
 # ================================================================ alerts from every part =====
 @pytest.fixture(scope="module")
-def wired():
+def wired(tmp_path_factory):
     """The app as `create_app_from_env` builds it, with fakes in place of the network clients and a
     masker that fails to load. Nothing here touches a real service."""
     from qdrant_client import QdrantClient
@@ -826,7 +826,7 @@ def wired():
     env = {
         "JWT_SECRET_KEY": JWT_SECRET,
         "AUDIT_HASH_KEY": AUDIT_KEY,
-        "DATABASE_URL": "sqlite:///unused.db",
+        "DATABASE_URL": "sqlite:///" + str(tmp_path_factory.mktemp("wired") / "wired.db"),
         "UPSTASH_REDIS_URL": "redis://localhost:6379",
         "QDRANT_URL": "http://localhost:6333",
         "ENTITY_REVIEW_ENABLED": "true",

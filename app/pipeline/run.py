@@ -168,6 +168,12 @@ class Pipeline:
             result.timings_ms = ctx.trace.timings_ms()
         if deps.langfuse is not None:  # after the result is final: outside the budget, never raises
             deps.langfuse.submit_request(ctx, result)
+        for hook in (deps.observer, deps.on_finish):  # Phase 12: numbers and the dev printer
+            if hook is not None:
+                try:
+                    hook(ctx, result)
+                except Exception:  # a broken observer must never reach the answer
+                    pass
         return result
 
     async def _charge(self, ctx: PipelineState) -> None:

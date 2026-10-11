@@ -101,6 +101,12 @@ Production (Render) serves queries only.
   `uv run streamlit run frontend/app.py`. It reads `API_BASE_URL` (default: the API on this
   machine) and, on the admin machine only, `ADMIN_MACHINE=true`. It needs no secret and imports
   nothing from `app/`.
+- Observability (owner, in his own terminal; Claude never runs them against real services):
+  `uv run python -m app.observability.scan LOGFILE` (looks for PII and secrets in a log; prints
+  rule names and line numbers only), `uv run python -m app.observability.webhook --test` (one test
+  message to `ALERT_WEBHOOK_URL`, a secret), and `uv run python -m app.memory.retention
+  [--dry-run]` (the 90-day chat sweep and the 30-day purge of audit, alert and hourly metric
+  rows; owner-run, never automatic).
 - Create or deactivate accounts (owner only, hidden password prompt, never by Claude):
   `uv run python -m app.accounts.admin_cli create-admin --username NAME --email ADDRESS`.
 - Apply migrations: `uv run python -m app.db.migrate` (add `--dry-run` to list pending

@@ -76,6 +76,7 @@ class Services:
     rollout: Rollout = field(default_factory=Rollout)
     on_render: bool = False  # the admin-machine-only actions are refused here (spec 24)
     entity_review_enabled: bool = False  # ENTITY_REVIEW_ENABLED=true: opt-in, default off [P]
+    observability: Any = None  # app.observability.service.Observability, or None
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))
@@ -83,7 +84,12 @@ class Services:
     def emit(self, name: str, **fields: Any) -> None:
         """Record an alert event: names and counts only, never a name, an address or a secret."""
         self.events.append((name, fields))
-        log.warning("api event %s %s", name, fields)
+        log.warning("api event %s %s", name, fields, extra={"fx": {"event": name}})
+        if self.observability is not None:  # alert rules and persistence (never raises)
+            try:
+                self.observability.alerts.on_event(name, fields)
+            except Exception:
+                pass
         if self.on_event:
             try:
                 self.on_event(name, fields)

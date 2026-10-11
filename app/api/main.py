@@ -28,12 +28,25 @@ from app.accounts.throttle import Throttle
 from app.api.deps import Services
 from app.api.errors import install_error_handlers
 from app.api.rollout import Rollout
-from app.api.routes import admin, admin_ops, auth, chat, feedback, health, sessions
+from app.api.routes import (
+    admin,
+    admin_dashboards,
+    admin_ops,
+    auth,
+    chat,
+    feedback,
+    health,
+    sessions,
+)
 from app.api.security import SecurityMiddleware, cors_options
 from app.api.settings import ApiSettings, SettingsError
 from app.cache.store import CacheStore, store_from_env
 from app.db.connection import Database, connect
 from app.gateway.embeddings import running_on_render
+from app.observability import logs as observability_logs
+from app.observability.service import from_env as observability_from_env
+from app.observability.stage_printer import printer_from_env
+from app.observability.webhook import WebhookConfigError
 
 log = logging.getLogger("app.api")
 
@@ -76,7 +89,11 @@ class SecureFastAPI(FastAPI):
     """
 
     def build_middleware_stack(self) -> ASGIApp:
-        return SecurityMiddleware(super().build_middleware_stack())
+        # The correlation id is bound inside the security layer, so every log line a request
+        # causes (including a refusal by the layers below) carries the same id.
+        return SecurityMiddleware(
+            observability_logs.CorrelationMiddleware(super().build_middleware_stack())
+        )
 
 
 def create_app(
@@ -92,6 +109,7 @@ def create_app(
     on_render: bool = False,
     entity_review_enabled: bool = False,
     rollout_cache_seconds: float | None = None,
+    observability: Any = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -99,7 +117,13 @@ def create_app(
         # tokenizer version? Counts only; a mismatch is an alert event, never a refusal.
         if pipeline is not None:
             await asyncio.to_thread(pipeline.check_index)
-        yield
+        if observability is not None:  # alert writer, rollups and trace deletion (Phase 12)
+            observability.start()
+        try:
+            yield
+        finally:
+            if observability is not None:
+                await asyncio.to_thread(observability.stop)
 
     app = SecureFastAPI(
         title="BFSI assistant API",
@@ -120,6 +144,7 @@ def create_app(
         pipeline=pipeline,
         on_render=on_render,
         entity_review_enabled=entity_review_enabled,
+        observability=observability,
     )
     svc = app.state.services
     svc.rollout = Rollout(
@@ -135,10 +160,13 @@ def create_app(
                 previous(name, fields)
 
         pipeline.deps.on_event = relay
+    if pipeline is not None and observability is not None and getattr(pipeline, "deps", None):
+        pipeline.deps.observer = observability.observe
     install_error_handlers(app)
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(admin_ops.router)
+    app.include_router(admin_dashboards.router)
     app.include_router(chat.router)
     app.include_router(sessions.router)
     app.include_router(feedback.router)
@@ -151,6 +179,7 @@ def create_app(
 
 def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
     env = os.environ if env is None else env
+    observability_logs.configure_logging()  # JSON lines with a correlation id, from the start
     try:
         settings = ApiSettings.from_env(env)
     except SettingsError as error:
@@ -181,9 +210,27 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
         raise SystemExit(f"refusing to start: gateway settings: {type(error).__name__}") from None
     limits = UsageLimits(cache, settings, on_event=relay)
     pipeline = _build_pipeline(env, cache, vector_client, gateway, limits, relay)
+
+    def db_factory() -> Database:
+        return connect(database_url)
+
+    try:
+        observability = observability_from_env(env, db_factory, on_event=relay)
+    except (ValueError, WebhookConfigError) as error:
+        # The message names the variable and the rule, never a value (the address is a secret).
+        raise SystemExit(f"refusing to start: {error}") from None
+    printer = printer_from_env(env, running_on_render=running_on_render(env))
+    if printer is not None and pipeline is not None:  # DEV_STAGE_TRACE=true, never on Render
+        deps = pipeline.deps
+        deps.on_stage_start = printer.stage_started
+        deps.on_span = printer.stage_finished
+        deps.on_finish = lambda ctx, result: printer.waterfall(
+            list(ctx.trace.spans), (ctx.deps.clock() - ctx.started) * 1000.0
+        )
     app = create_app(
         settings,
-        db_factory=lambda: connect(database_url),
+        db_factory=db_factory,
+        observability=observability,
         cache=cache,
         vector_client=vector_client,
         gateway=gateway,

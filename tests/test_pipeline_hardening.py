@@ -894,7 +894,11 @@ def test_a_hanging_postgres_at_persist_returns_the_answer_and_queues_the_turn(ri
     assert result.kind == "answer" and elapsed < 6.0
     assert len(rig.deps.queue) == 1
     persist = next(s for s in rig.spans if s.stage == "persist")
-    assert persist.status == "error" and persist.error_code == "TimeoutError"
+    # Two clocks race here: the write's own limit (0.27 s, ends as an "error" of type
+    # TimeoutError) and the stage's limit (0.3 s, ends as a "timeout"). On a loaded machine either
+    # can fire first; both mean the same thing: the turn was not waited for, and it is queued.
+    assert persist.status in ("error", "timeout")
+    assert persist.error_code in ("TimeoutError", "timeout", "cancelled")
 
 
 # ---- decision 11, 18, 19, 15 -------------------------------------------------------------------

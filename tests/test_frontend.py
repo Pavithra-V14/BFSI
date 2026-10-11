@@ -722,6 +722,7 @@ SECTIONS = [
     "Review queue",
     "Users",
     "Alerts",
+    "Dashboards",
     "Rollout",
     "Evaluation",
 ]

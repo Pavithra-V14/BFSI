@@ -1127,7 +1127,12 @@ class Gateway:
                 state = "circuit_open"
             else:
                 state = pool.status()
-            report[name] = {"keys": pool.size, "state": state, "tiers": tiers}
+            report[name] = {
+                "keys": pool.size,
+                "cooling": len(pool.cooling_fingerprints()),
+                "state": state,
+                "tiers": tiers,
+            }
         return report
 
 

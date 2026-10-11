@@ -217,6 +217,28 @@ class ApiClient:
     def set_stage(self, stage: str) -> Reply:
         return self.request("PUT", "/admin/shadow", json={"stage": stage})
 
+    # ---- dashboards ---------------------------------------------------------------------
+    def dash_deciders(self) -> Reply:
+        return self.request("GET", "/admin/dashboards/deciders")
+
+    def dash_keys(self) -> Reply:
+        return self.request("GET", "/admin/dashboards/keys")
+
+    def dash_usage(self, window: str = "day", role: str | None = None) -> Reply:
+        params: dict[str, Any] = {"window": window}
+        if role:
+            params["role"] = role
+        return self.request("GET", "/admin/dashboards/usage", params=params)
+
+    def dash_cache(self, window: str = "day") -> Reply:
+        return self.request("GET", "/admin/dashboards/cache", params={"window": window})
+
+    def dash_ingestion(self) -> Reply:
+        return self.request("GET", "/admin/dashboards/ingestion")
+
+    def dash_daily(self, days: int = 14) -> Reply:
+        return self.request("GET", "/admin/dashboards/daily", params={"days": days})
+
     def shadow_answers(self, limit: int = 20, offset: int = 0) -> Reply:
         return self.request(
             "GET", "/admin/shadow/answers", params={"limit": limit, "offset": offset}
