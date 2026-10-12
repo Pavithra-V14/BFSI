@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 13 closed; Phase 14 (testing completion) committed (28a3690), its hardening round ("Phase 14 hardening") written and awaiting the owner's "commit" and approval (next is Phase 15)
+Current phase: Phase 14 (testing completion) closed (28a3690, 7d57953); Runs 19 to 27 are pending with the owner; next is Phase 15, not started
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
