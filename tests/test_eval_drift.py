@@ -160,7 +160,9 @@ def test_cost_and_latency_creep_over_thirty_percent_is_flagged():
     report = drift.drift_report(
         recent, baseline, window=(END - timedelta(days=7), END), baseline_window=None
     )
-    assert {"tokens_mean_creep", "latency_p95_ms_creep"} <= set(report["alerts"])
+    alerts = set(report["alerts"])
+    assert "tokens_mean_creep" in alerts
+    assert "latency_p95_ms_creep" in alerts
 
 
 def test_too_few_samples_is_a_note_not_a_comparison():
