@@ -148,3 +148,35 @@ def test_a_text_primary_key_cannot_be_null_on_postgres_either(conn):
             "INSERT INTO users (id, username, email, password_hash) "
             "VALUES (NULL, 'x', 'x@example.test', 'h')"
         )
+
+
+# ---- migration 0010: withdrawn_documents (Phase 15 round 3) ----------------------------------
+def test_withdrawn_documents_keeps_the_first_record_and_refuses_a_free_text_reason(conn):
+    """The statement the delete command runs, on a real Postgres: a second write for the same id
+    changes nothing, and only the fixed reason codes are accepted."""
+    import psycopg
+
+    from app.ingest.withdrawn import INSERT_SQL
+
+    sql = INSERT_SQL.replace("?", "%s")
+    first = conn.execute(sql, ("doc-a", "2026-10-12T09:00:00Z", "compliance"))
+    assert first.rowcount == 1
+    again = conn.execute(sql, ("doc-a", "2026-11-01T09:00:00Z", "outdated"))
+    assert again.rowcount == 0, "a repeat adds nothing and changes nothing"
+    row = conn.execute(
+        "SELECT reason_code, withdrawn_at FROM withdrawn_documents WHERE doc_id = 'doc-a'"
+    ).fetchone()
+    assert row[0] == "compliance" and row[1].month == 10
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO withdrawn_documents (doc_id, reason_code) VALUES ('doc-b', 'free text')"
+        )
+    columns = {
+        r[0]
+        for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'withdrawn_documents' AND table_schema = current_schema()"
+        )
+    }
+    assert columns == {"doc_id", "withdrawn_at", "reason_code"}, "no text column"

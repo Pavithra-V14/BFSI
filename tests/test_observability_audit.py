@@ -78,15 +78,16 @@ def test_the_expected_actions_of_the_spec_are_there():
     } <= AUDITED_ACTIONS
 
 
-def test_the_list_is_what_it_was_when_phase_13_was_written():
+def test_the_list_is_what_it_was_when_phase_15_round_3_was_written():
     """A change to this list is a decision: it has to be made here as well as in the code.
-    Phase 13 added `evaluation_run` (an estimate or a start from the admin page)."""
+    Phase 13 added `evaluation_run` (an estimate or a start from the admin page); Phase 15
+    round 3 added `reinstate` (a withdrawn document id brought back on purpose)."""
     assert sorted(AUDITED_ACTIONS) == sorted(
         [
             "login", "role_change", "account_activated", "account_deactivated", "ingest",
             "reindex", "delete", "allowlist_review", "chunk_review", "entity_review",
             "review_label", "rollout_stage_change", "memory_clear", "retention_sweep",
-            "audit_purge", "evaluation_run",
+            "audit_purge", "evaluation_run", "reinstate",
         ]
     )  # fmt: skip
 

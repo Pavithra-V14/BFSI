@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 14 closed; Phase 15 (deployment) built, awaiting the owner's "commit" and approval; Runs 19 to 33 are pending with the owner (next is Phase 16)
+Current phase: Phase 14 closed; Phase 15 (deployment) closed in code (50250cd, 2948c6b), round 3 "docs and restore hardening" built and awaiting the owner's "commit"; Runs 19 to 34 are pending with the owner (next is Phase 16)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -222,12 +222,15 @@ approves the group (full name, "Mr. Sharma", "R. Sharma"); the surname alone nee
 `s` skips; `A` approves all the rest; `q` quits. Run `status` again: the `pending` count is lower.
 Both commands stop with a clear message if an ingest is running on the same document; run them again when it ends.
 
-**(f) The delete test.** `uv run python -m app.ingest delete --doc-id insurance-flexi-property` asks
-you to type the id. You should see `insurance-flexi-property: removed 19 chunk(s), N allow-list
-entr(ies); 0 chat message(s) flagged 'source removed'`. Then `status`: `stored 0`,
-`allow-list entries: none`, marker `no`. Then ingest it again (same command as in (b)): `new 19 ...
-version 1`. It is much quicker and makes far fewer model calls, because the answers are saved in
-`originals/.cache`.
+**(f) The delete test.** **A delete records the id as withdrawn for good** (so that a restore can
+never bring it back), so this drill is done on a **throw-away id** and never on a real one. Ingest
+the same sample under `rehearsal-insurance-1` (the command of (b) with `--doc-id
+rehearsal-insurance-1`; quick, the answers are cached), then run
+`uv run python -m app.ingest delete --doc-id rehearsal-insurance-1`, which asks you to type the id.
+You should see `rehearsal-insurance-1: removed 19 chunk(s), N allow-list entr(ies); 0 chat
+message(s) flagged 'source removed'`, then `recorded as withdrawn (reason: other); 1 original
+PDF(s) moved`. Then `status --doc-id rehearsal-insurance-1`: `stored 0`,
+`allow-list entries: none`, marker `no`. The next drill uses `rehearsal-insurance-2`.
 
 **(g) The other two documents** (same pattern):
 
@@ -246,11 +249,14 @@ repeated.
 
 **(h) A failed page and its retry.** Use the banking document, which you have just ingested:
 
-1. Delete it (type its id): `uv run python -m app.ingest delete --doc-id banking-rtl-facility`
+1. Use a **throw-away id**, not the real one (a delete records an id as withdrawn for good):
+   every command below uses `--doc-id rehearsal-banking-1` instead of `banking-rtl-facility`
+   (next drill: `rehearsal-banking-2`). There is nothing to delete first.
 2. Remove the saved answers so the picture is asked for again: `Remove-Item -Recurse -Force originals\.cache`
 3. Break the Gemini key for this window only (the caption has no other provider):
    `$env:GEMINI_API_KEYS = "not-a-real-key"`
-4. Run the banking ingest command again. You should see `document 'banking-rtl-facility' was NOT
+4. Run the banking ingest command with `--doc-id rehearsal-banking-1`. You should see
+   `document 'rehearsal-banking-1' was NOT
    activated; the old version (if any) stays active`, one or more lines `page N failed (<an error name>)` (at least page 2, which holds
    the picture; table pages too if no other provider key is set), and `each failed page is in the review
    queue; run the same command again to retry`. Exit code 2.
@@ -999,7 +1005,7 @@ network, except the two owner-run steps marked below.
 ## Deployment (Phase 15)
 Nothing here was deployed by Claude: it is the files and the guide for YOU to deploy. The guide is
 `docs/DEPLOY.md` (click by click, with what you should see); every real step is a run in
-`docs/OWNER_RUNS.md` (Runs 28 to 33).
+`docs/OWNER_RUNS.md` (Runs 28 to 34).
 
 - **`render.yaml`.** The blueprint: `bfsi-api` and `bfsi-frontend`, free plan, health checks
   `/live` and `/_stcore/health`, start commands from the repository root (so `prompts/` and
@@ -1027,10 +1033,26 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
   separate workflow so that a failure while the service is down cannot hold the fix (Render waits
   for every check of a commit). The pinger and this check FAIL VISIBLY (a red run), and block
   nothing.
-- **Backups.** `scripts/qdrant_snapshot.py` (list, create, download, prune; `--run` for anything
-  that changes). If the free cluster refuses snapshots, the documented backup is a re-ingest from
-  `originals/`, whose own backup you keep and whose restore you test once
-  (`docs/runbooks/restore-documents.md`).
+- **Backups.** `scripts/qdrant_snapshot.py` (list, create, download by name or `--newest`, prune,
+  restore-test; `--run` for anything that changes). **The tested route is the re-ingest from
+  `originals/`**, whose own backup you keep (the folder `originals/_withdrawn/` included) and
+  whose restore you test once (`docs/runbooks/restore-documents.md`). Restoring a downloaded
+  snapshot is **unproven** until Run 30 has restored one into the throw-away collection
+  `documents_restore_test` and counted it. The weekly snapshot task is create, download, then
+  prune (prune deletes only what has a downloaded copy).
+- **A withdrawn document stays withdrawn (migration 0010).** The delete command records the id,
+  the time and a fixed reason code in the permanent table `withdrawn_documents` (no text),
+  moves the PDFs to `originals/_withdrawn/<id>/`, and an ingest of that id is refused (a new
+  document needs a new id). A restore ends with `uv run python -m app.ingest withdrawn`, which
+  lists every withdrawn id and says whether any is still stored, then `delete` again for each
+  one that is. Snapshots taken before a withdrawal still hold its text until they age out (known
+  limitation). A document withdrawn before the table existed is entered by running `delete`
+  again (Run 34 rehearses the whole chain on the test collection).
+- **Where admin jobs are done.** The hosted frontend, signed in as the admin, serves Rollout,
+  Users, Documents counts, the Review queue, Alerts and the dashboards. Ingest, delete, restore,
+  snapshots, retention and entity approval are commands on the admin machine; a local frontend
+  pointed at the Render API (`ADMIN_MACHINE=true`) only shows their words (the hosted API refuses
+  entity approval; `DEPLOY.md` 2.5b).
 - **Runbooks** (`docs/runbooks/`, with an index and a rehearsal column): all keys down; wrong
   answer reported; document withdrawn; suspected personal data; key leaked; bad deploy (go back);
   restore the documents. **Key rotation**: `docs/KEY_ROTATION.md` and
@@ -1049,7 +1071,22 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
   (the task runs daily). Judging the sample
   stays manual (it needs the code of its own estimate).
 - **The first deploy is in the `shadow` stage** and stays there until the checklist of
-  `DEPLOY.md` section 6 is true: moving on is a deliberate step.
+  `DEPLOY.md` section 6 is true: moving on is a deliberate step. The database you use may not
+  be new: `DEPLOY.md` 2.8 reads the stage and sets it back.
+
+**Known limitations from the second audit of Phase 15 (recorded, not simple text fixes)**
+- **Phase 16.** The first public exposure has one shared limit until Run 28 step 2.6 is done
+  (an outsider could use up the sign-in allowance for a while); the risk note is in Run 28.
+- **Phase 16.** The drift and snapshot scheduled tasks have no alert when they stop (only
+  retention has `retention_overdue`); their logs and Task Scheduler's last result are the check.
+- **Phase 16.** Postgres (accounts and chats) has no backup of its own beyond what the Neon plan
+  keeps; there is no export step.
+- **Phase 16.** The snapshot size check trusts a server that reports a size; a server that gives
+  no size leaves the snapshot unpruned (kept), by design.
+- **Phase 16.** Render's menu names, region words and the Auto-Deploy-after-Rollback behaviour in
+  `DEPLOY.md` are unverified [T] and are checked on the day of Run 28 and Run 29.
+- **Phase 16.** There is no admin command that removes one named chat or one evaluation sample
+  (the suspected-personal-data runbook says who to ask).
 
 **Known limitations (recorded in Phase 15)**
 - **Phase 16.** Render's free-plan numbers (750 hours, 512 MB, sleep after about 15 minutes) and

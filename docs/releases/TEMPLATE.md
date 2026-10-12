@@ -9,7 +9,7 @@
 ## What changed
 Write it in two or three plain sentences: what, and why.
 
-## Files changed (from git)
+## Files changed (from git, since {{since}})
 {{changed}}
 
 ## Evaluation result against the baseline

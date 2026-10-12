@@ -13,19 +13,24 @@
      shows the degraded-mode notice. Watch the provider's status page.
    - **Every answer provider** fails: users correctly see "temporarily unavailable". Do NOT switch
      on the offline mock answer in production (`GATEWAY_ENABLE_MOCK` is never set on Render).
-3. If the cause is OUR limit (the free tier's daily limit, reset at 00:00 UTC for most providers):
+3. If the cause is OUR limit (the free tier's daily limit, which resets at 00:00 UTC for most
+   providers [T: check each provider's page]):
    add another account's key. Render dashboard, `bfsi-api`, **Environment**, edit the provider's
    list (`GROQ_API_KEYS`, `GEMINI_API_KEYS`, `OPENROUTER_API_KEYS`; at most four, comma
    separated), append the new key after a comma, **Save**. Keep the old keys. Render restarts the
    service (about a minute).
-4. If both embedding keys fail, add a key to `GEMINI_EMBEDDING_KEY_A` or `_B` the same way.
+4. If both embedding keys fail: `GEMINI_EMBEDDING_KEY_A` and `GEMINI_EMBEDDING_KEY_B` each
+   hold **one** key (they are not lists, you cannot append). A is the primary and B the failover,
+   each from its own Google account. Put a new key into the one that is empty or limited
+   (**Environment**, edit, **Save**); to replace a working one follow `docs/KEY_ROTATION.md`.
 5. Tell the users it is a known issue (your usual channel) if it lasts more than 30 minutes.
 
 ## Check
 - `GET /health`: the providers show `healthy` (or only the one that is really down is not).
 - Ask one question in the frontend: an answer, not "temporarily unavailable".
-- `uv run python scripts/key_inventory.py` on your machine, with the values you set, shows the new
-  fingerprint and a count that went up by one.
+- Optional: `uv run python scripts/key_inventory.py` reads only the variables of YOUR window, so
+  type the new values into it first (`Read-Secret`); it then shows the new fingerprint and a
+  count that went up by one. It does not read Render.
 
 ## Afterwards
 Write what happened and the time it took in the release record folder if a setting changed

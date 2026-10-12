@@ -55,6 +55,7 @@ from app.ingest.model import (
     check_doc_id,
     refuse_customer_document,
 )
+from app.ingest.withdrawn import refuse_if_withdrawn
 from app.store_errors import call_vector
 from app.vector import sparse
 from app.vector.documents import (
@@ -339,6 +340,7 @@ def ingest_document(
     check_choice(request.access_role, ACCESS_ROLES, "access_role")
     if not ctx.accept_customer_documents:
         refuse_customer_document(request.doc_type)
+    refuse_if_withdrawn(ctx.db, request.doc_id)  # a withdrawn id stays withdrawn (a restore)
     with document_lock(ctx.lock_dir, request.doc_id):
         return _ingest_locked(ctx, request, parsed)
 

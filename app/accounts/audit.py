@@ -34,6 +34,7 @@ AUDITED_ACTIONS = frozenset(
         "ingest",  # a document ingested (local)
         "reindex",  # the sparse vectors refreshed (local)
         "delete",  # a document deleted (local)
+        "reinstate",  # a withdrawn document id brought back on purpose (local)
         "allowlist_review",  # the command-line entity review (local)
         "chunk_review",  # the command-line review of held-back chunks (local)
         "entity_review",  # an entity approved or rejected through the API

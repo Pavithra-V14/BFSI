@@ -12,8 +12,10 @@ uv run python scripts/cost_projection.py --queries-per-day 400
 ```
 
 No call is made and no key is read. It prints, per provider group, the requests and tokens a day
-and for 30 days, the **shadow cost** (what the same tokens would cost at list price, from
-`app/gateway/pricing.json`), and the billed cost (0 on the free tiers).
+and for 30 days, the **shadow cost** of every group that has a list price (what the same tokens
+would cost: `app/gateway/pricing.json`, else LiteLLM's price map, for the default models), a list
+of the groups that have **no** price (shown as `UNPRICED` with the reason, never counted as $0),
+and the billed cost (0 on the free tiers). `--json` has the same split (`priced`, `unpriced`).
 
 ## How to read it
 
@@ -25,7 +27,9 @@ and for 30 days, the **shadow cost** (what the same tokens would cost at list pr
   replaces them with measured numbers from the baseline run and compares the projection with a
   dry run (spec 17.6, "a cost projection compared with a dry run").
 - Cohere's rerank may be the largest per-query cost on a paid plan: verify its price and trial
-  limits [T] (spec 18). It is not priced in the projection yet.
+  limits [T] (spec 18). It is billed per search, not per token, and has no price in
+  `pricing.json`, so the projection shows it as **UNPRICED** and says the total is a lower bound.
+  Add its price to `pricing.json` (or read it off the provider's page) to include it.
 
 ## Where the limits are
 

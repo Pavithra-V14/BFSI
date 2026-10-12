@@ -87,6 +87,11 @@ SPEC = {
         "created_at": ("TIMESTAMPTZ", True),
         "last_attempt_at": ("TIMESTAMPTZ", False),
     },
+    "withdrawn_documents": {  # migration 0010 [P]
+        "doc_id": ("TEXT", True),
+        "withdrawn_at": ("TIMESTAMPTZ", True),
+        "reason_code": ("TEXT", True),
+    },
     "app_settings": {  # migration 0006 [P]
         "key": ("TEXT", True),
         "value": ("TEXT", True),
@@ -147,6 +152,7 @@ PRIMARY_KEYS = {
     "alert_events": "id",
     "metric_rollups": "id",
     "trace_deletions": "id",
+    "withdrawn_documents": "doc_id",
 }
 
 # Every default the schema sets. A column not listed here has no default.
@@ -171,6 +177,7 @@ DEFAULTS = {
     ("trace_deletions", "attempts"): "0",
     ("trace_deletions", "alerted"): "FALSE",
     ("trace_deletions", "created_at"): "CURRENT_TIMESTAMP",
+    ("withdrawn_documents", "withdrawn_at"): "CURRENT_TIMESTAMP",
     ("app_settings", "updated_at"): "CURRENT_TIMESTAMP",
     ("messages", "created_at"): "CURRENT_TIMESTAMP",
     ("audit_log", "details"): "'{}'",
@@ -251,7 +258,7 @@ def count(conn, table, where="1 = 1", args=()):
 # ---- the migrations themselves --------------------------------------------------------
 
 
-def test_the_nine_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
+def test_the_ten_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
     url = f"sqlite:///{tmp_path / 'fresh.db'}"
     quiet = lambda line: None  # noqa: E731
     applied = run(url, MIGRATIONS, log=quiet)
@@ -265,9 +272,10 @@ def test_the_nine_migrations_apply_cleanly_in_order_and_are_recorded(tmp_path):
         "0007_review_thumbs_down_unique.sql",
         "0008_messages_fixed_reply.sql",
         "0009_observability.sql",
+        "0010_withdrawn_documents.sql",
     ]
     assert run(url, MIGRATIONS, log=quiet) == []  # nothing left to apply
-    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [m.version for m in load_migrations(MIGRATIONS)] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
 def test_the_sql_stays_portable_between_postgres_and_sqlite():
@@ -306,6 +314,7 @@ def test_migration_0004_adds_the_active_flag_and_existing_users_stay_active(tmp_
         "0007_review_thumbs_down_unique.sql",
         "0008_messages_fixed_reply.sql",
         "0009_observability.sql",
+        "0010_withdrawn_documents.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT is_active FROM users").fetchall() == [(1,)]
@@ -337,6 +346,7 @@ def test_migration_0005_adds_the_history_flag_and_existing_messages_stay_in_hist
         "0007_review_thumbs_down_unique.sql",
         "0008_messages_fixed_reply.sql",
         "0009_observability.sql",
+        "0010_withdrawn_documents.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT history_excluded FROM messages").fetchall() == [(0,)]
@@ -367,6 +377,7 @@ def test_migration_0006_adds_the_shadow_flag_the_settings_table_and_one_thumb_pe
         "0007_review_thumbs_down_unique.sql",
         "0008_messages_fixed_reply.sql",
         "0009_observability.sql",
+        "0010_withdrawn_documents.sql",
     ]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT shadowed FROM messages").fetchall() == [(0,)]  # visible as before
@@ -415,6 +426,7 @@ def test_migration_0007_removes_duplicate_thumbs_down_items_and_allows_only_one_
         "0007_review_thumbs_down_unique.sql",
         "0008_messages_fixed_reply.sql",
         "0009_observability.sql",
+        "0010_withdrawn_documents.sql",
     ]
     conn = sqlite3.connect(path)
     kept = conn.execute("SELECT id FROM review_queue WHERE kind = 'thumbs_down'").fetchall()

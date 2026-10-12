@@ -324,6 +324,8 @@ def test_deleting_what_is_not_there_with_no_marker_is_a_true_no_op(rig):
     rig.cache.bump_corpus_version = never
     result = delete_document(rig.ctx, "never-there")
     assert result.complete and result.chunks == 0 and audit_rows(rig) == []
+    # Phase 15 round 3: nothing stored, so nothing is recorded as withdrawn either
+    assert rig.db.query_one("SELECT COUNT(*) FROM withdrawn_documents")[0] == 0
 
 
 # ---- 4. the id collision (auditor finding 2) --------------------------------------------------

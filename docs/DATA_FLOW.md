@@ -16,9 +16,9 @@ Document text and company terms on the allow-list are not masked.
 | **OpenRouter** (answers, decisions; also Jev) | the masked question and the retrieved passages, the typed decision questions | the raw question, a user name | fallback answer model and the Jev decision model |
 | **Jev** (through OpenRouter's Decisions API, its own key) | the masked question and the state of the typed questions (domain, vagueness, injection, filters) | the raw question, passages are not needed for decisions | quick yes/no and choice decisions |
 | **Cohere** and **Jina** (rerank) | the masked question and the retrieved passages | the raw question, a user name | orders the passages |
-| **Qdrant** (vector store) | the document vectors and the chunk text and its labels (company documents) | no customer chat, no user data; a question is sent only as a vector | finds passages |
+| **Qdrant** (vector store) | the document vectors and the chunk text and its labels (company documents); the snapshots the cluster keeps of them (a document withdrawn after a snapshot is still in it until the snapshot is removed) | no customer chat, no user data; a question is sent only as a vector | finds passages |
 | **Upstash** (cache and limits) | cached grounded answers keyed by a hash of the masked question, the role, the corpus and prompt versions; the login and registration counters keyed by keyed hashes of an address or a username; the per-user rate and daily-token counters keyed by the user's internal id (a random UUID, never a name or an e-mail); the corpus version | the raw question, a user name or an address in clear | speeds up and limits |
-| **Neon** (Postgres, main database) | accounts (username, e-mail, password hash), masked transcripts, summaries, feedback, the review queue with MASKED questions, audit rows with keyed hashes | the raw question | the system's memory |
+| **Neon** (Postgres, main database) | accounts (username, e-mail, password hash), masked transcripts, summaries, feedback, the review queue with MASKED questions, audit rows with keyed hashes, the list of withdrawn document ids (id, time, a fixed reason code: no text) | the raw question | the system's memory |
 | **Neon** (second database, evaluation) | the masked 5 % sample of live answers: masked question and answer, passages, counts; no user or session id; scores | any user identifier, the raw question | the production half of evaluation |
 | **Langfuse** (tracing) | per-stage records: stage names, timings, decider, model, key fingerprint, token counts, flags, prompt hashes, the corpus version; hashed user and session names | the question, the answer, passage text, history, a username, an e-mail address | finds slow or failing stages |
 | **The chat webhook** | the alert's name, severity, a count and a window | any text or identifier | tells you something is wrong |
@@ -26,8 +26,10 @@ Document text and company terms on the allow-list are not masked.
 
 ## What stays on your machine only
 
-The original PDFs (`originals/`), the model-answer cache of ingestion, the evaluation keys and the
-local evaluation database, the entity review, every load test, and any `.env` file. Evaluation runs
+The original PDFs (`originals/`, with the withdrawn ones in `originals/_withdrawn/`), the
+downloaded Qdrant snapshots (`backups/qdrant/`), the model-answer cache of ingestion, the
+evaluation keys and the local evaluation database, the entity review, every load test, and any
+`.env` file. Evaluation runs
 use the separate evaluation keys and a separate test collection of the vector store.
 
 ## When this page must change

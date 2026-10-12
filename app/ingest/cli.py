@@ -5,7 +5,9 @@
     uv run python -m app.ingest status --doc-id SLUG         (counts only, changes nothing)
     uv run python -m app.ingest review entities --doc-id SLUG   (approve pending allow-list terms)
     uv run python -m app.ingest review chunks --doc-id SLUG     (chunks held back by the scan)
-    uv run python -m app.ingest delete --doc-id SLUG
+    uv run python -m app.ingest delete --doc-id SLUG [--reason REASON]   (outdated, incorrect,
+                                                         compliance, replaced or other)
+    uv run python -m app.ingest withdrawn                    (the withdrawn ids; read-only)
 
 Settings come from your shell: DATABASE_URL, QDRANT_URL, QDRANT_API_KEY, UPSTASH_REDIS_URL, the
 gateway's key variables, and optionally COMPANY_NAMES and COMPANY_DOMAINS (comma-separated). Add
@@ -44,6 +46,7 @@ from app.ingest.lock import DocumentBusy
 from app.ingest.model import (
     ACCESS_ROLES,
     DOC_TYPES,
+    WITHDRAW_REASONS,
     DocRequest,
     IngestError,
     ParsedDocument,
@@ -56,6 +59,12 @@ from app.ingest.queue import flag_failed_pages, resolve_failed_pages
 from app.ingest.review import review_chunks, review_entities
 from app.ingest.sparse_refresh import refresh_sparse_vectors
 from app.ingest.status import describe, document_status
+from app.ingest.withdrawn import (
+    list_withdrawn,
+    move_originals,
+    refuse_if_withdrawn,
+    reinstate,
+)
 from app.isolation import is_local_url
 from app.store_errors import StoreRejected, StoreUnavailable
 from app.vector.documents import COLLECTION
@@ -323,6 +332,18 @@ def _ingest(args, env, services_factory, parse: Parse, ner_factory, out, err) ->
     )
     services = services_factory(env, "models")
     try:
+        # before the PDF is copied into originals/: a refused id must leave no file behind
+        if args.reinstate is not None and reinstate(
+            services.ctx.db,
+            args.doc_id,
+            asked_id=args.reinstate,
+            confirm_id=args.confirm_id,
+            actor=services.ctx.actor,
+            now=services.ctx.now(),
+            env=env,
+        ):
+            out(f"'{args.doc_id}' was withdrawn: its record is removed (--reinstate)")
+        refuse_if_withdrawn(services.ctx.db, args.doc_id)
         keep_original(path, ORIGINALS_DIR, args.doc_id)
         parsed = parse(path)
         for warning in parsed.warnings:
@@ -390,26 +411,63 @@ def _review(args, env, services_factory, ask, out, err) -> int:
 def _delete(args, env, services_factory, confirm, out, err) -> int:
     check_doc_id(args.doc_id)
     out(
-        f"This removes every vector and allow-list entry of '{args.doc_id}' "
-        "and flags chats that cited it."
+        f"This removes every vector and allow-list entry of '{args.doc_id}', flags chats that "
+        "cited it, records the id as withdrawn (a restore must never bring it back) and moves "
+        "its original PDFs to originals/_withdrawn/."
     )
     if confirm(f"Type the document id ({args.doc_id}) to confirm: ").strip() != args.doc_id:
         out("not confirmed; nothing was deleted")
         return 1
     services = services_factory(env, "cache")
     try:
-        result = delete_document(services.ctx, args.doc_id)
+        result = delete_document(
+            services.ctx, args.doc_id, args.reason, even_if_not_stored=args.even_if_not_stored
+        )
     finally:
         services.close()
     out(
         f"{result.doc_id}: removed {result.chunks} chunk(s), {result.allowlist_entries} allow-list "
         f"entr(ies); {result.transcripts_flagged} chat message(s) flagged 'source removed'"
     )
+    if result.recorded or result.already_recorded:
+        # After the database is committed: a failure above leaves the PDFs where they were, and
+        # the command can be run again. The move is plain file work on the admin machine.
+        moved = move_originals(ORIGINALS_DIR, args.doc_id)
+        state = "recorded as withdrawn" if result.recorded else "already recorded as withdrawn"
+        out(f"{state} (reason: {args.reason}); {moved} original PDF(s) moved")
+    else:
+        out(
+            "id not stored, nothing recorded (add --even-if-not-stored to record a document "
+            "that was withdrawn before the record existed)"
+        )
     if result.incomplete:
         for reason in result.incomplete:
             err(f"  {reason}")
         err("delete incomplete: run the same command again to finish it")
         return 1
+    return 0
+
+
+def _withdrawn(args, env, services_factory, out) -> int:
+    """List the withdrawn ids and how many chunks of each are still stored (a restore must bring
+    that number to 0 for every id: run `delete` again for each one that shows more)."""
+    from app.ingest.index import load_existing
+
+    services = services_factory(env, "stores")
+    try:
+        rows = list_withdrawn(services.ctx.db)
+        out(f"{len(rows)} withdrawn document id(s)")
+        stored = 0
+        for doc_id, when, reason in rows:
+            chunks = len(load_existing(services.ctx.qdrant, services.ctx.collection, doc_id))
+            stored += 1 if chunks else 0
+            note = f"STILL STORED: {chunks} chunk(s), run delete again" if chunks else "gone"
+            out(f"  {doc_id}  withdrawn {when}  reason {reason}  {note}")
+        if stored:
+            out(f"{stored} withdrawn document(s) are still stored: not restored yet")
+            return 1
+    finally:
+        services.close()
     return 0
 
 
@@ -525,6 +583,16 @@ def main(
     ingest.add_argument("--title")
     ingest.add_argument("--effective-date", help="YYYY-MM-DD; default today (UTC)")
     ingest.add_argument("--dry-run", action="store_true", help="parse and count; call no service")
+    ingest.add_argument(
+        "--reinstate",
+        metavar="DOC_ID",
+        help="bring a WITHDRAWN document id back on purpose: type the id here and again in "
+        "--confirm-id. Removes its withdrawn record (one audit row). Refused on Render. Without "
+        "it an ingest of a withdrawn id is refused.",
+    )
+    ingest.add_argument(
+        "--confirm-id", metavar="DOC_ID", help="the document id again, to confirm --reinstate"
+    )
     review = commands.add_parser(
         "review", parents=[common], help="approve or reject held-back items of a document"
     )
@@ -534,6 +602,24 @@ def main(
         "delete", parents=[common], help="remove a document everywhere (asks to confirm)"
     )
     delete.add_argument("--doc-id", required=True)
+    delete.add_argument(
+        "--even-if-not-stored",
+        action="store_true",
+        help="record the id as withdrawn although nothing of it is stored (a document "
+        "withdrawn before the record existed). Without it an id that holds nothing is not "
+        "recorded.",
+    )
+    delete.add_argument(
+        "--reason",
+        choices=WITHDRAW_REASONS,
+        default="other",
+        help="why it is withdrawn (a fixed list, never free text; default: other)",
+    )
+    commands.add_parser(
+        "withdrawn",
+        parents=[common],
+        help="the withdrawn document ids and whether any is still stored (read-only)",
+    )
     status = commands.add_parser(
         "status", parents=[common], help="counts for one document (read-only, no text)"
     )
@@ -559,6 +645,8 @@ def main(
             return _review(args, env, services_factory, confirm, out, err)
         if args.command == "status":
             return _status(args, env, services_factory, out)
+        if args.command == "withdrawn":
+            return _withdrawn(args, env, services_factory, out)
         if args.command == "refresh-sparse":
             return _refresh_sparse(args, env, services_factory, out, err)
         return _delete(args, env, services_factory, confirm, out, err)

@@ -10,11 +10,19 @@
    LOGFILE` (it prints rule names and line numbers only, never the text). For traces: Langfuse
    project, search by the time. For the sample: `uv run python -m app.eval status --production`.
 3. **Remove it.**
-   - Chats: the user can delete their own chats; for an admin-driven removal the retention
-     command removes chats older than its limit (`uv run python -m app.memory.retention`) and
-     queues their traces for deletion by hashed session id.
+   - **One chat (or a few):** the user can delete their own chat (its traces are queued for
+     removal by hashed session id). There is **no admin command that removes one named chat**.
+     If the person cannot do it, tell your helper: it is a database change made with care, not a
+     step to improvise here.
+   - **Everything older than the limit:** the retention command
+     (`uv run python -m app.memory.retention`). **It is irreversible and it is not aimed at
+     your leak**: it deletes every chat not used for 90 days, and audit rows, alert rows and
+     hourly metric rows older than 30 days, and the masked evaluation samples older than 30 days.
+     It cannot remove a recent chat. **Always run it with `--dry-run` first** (it only counts)
+     and read the numbers; run it for real only if you want exactly that. It writes a
+     `retention_sweep` row, which also resets the `retention_overdue` clock.
    - Evaluation sample: it holds masked copies only and is purged after 30 days by the same
-     command (`EVAL_DATABASE_URL` in the shell).
+     command (`EVAL_DATABASE_URL` in the shell). A single sample row has no command either.
    - A log on Render: logs are in Render's stream; ask Render to remove the log if it holds a real
      identifier, and shorten what is kept.
 4. **Find the cause.** The masking is local and happens before any model call. If an identifier got

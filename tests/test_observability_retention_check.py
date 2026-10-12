@@ -58,7 +58,7 @@ def test_a_fresh_sweep_row_means_no_warning(parts):
     assert observability.check_retention_once() is False and collector.raised == []
 
 
-def test_a_sweep_row_two_days_old_means_no_warning_a_weekend_included(parts):
+def test_a_sweep_row_four_days_old_means_no_warning_a_weekend_included(parts):
     observability, collector, db = parts
     audit_row(db, "retention_sweep", 4)  # Friday's run seen on Tuesday morning: still quiet
     assert observability.check_retention_once() is False and collector.raised == []
@@ -75,6 +75,33 @@ def test_exactly_seven_days_is_not_yet_overdue(parts):
     observability, collector, db = parts
     audit_row(db, "retention_sweep", 7)
     assert observability.check_retention_once() is False
+
+
+def test_other_audit_rows_never_stand_in_for_the_sweep_row(parts):
+    """Sign-ins write audit rows all day. A newer login row must not hide an old sweep row: the
+    mutation that looks at the newest audit row of ANY action silences the alert for good."""
+    observability, collector, db = parts
+    audit_row(db, "retention_sweep", 8)
+    for days_ago in (0, 0, 1, 2):
+        audit_row(db, "login", days_ago)
+    audit_row(db, "audit_purge", 1)  # a different retention action is not the sweep either
+    assert observability.check_retention_once() is True
+    assert collector.raised == [("retention_overdue", alerts_module.WARNING)]
+
+
+def test_the_newest_of_several_sweep_rows_decides(parts):
+    observability, collector, db = parts
+    audit_row(db, "retention_sweep", 20)
+    audit_row(db, "retention_sweep", 15)
+    audit_row(db, "retention_sweep", 1)
+    assert observability.check_retention_once() is False and collector.raised == []
+
+
+def test_several_old_sweep_rows_and_no_new_one_is_a_warning(parts):
+    observability, collector, db = parts
+    audit_row(db, "retention_sweep", 30)
+    audit_row(db, "retention_sweep", 9)
+    assert observability.check_retention_once() is True and len(collector.raised) == 1
 
 
 def test_a_new_deployment_is_not_blamed_before_seven_days_have_passed(parts):
@@ -104,10 +131,60 @@ def test_a_run_that_deleted_nothing_still_writes_its_row_and_a_dry_run_does_not(
     assert [r[0] for r in rows] == ["retention_sweep"] and '"sessions": 0' in rows[0][1]
 
 
-def test_the_check_runs_in_the_background_loop():
+def test_the_check_interval_and_the_overdue_limit_are_the_documented_ones():
     from app.observability.service import RETENTION_CHECK_SECONDS, RETENTION_OVERDUE_DAYS
 
     assert RETENTION_CHECK_SECONDS == 3_600.0 and RETENTION_OVERDUE_DAYS == 7
+
+
+def test_the_background_thread_really_calls_the_check(tmp_path, monkeypatch):
+    """Not only a thread of the right name: the loop must call `check_retention_once`."""
+    import threading
+
+    url = f"sqlite:///{tmp_path / 'loop.db'}"
+    run(url, MIGRATIONS, log=lambda line: None)
+    manager = alerts_module.AlertManager(store=None, background=False)
+    observability = service.Observability(db_factory=lambda: connect(url), alerts=manager)
+    called = threading.Event()
+    monkeypatch.setattr(service, "RETENTION_CHECK_SECONDS", 0.01)
+    monkeypatch.setattr(service, "ROLLUP_SECONDS", 3600.0)
+    monkeypatch.setattr(service, "TRACE_SECONDS", 3600.0)
+    monkeypatch.setattr(observability, "check_retention_once", lambda: called.set() or False)
+    observability.start()
+    try:
+        assert called.wait(timeout=5), "the retention check was never called by the loop"
+    finally:
+        observability.stop()
+
+
+def test_a_sweep_that_fails_half_way_writes_no_row_and_deletes_nothing(parts, monkeypatch):
+    """A row written for a run that did not finish would make the task look healthy."""
+    _observability, _collector, db = parts
+    old = NOW - timedelta(days=120)
+    with db.transaction(write=True):
+        db.execute(
+            "INSERT INTO users (id, username, email, password_hash) "
+            "VALUES ('u1', 'asha', 'asha@example.test', 'x')"
+        )
+        for session_id in ("s1", "s2"):
+            db.execute(
+                "INSERT INTO sessions (id, user_id, last_active_at) VALUES (?, 'u1', ?)",
+                (session_id, old.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            )
+    real = retention.delete_session
+    seen = []
+
+    def second_one_fails(raw, session_id):
+        seen.append(session_id)
+        if len(seen) == 2:
+            raise RuntimeError("database went away")
+        return real(raw, session_id)
+
+    monkeypatch.setattr(retention, "delete_session", second_one_fails)
+    with pytest.raises(RuntimeError):
+        retention.sweep(db, now=NOW, actor="cli:test")
+    assert db.query_one("SELECT COUNT(*) FROM audit_log WHERE action = 'retention_sweep'")[0] == 0
+    assert db.query_one("SELECT COUNT(*) FROM sessions")[0] == 2, "all or nothing"
 
 
 def test_the_service_runs_the_check_in_its_own_background_thread(tmp_path):

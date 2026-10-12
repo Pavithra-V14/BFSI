@@ -472,9 +472,9 @@ def test_the_release_record_template_has_the_three_things_the_spec_names():
     assert "Approved by" in text
 
 
-def test_the_owner_runs_list_runs_28_to_33_as_pending():
+def test_the_owner_runs_list_runs_28_to_34_as_pending():
     text = (DOCS / "OWNER_RUNS.md").read_text("utf-8")
-    for number in range(28, 34):
+    for number in range(28, 35):
         assert re.search(rf"^\| {number} \|.*PENDING", text, re.M), number
         assert re.search(rf"^## Run {number}\. .*PENDING", text, re.M), number
 
@@ -545,3 +545,246 @@ def test_the_scan_really_finds_a_write():
     tree = ast.parse("from pathlib import Path\nPath('x').write_text('y')\nopen('f', 'w')\n")
     assert [what for _line, what in _writes(tree)] == ["write_text", "open(write)"]
     assert _writes(ast.parse("open('f')\nopen('f', 'rb')\n")) == []
+
+
+# ===================================================== round 3: what the audit found in the docs
+def runbook(name: str) -> str:
+    return (DOCS / "runbooks" / f"{name}.md").read_text("utf-8")
+
+
+def test_the_guide_never_uses_the_bare_curl_alias_of_windows_powershell():
+    for number, line in enumerate(guide().split("\n"), start=1):
+        assert not re.match(r"\s*curl\s", line), f"DEPLOY.md line {number}: use curl.exe"
+
+
+def test_the_guide_gets_a_token_without_typing_a_password_or_the_token():
+    text = guide()
+    section = text[text.index("### 2.5a") : text.index("### 2.5b")]
+    assert "Read-Secret" in section and "Invoke-RestMethod" in section
+    assert "/auth/login" in section and "/auth/logout" in section
+    assert "Remove-Variable" in section
+    assert "8 hours" in " ".join(section.split())
+    # no password or token is ever a literal in a command of the guide
+    assert not re.search(r"Bearer [A-Za-z0-9_-]{20,}", text)
+    assert "TOKEN" not in re.sub(r"`[^`]*`", "", section), "no placeholder token to paste"
+
+
+def test_the_guide_says_what_runs_where_for_admin_jobs():
+    text = guide()
+    section = text[text.index("### 2.5b") : text.index("### 2.6")]
+    flat = _flat(section)
+    assert "hosted frontend" in flat and "`admin_machine`" in flat
+    assert "does not work against render" in flat or "do not work against render" in flat
+    assert "review entities" in section
+
+
+def test_the_guide_tells_the_reader_to_expect_the_first_frontend_start_to_fail():
+    flat = _flat(guide())
+    assert "expect `bfsi-frontend` to show failed" in flat
+    assert "no path and no trailing slash" in flat
+
+
+def test_the_guide_gives_the_region_words_and_a_mapping_from_neon():
+    text = guide()
+    for word in ("`oregon`", "`ohio`", "`virginia`", "`frankfurt`", "`singapore`"):
+        assert word in text, word
+    assert "Mumbai" in text and "[T:" in text[text.index("Mumbai") - 1500 : text.index("Mumbai")]
+
+
+def test_the_guide_checks_the_stage_of_a_database_that_is_not_new():
+    text = guide()
+    section = text[text.index("### 2.8") : text.index("### 2.9")]
+    assert "/admin/shadow" in section and '{"stage":"shadow"}' in section
+    assert "may not be new" in section
+
+
+def test_the_variable_table_agrees_with_render_yaml_on_the_proxy_setting_and_the_api_address():
+    text = guide()
+    row = next(line for line in text.split("\n") if line.startswith("| `TRUSTED_PROXY_HOPS` |"))
+    assert "ships as `0`" in row and "set to 1 in render.yaml" not in row
+    spec = yaml.safe_load(RENDER.read_text("utf-8"))
+    api = next(s for s in spec["services"] if s["name"] == "bfsi-api")
+    shipped = next(v["value"] for v in api["envVars"] if v["key"] == "TRUSTED_PROXY_HOPS")
+    assert str(shipped) == "0"
+    api_row = next(line for line in text.split("\n") if line.startswith("| `API_BASE_URL` |"))
+    assert "required" in api_row and "| optional |" not in api_row
+
+
+def test_the_guide_warns_that_a_rollback_may_switch_auto_deploy_off():
+    for text in (guide(), runbook("bad-deploy-rollback")):
+        assert "Auto-Deploy" in text
+    assert "3a." in runbook("bad-deploy-rollback")
+
+
+def test_the_scheduled_snapshot_task_downloads_before_it_prunes():
+    text = guide()
+    create = text.index("snapshot.ps1")
+    section = text[create : create + 1500]
+    assert section.index("create --run") < section.index("download --newest --run")
+    assert section.index("download --newest --run") < section.index("prune --keep 5 --run")
+    row = next(line for line in text.split("\n") if line.startswith("| BFSI snapshot |"))
+    assert row.index("create --run") < row.index("download --newest --run")
+    assert row.index("download --newest --run") < row.index("prune --keep 5 --run")
+
+
+def test_the_guide_names_the_encrypted_file_update_when_a_key_is_rotated():
+    assert "replace its file too" in guide().lower() or "replace its file too" in _flat(guide())
+    leaked = _flat(runbook("key-leaked"))
+    assert "encrypted files" in leaked and "9.1" in leaked and "fail without a sound" in leaked
+    assert "bfsi-secrets" in _flat((DOCS / "KEY_ROTATION.md").read_text("utf-8"))
+
+
+def test_the_restore_runbook_says_snapshot_restore_is_unproven_and_ends_with_the_withdrawn_check():
+    text = runbook("restore-documents")
+    assert "UNPROVEN" in text and "documents_restore_test" in text
+    assert "app.ingest withdrawn" in text and "STILL STORED" in text
+    assert "originals/_withdrawn/" in text
+    flat = _flat(text)
+    assert "discards" in flat and "corpus version" in flat
+    # both routes reach the check
+    assert text.count("Go to step C") == 2
+
+
+def test_the_withdrawn_runbook_records_moves_and_says_what_stays_behind():
+    text = runbook("document-withdrawn")
+    for needle in ("--reason", "records the id as withdrawn", "originals/_withdrawn/",
+                   "Qdrant snapshots still hold", "backups/qdrant/", "new id",
+                   "before this record existed"):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_the_pii_runbook_calls_the_retention_command_irreversible_and_asks_for_a_dry_run():
+    flat = _flat(runbook("suspected-pii-leak"))
+    assert "irreversible" in flat and "--dry-run" in flat
+    assert "no admin command that removes one named chat" in flat
+
+
+def test_the_key_leaked_runbook_does_not_promise_no_downtime_and_explains_the_inventory():
+    flat = _flat(runbook("key-leaked"))
+    assert "no downtime" not in flat.replace("(no downtime)", "") or "restarts the service" in flat
+    assert "every save restarts the service" in flat
+    assert "only the variables of the window" in flat and "not render's" in flat
+    assert "langfuse_user_hash_key" in flat and "can no longer be found" in flat
+
+
+def test_every_command_and_flag_the_docs_show_exists():
+    """The words of the runbooks, DEPLOY.md and OWNER_RUNS.md are checked against the real
+    argument parsers: an unknown subcommand or flag in a document is a failing test."""
+    import contextlib
+    import io
+
+    from app.accounts import admin_cli
+    from app.db import migrate
+    from app.eval import cli as eval_cli
+    from app.ingest import cli as ingest_cli
+    from app.memory import retention
+    from app.observability import scan
+    from app.vector import documents
+    from scripts import cost_projection, key_inventory, qdrant_snapshot, release_record
+
+    def helped(call, *argv) -> str | None:
+        """The --help text of a parser, or None when the parser refused the words."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                call([*argv, "--help"])
+            except SystemExit as stop:
+                if stop.code not in (0, None):
+                    return None
+        return out.getvalue()
+
+    # tool pattern -> (does it take a subcommand, how to ask for its help)
+    tools = {
+        r"python -m app\.ingest": (True, lambda sub: helped(ingest_cli.main, sub)),
+        r"python -m app\.eval": (True, lambda sub: helped(eval_cli.main, sub)),
+        r"python -m app\.memory\.retention": (False, lambda sub: helped(retention.main)),
+        r"python -m app\.db\.migrate": (False, lambda sub: helped(migrate.main)),
+        r"python -m app\.vector\.documents": (False, lambda sub: helped(documents.main)),
+        r"python -m app\.observability\.scan": (False, lambda sub: helped(scan.main)),
+        r"python -m app\.accounts\.admin_cli": (
+            True,
+            lambda sub: helped(admin_cli.main, sub),
+        ),
+        r"scripts/qdrant_snapshot\.py": (True, lambda sub: helped(qdrant_snapshot.main, sub)),
+        r"scripts/cost_projection\.py": (False, lambda sub: helped(cost_projection.main)),
+        r"scripts/key_inventory\.py": (False, lambda sub: helped(key_inventory.main)),
+        r"scripts/release_record\.py": (False, lambda sub: helped(release_record.main)),
+    }
+    files = [
+        DOCS / "DEPLOY.md",
+        DOCS / "OWNER_RUNS.md",
+        DOCS / "KEY_ROTATION.md",
+        DOCS / "releases" / "README.md",
+        *sorted((DOCS / "runbooks").glob("*.md")),
+    ]
+    checked = 0
+    problems: list[str] = []
+    for path in files:
+        for number, line in enumerate(path.read_text("utf-8").split("\n"), start=1):
+            for pattern, (has_sub, ask) in tools.items():
+                found = re.search(pattern + r"\s*(.*)", line)
+                if not found:
+                    continue
+                rest = found.group(1).split("`")[0]
+                sub = ""
+                if has_sub:
+                    word = re.match(r"([a-z][a-z-]*)\b", rest)
+                    if not word:
+                        continue  # a sentence about the tool, not a command with a subcommand
+                    sub = word.group(1)
+                text = ask(sub)
+                where = f"{path.name}:{number}"
+                if text is None:
+                    problems.append(f"{where}: `{pattern} {sub}` is not accepted by the tool")
+                    continue
+                for flag in re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", rest):
+                    if flag != "--help" and flag not in text:
+                        problems.append(f"{where}: {flag} is not an option of `{sub or pattern}`")
+                checked += 1
+    assert not problems, "\n".join(problems)
+    assert checked > 20, "the check found too few commands: its patterns are wrong"
+
+
+def test_routine_rehearsals_use_throw_away_ids_and_never_reinstate():
+    """Round 3: a delete records the id as withdrawn for good. The drills (Run 10 f and h, Run 12b)
+    use throw-away ids, so only Run 34 (the safeguards drill) mentions `--reinstate`."""
+    runs = (DOCS / "OWNER_RUNS.md").read_text("utf-8")
+    readme = (ROOT / "README.md").read_text("utf-8")
+    f_test = runs[runs.index("### (f) The delete test") : runs.index("### (g) The other two")]
+    h_test = runs[runs.index("### (h) A failed page") : runs.index("### (i) The staff-only copy")]
+    run_12b = runs[runs.index("### Run 12b.") : runs.index("## Run 13.")]
+    readme_f = readme[
+        readme.index("**(f) The delete test.**") : readme.index("**(g) The other two")
+    ]
+    readme_h = readme[readme.index("**(h) A failed page") : readme.index("### Known limitations")]
+    for name, text, needle in (
+        ("Run 10 (f)", f_test, "rehearsal-insurance-1"),
+        ("Run 10 (h)", h_test, "rehearsal-banking-1"),
+        ("Run 12b", run_12b, "rehearsal-ecas-1"),
+        ("README (f)", readme_f, "rehearsal-insurance-1"),
+        ("README (h)", readme_h, "rehearsal-banking-1"),
+    ):
+        assert needle in text, name
+        assert "--reinstate" not in text, f"{name}: a routine drill must never need --reinstate"
+        assert "delete --doc-id insurance-flexi-property" not in text
+        assert "delete --doc-id banking-rtl-facility" not in text
+        assert "delete --doc-id finserv-mf-ecas" not in text
+    run_34 = runs[runs.index("## Run 34.") : runs.index("# C. Added by later phases")]
+    assert "--reinstate withdraw-test --confirm-id withdraw-test" in run_34
+    assert "explicit yes" in run_34
+    withdrawn_runbook = runbook("document-withdrawn")
+    assert "--confirm-id" in withdrawn_runbook and "--even-if-not-stored" in withdrawn_runbook
+    assert "--even-if-not-stored" in runbook("restore-documents")
+
+
+def test_the_guide_names_the_diagnostics_fields_the_route_really_returns():
+    route = (ROOT / "app" / "api" / "routes" / "admin.py").read_text("utf-8")
+    text = guide()
+    section = text[text.index("### 2.6") : text.index("### 2.8")]
+    for field in re.findall(r"`([a-z_]+)`", section):
+        if field in {"forwarded_entries", "trusted_proxy_hops", "address_at_one_hop",
+                     "client_address_used", "address_source", "socket_address", "memory_mb",
+                     "peak_memory_mb"}:  # fmt: skip
+            assert f'"{field}"' in route, f"{field} is not a field of /admin/diagnostics"
+    for needed in ("address_at_one_hop", "client_address_used", "peak_memory_mb"):
+        assert needed in section

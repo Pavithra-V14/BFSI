@@ -4,7 +4,7 @@ Claude never runs any of these. You run them in your own PowerShell window, in t
 folder, and you send only the short "send back" lines (names, counts and status; never a key, a
 URL or a piece of text) to your advisor.
 
-Last updated: 2026-10-12 (after Phase 13). Each phase that has a real-service check adds its runs
+Last updated: 2026-10-12 (after Phase 15, round 3). Each phase that has a real-service check adds its runs
 at the end, under "Added by later phases", before the phase can be called closed.
 
 ## How to read a run
@@ -94,10 +94,18 @@ never set.)
 | 27 | Real-provider load test, short, on this machine: local SQLite, test collection read only, estimate and a single-use ticket first | Phase 14 | PENDING (needs your yes: real keys) |
 | 28 | First deploy to Render (DEPLOY.md section 2): services, client address check, memory check, shadow stage | Phase 15 | PENDING (needs your yes: real keys and accounts) |
 | 29 | The rollback drill: back to the last good build in under 5 minutes, with a stopwatch | Phase 15 | PENDING (after Run 28) |
-| 30 | Qdrant snapshot, download and one restore test (or the re-ingest from originals/ if snapshots are refused) | Phase 15 | PENDING |
-| 31 | A key rotation drill on one embedding key | Phase 15 | PENDING (after Run 28) |
+| 30 | Qdrant snapshot, download, and a restore of the download into a throw-away collection (`documents_restore_test`); the re-ingest from originals/ is the tested route | Phase 15 | PENDING |
+| 31 | A key rotation drill on one key you have a spare for | Phase 15 | PENDING (after Run 28) |
 | 32 | The database connection count on the deployed service, against the plan's limit | Phase 15 | PENDING (after Run 28) |
 | 33 | The scheduled tasks on this machine: retention, drift, snapshot (Windows Task Scheduler) | Phase 15 | PENDING |
+| 34 | Migration 0010 and the withdrawn-document record: a delete in the test collection records the id, moves the PDF and a restore finds nothing left | Phase 15 | PENDING (needs your yes: it changes `documents_eval`) |
+
+**Pending migrations, in order:** 0005 (Run 8), 0006 to 0008 (Run 16), 0009 (Run 18) and **0010
+`withdrawn_documents` (Phase 15 round 3)**. The runner applies every pending file in order, so
+`docs/DEPLOY.md` 2.1 applies whatever is still pending on the cloud database, 0010 included.
+The local SQLite file of the test collection gets 0010 in Run 34 (or from any
+`uv run python -m app.db.migrate` with `DATABASE_URL` set to that file). Until 0010 is applied,
+`ingest` and `delete` fail with `no such table: withdrawn_documents`.
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much. The
@@ -452,15 +460,19 @@ Run exactly the same command again.
 
 ### (f) The delete test
 
-    uv run python -m app.ingest delete --doc-id insurance-flexi-property
+    uv run python -m app.ingest delete --doc-id rehearsal-insurance-1
 
-It asks you to type the id.
+It asks you to type the id (see the note below: the id is a throw-away one).
 
-- **You should see:** `insurance-flexi-property: removed 19 chunk(s), N allow-list entr(ies); 0
-  chat message(s) flagged 'source removed'`. Then `status` shows `stored 0`,
-  `allow-list entries: none`, marker `no`. Then ingest it again (the command in (b)): `new 19
-  ... version 1`, much quicker and with far fewer model calls (the answers are saved in
-  `originals/.cache`).
+- **A delete records the id as withdrawn for good** (so that a restore can never bring it
+  back), so this drill uses a **throw-away id**, never a real one. Ingest the sample again under
+  `rehearsal-insurance-1` (the command of (b) with `--doc-id rehearsal-insurance-1`; quick: the
+  answers are cached), then delete that id (the command above with `--doc-id
+  rehearsal-insurance-1`).
+- **You should see:** `rehearsal-insurance-1: removed 19 chunk(s), N allow-list entr(ies); 0
+  chat message(s) flagged 'source removed'`, then `recorded as withdrawn (reason: other); 1
+  original PDF(s) moved`. Then `status --doc-id rehearsal-insurance-1` shows `stored 0`,
+  `allow-list entries: none`, marker `no`. Next time use `rehearsal-insurance-2`.
 
 ### (g) The other two documents
 
@@ -476,11 +488,13 @@ It asks you to type the id.
 
 ### (h) A failed page and its retry (use the banking document)
 
-1. `uv run python -m app.ingest delete --doc-id banking-rtl-facility` (type its id).
+1. Use a **throw-away id**: every command below takes `--doc-id rehearsal-banking-1` instead
+   of `banking-rtl-facility` (next time `rehearsal-banking-2`), because a delete records an id as
+   withdrawn for good. There is nothing to delete first.
 2. `Remove-Item -Recurse -Force originals\.cache` (so the picture is asked for again).
 3. Break the Gemini key for this window only: `$env:GEMINI_API_KEYS = "not-a-real-key"`
-4. Run the banking ingest command again.
-   - **You should see:** `document 'banking-rtl-facility' was NOT activated; the old version
+4. Run the banking ingest command with `--doc-id rehearsal-banking-1`.
+   - **You should see:** `document 'rehearsal-banking-1' was NOT activated; the old version
      (if any) stays active`, one or more `page N failed (<an error name>)` (at least page 2,
      which holds the picture), and `each failed page is in the review queue; run the same
      command again to retry`. Exit code 2.
@@ -488,6 +502,8 @@ It asks you to type the id.
    `page N failed` lines.
 6. Put the real key back (`$env:GEMINI_API_KEYS = Read-Secret "GEMINI_API_KEYS"`), run the same
    ingest again: `new 22 ...`, exit 0, and `status` shows `failed pages waiting ... : 0`.
+7. Remove the throw-away copy, which holds the same text as the real banking document:
+   `uv run python -m app.ingest delete --doc-id rehearsal-banking-1` (type its id).
 
 ### (i) The staff-only copy, for the role-isolation test (Run 12b uses it)
 
@@ -649,28 +665,38 @@ after (g), with the same variables. It adds a document; it does not change the o
   retrieved, cited or answered from for a customer, and is for staff; and when it is deleted both
   roles refuse again. The three main questions above cannot show this (all three samples are
   customer documents).
-- **Before it:** Run 10 with step (i) (the staff-only copy `ecas-staff-only` is ingested, 21
-  active chunks), and the three main questions of Run 12 done (they need `finserv-mf-ecas`).
+- **Before it:** Run 10 up to (g) for the insurance and banking documents, with step (i) (the
+  staff-only copy `ecas-staff-only` is ingested, 21 active chunks), and the insurance and banking
+  questions of Run 12 done. The real eCAS customer copy `finserv-mf-ecas` must NOT be in the
+  collection yet (Step 0); its question of Run 12 is asked after Step 6.
 - **Needs:** the variables of Run 10 (for `ingest`, `status` and `delete`) and of Run 12 (for
   the smoke runs), set in the same window.
 - **Why the customer copy goes first:** the staff-only copy holds the same text as
   `finserv-mf-ecas`, which a customer may see. While both exist a customer would be answered
-  from the customer copy and the test would prove nothing. So the customer copy is deleted for
-  the test and put back at the end. (The ids are only labels: the program separates the two
+  from the customer copy and the test would prove nothing. So a throw-away customer copy is
+  deleted for the test and the real one is ingested at the end. (The ids are only labels: the program separates the two
   copies by id and role.)
 - **The question** is one only the eCAS text can answer. It is not in the insurance or banking
   samples: *Which folio is pending nomination opt-in or opt-out?*
 
+**Step 0. The order, and the throw-away customer copy.** A delete records an id as withdrawn
+for good, so this drill never deletes a real id. It needs NO other customer copy of the eCAS
+text in the collection, so do it **before** the eCAS part of Run 10 (g) (the insurance and
+banking documents may be there). Ingest the eCAS as a customer document under
+`rehearsal-ecas-1` (the command of Run 10 (g) with `--doc-id rehearsal-ecas-1`), and
+`ecas-staff-only` as in (i). The next drill uses `rehearsal-ecas-2`.
+
 **Step 1. Take the customer copy away.**
 
-    uv run python -m app.ingest delete --doc-id finserv-mf-ecas
+    uv run python -m app.ingest delete --doc-id rehearsal-ecas-1
 
 It asks you to type the id.
 
-- **You should see:** `finserv-mf-ecas: removed 21 chunk(s), N allow-list entr(ies); 0 chat
-  message(s) flagged 'source removed'`. Then
-  `uv run python -m app.ingest status --doc-id finserv-mf-ecas` shows `stored 0` and
-  `allow-list entries: none`; `status --doc-id ecas-staff-only` still shows `active 21`.
+- **You should see:** `rehearsal-ecas-1: removed 21 chunk(s), N allow-list entr(ies); 0 chat
+  message(s) flagged 'source removed'`, then `recorded as withdrawn (reason: other); 1 original
+  PDF(s) moved`. Then `uv run python -m app.ingest status --doc-id rehearsal-ecas-1` shows
+  `stored 0` and `allow-list entries: none`; `status --doc-id ecas-staff-only` still shows
+  `active 21`.
 
 **Step 2. Ask as a customer: it must refuse.**
 
@@ -751,14 +777,16 @@ It asks you to type the id.
   `ecas-staff-only`, means a deleted chunk is still retrieved: stop and send the output (this
   would be a deletion or filter fault).
 
-**Step 6. Put the customer copy back.**
+**Step 6. The real customer copy.** Now ingest the real one (the eCAS command of Run 10 (g)).
+A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays withdrawn.
 
     uv run python -m app.ingest ingest spec/samples/company/finserv_mutual_fund_ecas_and_servicing.pdf `
       --doc-id finserv-mf-ecas --doc-type policy --access-role customer --product-line finserv
 
 - **You should see:** `finserv-mf-ecas: new 21, changed 0, unchanged 0, removed 0, version 1`,
   exit code 0 (quick: the answers are cached). Then `status --doc-id finserv-mf-ecas` shows
-  `active 21`.
+  `active 21`; `status --doc-id ecas-staff-only` still shows `active 21`. The main eCAS question
+  of Run 12 is asked now.
 
 - **Send back:** for each smoke command its role, the `RESULT` line, the `cited doc ids:` line,
   the `review rows:` line and the exit code; for each ingest, delete and status the counts
@@ -1525,7 +1553,8 @@ It asks you to type the id.
       uv run python scripts/record_cassettes.py
 
   You should see `plan: 5 real call(s), one per provider`, one line per provider with `key set`
-  or `key NOT set`, and `nothing was called: add --run to record`.
+  or `key NOT set`, and `nothing was called: add --run to record`. With `--run` and a key
+  missing, nothing is called and it prints `not started, these settings are missing: NAMES`.
 - **Step 2. Record (five real calls):**
 
       uv run python scripts/record_cassettes.py --run
@@ -1670,10 +1699,21 @@ It asks you to type the id.
   the API counts is your real address, that the 512 MB host holds the masker and a login being
   hashed together, and that a new deploy is in the shadow stage.
 - **Before it:** Runs 1 to 3 and 10 (the database, the collection, the cache and the documents
-  exist), Run 24 (the secret scan is clean) and Run 25 if you want the recorded tests first.
+  exist), Run 24 (the secret scan is clean) and Run 25 if you want the recorded tests first. The
+  migrations that are still pending (0004 and later, including `0010_withdrawn_documents.sql`)
+  are applied by `docs/DEPLOY.md` 2.1 itself, so Runs 4, 8, 16 and 18 do not have to be done
+  first for the schema; they are still needed for what they check (the first admin, the webhook).
 - **Needs (names only):** the accounts of `docs/DEPLOY.md` section 1 and every secret of its
   table in section 5 (the "required" rows). You also fill in the region placeholder of
-  `render.yaml`.
+  `render.yaml`, and the admin's sign-in for 2.5a (a token from `Read-Secret` and
+  `Invoke-RestMethod`; `curl.exe`, never `curl`, in Windows PowerShell).
+- **Risk of the first public exposure (read before you click Deploy):** from the moment a service
+  shows **Live** until 2.6 is finished, the address is public and the client address is Render's
+  proxy, so every visitor shares ONE rate limit and ONE login throttle. A stranger who finds the
+  address can use up the sign-in allowance and lock the admin out for a while (the throttle
+  releases by itself; nobody can read data without an account). Do not publish or paste the
+  address, and do 2.5 to 2.8 in one sitting. The service is in `shadow` (2.8), so no one but the
+  admin sees an answer.
 - **Steps:** follow `docs/DEPLOY.md` section 2.1 to 2.9 in order. The numbers to send back come
   from three of them:
   1. **2.5:** `curl https://YOUR-API.onrender.com/live` shows `{"status":"ok"}`.
@@ -1685,6 +1725,9 @@ It asks you to type the id.
      address.
   3. **2.7, memory:** read `/admin/diagnostics` right after a question was asked and a sign-in
      was done in a second tab: send `memory_mb` and `peak_memory_mb`.
+  4. **2.8, the stage:** `GET /admin/shadow` shows `stage` `shadow`. If the database you use was
+     not new, it may show another stage: set it back to `shadow` as 2.8 says, then send the stage
+     you found.
 - **You should see:** `/live` ok; the sign-in page; an admin who can sign in; the stage `shadow`
   on the Rollout page; the diagnostics numbers above.
 - **If a line differs:** `address_at_one_hop` is not your address, or `forwarded_entries` is 0:
@@ -1692,7 +1735,8 @@ It asks you to type the id.
   `trusted_proxy_hops`, `address_source` and the first two groups of `address_at_one_hop` only. `peak_memory_mb` over about 450: `DEPLOY.md`
   section 7 (lower `PASSWORD_HASH_CONCURRENCY`, then a larger instance; masking stays on).
   `refusing to start: NAME`: fix that variable.
-- **Send back:** the three outputs, and the date and time the first deploy went Live.
+- **Send back:** the four outputs, and the date and time the first deploy went Live. Then
+  revoke the token (`POST /auth/logout`, 2.5a) and close the window.
 - **Clear:** nothing to clear; do not move the stage out of `shadow` (DEPLOY.md section 6 is the
   checklist for that, a decision of its own).
 - **Real calls:** a few (three to six questions to check it works).
@@ -1709,59 +1753,112 @@ It asks you to type the id.
   2. Start the stopwatch. Render, `bfsi-api`, **Deploys**, the deploy before the last one,
      **Rollback**. Stop the stopwatch when `https://YOUR-API.onrender.com/live` answers ok.
   3. Ask one question in the frontend.
-  4. Roll forward again (Deploys, the newest, **Rollback** to it, or push a new commit).
+  4. **Check Auto-Deploy** of the service (Settings): Render may have switched it off by the
+     rollback [T: verify and send what you saw]. Roll forward again: Deploys, the newest,
+     **Rollback** to it, or switch Auto-Deploy back on and push a new commit. If a push does not
+     deploy, it was off: write that down.
 - **You should see:** the time under 5 minutes, `/live` ok, a question answered.
 - **If a line differs:** more than 5 minutes: write what took the time (a cold start, a slow
   build) and send it; the runbook may need a different order.
-- **Send back:** the minutes and seconds, and the date. Also write them in
-  `docs/runbooks/README.md` (the rehearsal column for "Bad deploy: go back").
+- **Send back:** the minutes and seconds, the date, and whether Auto-Deploy was off after the
+  rollback. Also write the time in `docs/runbooks/README.md` (the rehearsal column for "Bad
+  deploy: go back").
 - **Clear:** nothing.
 - **Real calls:** one question.
 - **Safe to repeat:** yes.
 
-## Run 30. Qdrant snapshot and one restore test: PENDING
+## Run 30. Qdrant snapshot, download and a test restore: PENDING
 
-- **Verifies:** spec 11.3: whether the free cluster allows snapshots, and that one restore works;
-  otherwise that the re-ingest from `originals/` works from your backup copy.
+- **Verifies:** spec 11.3: whether the free cluster allows snapshots, that one can be taken and
+  copied down whole, and that the copy can be restored. **Restoring a downloaded snapshot is
+  UNPROVEN until this run has passed**; `docs/runbooks/restore-documents.md` says so. The
+  restore goes into a throw-away collection called `documents_restore_test`, never into
+  `documents`.
 - **Before it:** Run 2 and Run 10 (a populated `documents` collection).
-- **Needs (names only):** `QDRANT_URL`, `QDRANT_API_KEY`.
+- **Needs (names only):** `QDRANT_URL`, `QDRANT_API_KEY`. The key must be allowed to create and
+  delete collections (the test collection is created by the upload and removed at the end).
 - **Step 1. See what is there (no change):**
 
       uv run python scripts/qdrant_snapshot.py list
 
-  You should see `N snapshot(s) of 'documents'`.
+  You should see `N snapshot(s) of 'documents'`, then one line per snapshot with its size, time
+  and `copy here` or `no copy`.
 - **Step 2. Make one and copy it down:**
 
       uv run python scripts/qdrant_snapshot.py create --run
-      uv run python scripts/qdrant_snapshot.py list
-      uv run python scripts/qdrant_snapshot.py download SNAPSHOT_NAME --run
+      uv run python scripts/qdrant_snapshot.py download --newest --run
 
-  You should see `created ...`, then the name in the list, then `saved ... in ...backups\qdrant`.
-- **Step 3. If a line says `the cluster does not offer snapshots`** (exit code 2): the plan does
-  not include them. Then the backup is a re-ingest. (A line `the key was rejected`, exit code 3,
-  is a different thing: check `QDRANT_API_KEY` and its access rights.) Do the restore test of
-  `docs/runbooks/restore-documents.md` (one document into `documents_eval`, compare the active
-  chunk counts) and fill in where `originals/` is backed up.
+  You should see `created NAME (N bytes)`, then `saved NAME (N bytes, sha256 ...) in
+  ...backups\qdrant`. A line `not saved: the size of the copy does not match the server's` means
+  the download was cut short: nothing was kept; run it again.
+- **Step 3. Restore the copy into the throw-away collection, count it, remove it:**
+
+      uv run python scripts/qdrant_snapshot.py restore-test NAME --run
+
+  (NAME is the name `saved` printed.) You should see `uploaded NAME into documents_restore_test`,
+  then `points in documents_restore_test: N` and `points in documents: M`, then `removed
+  documents_restore_test`. N equals M when nothing was ingested since the snapshot; a smaller or
+  larger M is explained by what you ingested since, not by a fault. Without `--run` it only says
+  what it would do. It refuses to start when `documents_restore_test` already exists (it never
+  touches a collection it did not make) and it never writes to `documents`.
+- **Step 4. If a line says `the cluster does not offer snapshots`** (exit code 2): the plan does
+  not include them. Then the backup is a re-ingest; that route is the tested one anyway. (A line
+  `the key was rejected`, exit code 3, is a different thing: check `QDRANT_API_KEY` and that it
+  may make snapshots.) Do the restore test of `docs/runbooks/restore-documents.md` (one document
+  into `documents_eval`, compare the active chunk counts) and fill in where `originals/` is
+  backed up.
 - **If a line differs:** `not started: QDRANT_URL is not set`: set it in this window. A different
-  error prints its class name only.
-- **Send back:** the output (names and sizes) and the result of the restore test.
+  error prints its class name only: send me the class name and the step. If step 3 stops after
+  the upload and `documents_restore_test` is left behind, run the same command again (it will
+  say it already exists) and delete that collection in the console by hand: it is only a test.
+- **Send back:** the output of steps 1 to 3 (names, sizes and counts), and the result of the
+  `originals/` restore test of step 4. I then change the runbook from UNPROVEN to proven (or
+  write what failed).
 - **Clear:** unset the two variables; `backups\` is git-ignored.
-- **Real calls:** about 3 requests to Qdrant.
+- **Real calls:** about 6 requests to Qdrant, one of them a file upload of the snapshot's size.
+  It uses the free cluster's disk for a few minutes (a second copy of the documents).
 - **Safe to repeat:** yes.
 
-## Run 31. A key rotation drill: PENDING
+## Run 31. A key rotation drill on a key you have a spare for: PENDING
 
-- **Verifies:** `docs/KEY_ROTATION.md`: that you can replace a key without downtime and prove it.
+- **Verifies:** `docs/KEY_ROTATION.md`: that you can replace a key and prove it, and what a save
+  costs (about a minute of restart).
 - **Before it:** Run 28.
-- **Steps:** rotate `GEMINI_EMBEDDING_KEY_B` (the failover key, the safe one) exactly in the order
-  of `docs/KEY_ROTATION.md`, using `uv run python scripts/key_inventory.py` before and after.
-- **You should see:** the fingerprint of the key changed, the count the same, no warning that a
-  key appears twice, `/health` healthy, a question answered.
+- **Needs (names only):** the key you rotate (set it in this window with `Read-Secret`; never in
+  a file) and a **spare** one at the provider. First check which names hold a value, so you pick
+  a key that exists:
+
+      uv run python scripts/key_inventory.py
+
+  Each line shows the setting name, `keys` (how many it holds) and short fingerprints. Pick the
+  first row of this table whose setting shows a count of 1 or more AND for which you can make a
+  new key at the provider without disturbing anything else:
+
+  | Pick | Setting | How the drill goes |
+  |---|---|---|
+  | 1 | `GROQ_API_KEYS` (a list, up to four) | add the new key after a comma, save, check, revoke the old one at Groq, remove it from the list, save |
+  | 2 | `GEMINI_EMBEDDING_KEY_B` (a single value, the failover) | replace it, save, check, revoke the old one |
+  | 3 | `GEMINI_API_KEYS` or `OPENROUTER_API_KEYS` (lists) | as pick 1 |
+
+  `GEMINI_EMBEDDING_KEY_B` is optional: if its count is 0, use pick 1. Do **not** drill with
+  `GEMINI_EMBEDDING_KEY_A`, `JWT_SECRET_KEY`, `AUDIT_HASH_KEY` or `LANGFUSE_USER_HASH_KEY`
+  (their rotation has side effects: `docs/KEY_ROTATION.md`).
+- **Steps:** follow "The order" in `docs/KEY_ROTATION.md` exactly, with
+  `uv run python scripts/key_inventory.py` before and after. The inventory reads only the
+  variables of THIS window, so type the key lists into the window (`Read-Secret`) before each
+  run; the fingerprints then show the keys you typed, not what Render holds. What proves Render
+  holds the new key is a question answered and `/health` healthy. Each save on Render restarts
+  the service: write down how long it took.
+- **You should see:** the old fingerprint gone from your window's list, the new one present, the
+  count the same as before once the old key is removed, no `WARNING: the same key ...` line,
+  `/health` healthy, a question answered.
 - **If a line differs:** the old fingerprint is still there: the old key is still in the list;
   remove it and save.
-- **Send back:** the two inventory outputs (names, counts and fingerprints) and the minutes it
-  took.
-- **Clear:** unset the variables in your window.
+- **Send back:** the two inventory outputs (names, counts and fingerprints), which pick you used,
+  and the minutes it took.
+- **Clear:** unset the variables in your window (`Remove-Item Env:NAME`) or close it. If the key
+  is also in a scheduled task's encrypted file (only `QDRANT_*` and `DATABASE_URL` are), replace
+  that file too (`docs/DEPLOY.md` 9.1).
 - **Real calls:** one question.
 - **Safe to repeat:** yes.
 
@@ -1791,19 +1888,83 @@ It asks you to type the id.
   from Windows Task Scheduler, and that the `retention_overdue` alert stays quiet.
 - **Before it:** Runs 22 and 30 for the drift and snapshot tasks; the encrypted secret files of
   `docs/DEPLOY.md` section 9.1.
-- **Steps:** create the three tasks of the table in section 9 and run each once by hand from Task
-  Scheduler (**Run**). Read each output.
-- **You should see:** the retention task prints counts and a line for the evaluation samples (or
-  the fixed "not purged (ClassName)" line, exit 0); the drift task prints the sample counts and
-  `alerts: none` or names; the snapshot task prints `created ...` and `deleted ...` or nothing to
-  delete.
+- **Steps:** create the three tasks of the table in section 9 (three small scripts, each writing
+  its output to its own log file under `bfsi-tasks`) and run each once by hand from Task
+  Scheduler (**Run**). Read each log and **Last Run Result** (0 is success).
+- **You should see**, line by line (the program's own wording):
+  - **retention.log:** `deleted N chats (M messages)`, then `deleted A audit rows, B alert rows
+    and C hourly metric rows older than 30 days`, then either `deleted S masked evaluation
+    samples older than 30 days` or, when `EVAL_DATABASE_URL` is not set, nothing, or, when the
+    second database failed, `evaluation samples: not purged (ClassName); the chat and audit parts
+    above are done` (exit 0 all the same). Optionally `traces: N chats queued for removal ...`.
+    N, A, B, C are usually 0 on a young system. Each run writes the `retention_sweep` row.
+  - **drift.log:** `production: N sample(s) this week, M in the baseline window`, one line per
+    measure (`name: PSI x, JS y (level)`), then `alerts: none` (or the names of the alerts).
+    It also saves one drift row in the evaluation database (that is what the page shows).
+  - **snapshot.log:** `created NAME (N bytes)`, `saved NAME (N bytes, sha256 ...) in ...`, then
+    `K snapshot(s); keeping the newest 5; deleting D` (D is 0 until more than five exist) and
+    one `kept NAME: no downloaded copy` line for each older snapshot you never downloaded, and
+    `deleted NAME` for any it removed. Exit 0.
 - **If a line differs:** `not started: NAME is not set in this window`: the encrypted file of that
-  name is missing.
+  name is missing. `the key was rejected` or `the cluster does not offer snapshots`: Run 30.
 - **Send back:** the three outputs (counts and names only) and the date the tasks were created.
   A week later check the admin banner has no `retention_overdue` (the alert waits seven days).
 - **Clear:** the encrypted files stay (they are yours); remove a task you no longer want.
 - **Real calls:** a few requests to the database, the cache and Qdrant; no model call.
 - **Safe to repeat:** yes.
+
+## Run 34. Migration 0010 and the withdrawn-document record (needs your explicit yes): PENDING
+
+- **Verifies:** that the new table exists on the real database, that a delete records the id and
+  moves the PDF, that an ingest of that id is refused, and that after a "restore" (here: putting
+  the vectors back) the `withdrawn` command finds the document and one more delete clears it.
+  It works on the test collection `documents_eval` and a local SQLite file, never on
+  `documents` or the cloud database. (The cloud database gets the table from the migration in
+  `docs/DEPLOY.md` 2.1.)
+- **Before it:** Run 19 (the test collection and the sample documents; its local evaluation
+  SQLite file).
+- **Needs (names only):** `QDRANT_URL`, `QDRANT_API_KEY`, `UPSTASH_REDIS_URL` is **not** needed
+  (a test collection never touches the cache), `DATABASE_URL` set to the local SQLite file of
+  Run 19 (a `sqlite:///...` address; the command refuses a remote one for a test collection), the
+  Gemini embedding key of Run 19 for the ingest.
+- **Step 1. Apply the migration to the local file:**
+
+      uv run python -m app.db.migrate
+
+  You should see `0010_withdrawn_documents.sql` applied (and nothing else pending).
+- **Step 2. Ingest one sample document into the test collection under a throw-away id, as Run 19
+  does** (use its exact command with `--doc-id withdraw-test --collection documents_eval`). You
+  should see `new N ... version 1` and `original` kept in `originals\withdraw-test\`.
+- **Step 3. Delete it:**
+
+      uv run python -m app.ingest delete --doc-id withdraw-test --reason other --collection documents_eval
+
+  Type `withdraw-test` when asked. You should see `removed N chunk(s) ...`, then `recorded as
+  withdrawn (reason: other); 1 original PDF(s) moved`. The PDF is now under
+  `originals\_withdrawn\withdraw-test\`.
+- **Step 4. Try to bring it back by accident:** repeat step 2. You should see an error that the
+  id `was withdrawn` and names `--reinstate`; nothing is ingested and no PDF appears in
+  `originals\withdraw-test\`.
+- **Step 4b. The safeguards of `--reinstate` (this is the only run that uses it):**
+  1. Repeat step 2 with `--reinstate withdraw-test` and **no** `--confirm-id`: it must refuse
+     (`--reinstate needs the document id twice`), nothing is ingested.
+  2. Repeat step 2 with `--reinstate withdraw-test --confirm-id withdraw-test`: you should see
+     `'withdraw-test' was withdrawn: its record is removed (--reinstate)` and the ingest goes on.
+  3. Run step 3 again: it records the id again, with a new time.
+  A routine drill never needs `--reinstate`: use a throw-away id.
+- **Step 5. The list:**
+
+      uv run python -m app.ingest withdrawn --collection documents_eval
+
+  You should see `1 withdrawn document id(s)` and a line for `withdraw-test` ending `gone`,
+  exit code 0.
+- **Clear:** delete the throw-away document's folder `originals\_withdrawn\withdraw-test\`;
+  unset the variables. The record stays in the local file, which is only a test file.
+- **If a line differs:** `no such table: withdrawn_documents` means step 1 did not run on the
+  file `DATABASE_URL` points at. A different error prints its class name: send it.
+- **Send back:** the output lines of steps 3 to 5.
+- **Real calls:** a handful of Qdrant requests and one embedding call (the ingest).
+- **Safe to repeat:** with a new throw-away id each time (an id stays withdrawn).
 
 ---
 

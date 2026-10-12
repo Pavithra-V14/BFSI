@@ -113,6 +113,7 @@ def test_deleting_a_document_that_never_existed_is_a_quiet_no_op(rig):
     result = delete_document(rig.ctx, "never-there")
     assert (result.chunks, result.allowlist_entries, result.transcripts_flagged) == (0, 0, 0)
     assert rig.db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 0
+    assert rig.db.query_one("SELECT COUNT(*) FROM withdrawn_documents")[0] == 0
 
 
 def test_a_failed_version_bump_makes_the_delete_incomplete_and_a_rerun_finishes_it(rig):

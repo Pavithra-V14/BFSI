@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 DOC_TYPES = ("policy", "regulatory", "customer-specific")
 ACCESS_ROLES = ("customer", "staff", "admin")
 CONTENT_TYPES = ("text", "table", "image_caption")
+# Why a document was withdrawn: a fixed list, never free text (the migration 0010 check agrees).
+WITHDRAW_REASONS = ("outdated", "incorrect", "compliance", "replaced", "other")
 
 # A stable, human-chosen slug. Never derived from a file path or a title.
 _DOC_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")

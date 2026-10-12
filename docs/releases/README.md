@@ -9,7 +9,9 @@ Make one:
 uv run python scripts/release_record.py --title "Tighten the refusal wording" --kind prompt --approved-by "the admin"
 ```
 
-It copies `TEMPLATE.md` to `YYYY-MM-DD-<title>.md`, fills in the git facts (commit, branch, the
-names of the files changed) and leaves the evaluation result and the approval for you to write.
+It copies `TEMPLATE.md` to `YYYY-MM-DD-<title>.md`, fills in the git facts (the commit of HEAD:
+**run it on the release commit**, the branch, and the names of the files changed since the
+commit of the newest earlier record; `--since COMMIT` names another starting point, and the
+record says which was used) and leaves the evaluation result and the approval for you to write.
 Commit the file with the change it describes. Corpus and code ship separately: a re-ingest is a
 record of kind `corpus`.

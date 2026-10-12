@@ -23,19 +23,27 @@ once (`docs/runbooks/key-leaked.md`); this page is for the routine.
 
 Spec 2: the owner must also check each provider's terms of service for using several accounts [T].
 
-## The order (no downtime) for a list of keys
+## The order for a list of keys (a save restarts the service)
 
 1. Make the new key at the provider.
 2. `uv run python scripts/key_inventory.py` in a window with the current values: note the count
    and fingerprints (the first eight characters of each key's SHA-256; they cannot be turned back).
 3. Render, `bfsi-api`, **Environment**: append the new key to the list after a comma. **Save.**
-   Render restarts the service (about a minute); the old keys still work.
+   Render restarts the service (about a minute, during which a request can fail or be slow: do
+   it at a quiet time); the old keys still work, so no answer is lost for want of a key.
 4. Ask one question. Open `/health`: the provider is `healthy`.
 5. Revoke the OLD key at the provider.
 6. Remove the old key from the list. **Save.**
 7. Run `key_inventory.py` again with the new list: the old fingerprint is gone, the count is back.
+   **The script reads only the variables of the window you run it in**, never Render's: type the
+   lists into that window first (`Read-Secret`). Its fingerprints prove what YOU typed; that
+   Render holds the same is proved by step 4 (a question answered, `/health` healthy).
 8. Write a line in the log below. Also update the key on your own machine's shell setup if you use
    it there.
+9. **If the key is one of the scheduled tasks' secrets** (`DATABASE_URL`, `EVAL_DATABASE_URL`,
+   `QDRANT_URL`, `QDRANT_API_KEY`, `LANGFUSE_USER_HASH_KEY`), replace its encrypted file under
+   `bfsi-secrets` too (`docs/DEPLOY.md` 9.1). Otherwise the retention, drift and snapshot tasks
+   keep using the revoked value and fail without a sound.
 
 A single-value secret (the Jev key, the database address, the webhook address): replace it, save,
 ask one question, then revoke the old one.
@@ -59,9 +67,11 @@ key gives a new hash for the same input, so:
 
 ## A drill (Run 31)
 
-Once, before launch: rotate ONE embedding key (`GEMINI_EMBEDDING_KEY_B`) following the order above
-and write down how long it took and what surprised you. It is a safe key to rehearse with: key A
-is the primary and B only a failover.
+Once, before launch: rotate ONE key you have a spare for, following the order above, and write
+down how long it took and what surprised you. Which one: `docs/OWNER_RUNS.md` Run 31 has the
+choice (a key of a list such as `GROQ_API_KEYS` is the usual one; `GEMINI_EMBEDDING_KEY_B` is a
+safe single value when it is in use: key A is the primary and B only a failover; it is optional,
+so it may be empty).
 
 ## The log
 
