@@ -88,6 +88,7 @@ never set.)
 | 21 | The first baseline run and the variance band (the active set, then three runs) | Phase 13 | PENDING (needs your yes: real keys) |
 | 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | PENDING (needs your yes: real keys) |
 | 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | PENDING |
+| 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | ANY TIME (before every push) |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much. The
@@ -1459,6 +1460,46 @@ It asks you to type the id.
 - **Clear:** close both windows.
 - **Real calls:** the start button runs a real evaluation (see Run 21); the other steps make none.
 - **Safe to repeat:** yes.
+
+## Run 24. Secret scan on this machine before a push (a pre-push check): ANY TIME
+
+- **Verifies:** that the history of this repository has no secret in it, with the same program,
+  the same version and the same settings as the CI job, so a red scan is found here and not
+  after the push.
+- **Before it:** nothing. It makes no model call. It reports file names, line numbers and rule
+  names, never the value (`--redact`).
+- **Needs:** gitleaks 8.30.1 (the version CI installs) on this machine, once:
+  1. Open https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1 and download
+     `gitleaks_8.30.1_windows_x64.zip` and `gitleaks_8.30.1_checksums.txt`.
+  2. Check the file in PowerShell and compare the result with the line for that zip in the
+     checksums file (they must be identical):
+
+         (Get-FileHash .\gitleaks_8.30.1_windows_x64.zip -Algorithm SHA256).Hash
+
+  3. Unzip it and put `gitleaks.exe` in a folder that is on your PATH (or run it by its full
+     path). `winget install Gitleaks.Gitleaks` also works; then `gitleaks version` must say
+     8.30.1 (another version can read the settings file differently).
+- **Step 1. Scan the whole history, from the repository root:**
+
+      gitleaks git --redact --no-banner --verbose
+
+  This is the CI command. It reads `.gitleaks.toml` (the default rules plus three narrow path
+  allowances) and `.gitleaksignore` (fingerprints of earlier findings) from the repository root
+  by itself.
+- **Step 2 (optional, quick). Scan only the changes you have staged and not committed yet:**
+
+      gitleaks git --redact --no-banner --verbose --staged
+
+- **You should see:** a count such as `37 commits scanned` and `no leaks found`, exit code 0.
+- **If a line differs:** a finding prints `Finding:` (redacted), `RuleID:`, `File:`, `Line:`,
+  `Commit:` and a `Fingerprint:`. Send me the `Fingerprint:` and `File:`/`Line:` lines (never
+  a value; it is redacted anyway). A real secret means: do not push, and tell me at once. A
+  false positive is fixed in the code (rename the variable) or, only when the name cannot
+  change, in `.gitleaks.toml` or `.gitleaksignore` by me.
+- **Send back:** `no leaks found`, or the lines above.
+- **Clear:** nothing to clear.
+- **Real calls:** none.
+- **Safe to repeat:** yes; run it before every push.
 
 ---
 

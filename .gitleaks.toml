@@ -1,0 +1,31 @@
+# Secret scan configuration (gitleaks v8.30.1, run by CI and by the owner before a push).
+#
+# It extends the built-in rules and changes nothing about them. The only exception is a short
+# list of paths, each limited to the one rule that keeps reporting a metric name as a secret.
+# No other rule and no other path is allowed here: tests/test_secret_scan_config.py fails when
+# this file is widened.
+
+title = "BFSI RAG assistant secret scan"
+
+[extend]
+useDefault = true
+
+# The drift module names its measures (a mean of tokens, a latency percentile) in a loop; the
+# generic rule reads the measure name as a secret. Metric names only, no secrets.
+[[allowlists]]
+description = "Metric names of the drift module, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''^app/eval/drift\.py$''']
+
+# The drift tests assert on the same alert names. Metric and alert names only, no secrets.
+[[allowlists]]
+description = "Alert names of the drift tests, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/test_eval_drift\.py$''']
+
+# The ignore file lists fingerprints and explains each one; a fingerprint holds a file name and
+# a line number and is reported as a key. Fingerprints and words only, no secrets.
+[[allowlists]]
+description = "Fingerprints of the ignore file, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''^\.gitleaksignore$''']

@@ -1,25 +1,28 @@
-# Two findings in the history that are made-up test strings, not secrets. They sit in leak
-# tests that check a fake key never appears in any log. The lines have since been rewritten
-# so that the fake fragment is cut from a variable and is no longer typed out.
+# Findings in the history that are made-up test strings or metric names, not secrets.
+# Comments here describe the reason in words only: a quoted line of code in a comment is itself
+# reported. Paths that keep producing the same kind of finding are listed in .gitleaks.toml.
+
+# Two made-up strings in leak tests that check a fake key never appears in any log. The lines
+# have since been rewritten so that the fake fragment is cut from a variable and is no longer
+# typed out.
 60c09165f2cc1ed67cc403dbad6de32b51e2e0a2:tests/test_gateway_round2.py:generic-api-key:661
 bb18ef1ecdaa9282dde6e798d444d8cb6890c2ca:tests/test_gateway_round3.py:generic-api-key:513
 
 # Phase 8 (commit 52cdc7b): made-up keys of the Langfuse sink tests, typed out whole in the first
 # version. They were test-only strings, never real keys. The source now makes them at test time
-# (secrets.token_urlsafe), but the old commit stays in the history, so the fingerprints stay here.
-# Lines 41 and 42 were reported by CI; line 40 (USER_KEY) is the same kind of literal in the same
-# commit and is listed with them.
+# with a random generator, but the old commit stays in the history, so the fingerprints stay
+# here. Two were reported by CI; the third is the same kind of literal in the same commit.
 52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:40
 52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:41
 52cdc7b6241de43c8b3c98f3ef7b547f51811eb0:tests/test_pipeline_langfuse.py:generic-api-key:42
 
-# Phase 13 (commit 9c6406d): an assertion that names two drift alerts, "tokens_mean_creep" and
-# "latency_p95_ms_creep". Words with an underscore, not a key; the entropy rule took the pair of
-# strings for one. The line is reworded in the next commit so it is not reported again.
+# Phase 13 (commit 9c6406d): two drift alert names in a test assertion, and two metric names in a
+# loop of the drift module. Names with an underscore, not secrets; the entropy rule took the
+# pair of short strings for one value.
 9c6406d1e4cb3c91ba4bac00361158ac94601c70:tests/test_eval_drift.py:generic-api-key:159
-
-# Phase 13 (commit 9c6406d): `for key in ("tokens_mean", "latency_p95_ms"):` in the drift
-# module. Two metric names, not a key; the entropy rule read the loop variable's name and the
-# short strings as a key assignment. The loop variable is renamed in the next commit, and so are
-# the other loops over short quoted names that used a variable called key or secret.
 9c6406d1e4cb3c91ba4bac00361158ac94601c70:app/eval/drift.py:generic-api-key:153
+
+# Commit ae922cf: the same loop after its variable was renamed (the metric name itself holds the
+# word that the rule looks for), and a comment of this file that quoted the old line.
+ae922cf332f2938021cf8682a0bba6b24e457691:.gitleaksignore:generic-api-key:21
+ae922cf332f2938021cf8682a0bba6b24e457691:app/eval/drift.py:generic-api-key:154
