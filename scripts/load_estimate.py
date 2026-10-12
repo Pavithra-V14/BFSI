@@ -39,6 +39,7 @@ def main(
         out(f"error: {error}")
         return 1
 
+    from app.eval import constants as c
     from app.eval.cases import load_cases
     from app.eval.estimate import describe
     from app.gateway import GatewayConfig
@@ -54,17 +55,24 @@ def main(
         return 1
     _version, cases = load_cases()
     estimate = plan.real_estimate(steps, config, cases)
-    code = plan.confirmation(estimate, steps)
     out("plan: " + ", ".join(f"{s.users} users for {s.seconds} s" for s in steps))
     out(f"about {plan.question_count(steps)} chat questions in all")
     for line in describe(estimate):
         out(line)
     if estimate["too_big_for_one_day"] or len(estimate["batches"]) > 1:
-        out("this plan does not fit one day of the free-tier limits: shorten it; no code is valid")
+        out("this plan does not fit one day of the free-tier limits: shorten it; no ticket is made")
         return 2
-    out("It needs your explicit yes. If you say yes, start Locust with these two settings:")
-    steps_text = ",".join(f"{s.users}x{s.seconds}" for s in steps)
-    out(f"  LOAD_MODE=real  LOAD_STEPS={steps_text}  LOAD_CONFIRM={code}")
+    ticket = plan.issue_ticket(estimate, steps)
+    out(
+        f"The ticket is for THIS plan and for today (UTC {ticket.day}), is valid for "
+        f"{c.CONFIRMATION_MINUTES} minutes from now, and works ONCE: the real server uses it up "
+        "when it starts."
+    )
+    out("It needs your explicit yes. If you say yes, set these three in the window of both "
+        "servers and of Locust, and start load/real_server.py first:")  # fmt: skip
+    out(f"  LOAD_MODE=real  LOAD_STEPS={ticket.steps}  LOAD_CONFIRM={ticket.code}")
+    out("a real run writes to this machine only (a SQLite file, an in-process Redis stand-in) "
+        "and only reads the test collection of the vector store")  # fmt: skip
     return 0
 
 

@@ -262,3 +262,73 @@ def test_a_recording_that_breaks_the_hygiene_rules_is_deleted(tmp_path):
 def test_the_detector_has_its_own_rule_for_each_key_shape_not_only_the_entropy_rule(text):
     """Short or repetitive values pass the entropy rule; the shape rules must still refuse them."""
     assert tools.hygiene_problems(text)
+
+
+# ==== list-valued headers, real key values, request bodies ====
+def test_a_credential_header_held_as_a_list_is_checked_like_a_string():
+    leaked = {"interactions": [{"request": {"headers": {"Authorization": ["abc"]}}}]}
+    clean = {"interactions": [{"request": {"headers": {"Authorization": [tools.REDACTED]}}}]}
+    assert "a credential header that is not replaced" in tools.hygiene_problems(json.dumps(leaked))
+    assert tools.hygiene_problems(json.dumps(clean)) == []
+    string_leak = {"request": {"headers": {"x-goog-api-key": "abc"}}}
+    assert tools.hygiene_problems(json.dumps(string_leak))
+
+
+def test_a_list_valued_header_is_replaced_while_recording():
+    token = made_up_key()
+    scrubbed = tools.scrub_request(
+        request(headers={"Authorization": ["Bearer " + token], "Accept": ["json"]})
+    )
+    assert tools.REDACTED in str(scrubbed.headers["Authorization"])
+    assert token not in str(dict(scrubbed.headers))
+    assert "json" in str(scrubbed.headers["Accept"])
+
+
+def test_a_real_key_value_anywhere_in_the_file_is_refused_whatever_it_looks_like():
+    plain = "abcabcabcabcabc1"  # short and repetitive: no shape rule and no entropy rule fires
+    text = json.dumps({"note": "echo " + plain})
+    assert tools.hygiene_problems(text) == []
+    assert tools.hygiene_problems(text, forbidden=[plain])
+    assert plain not in " ".join(tools.hygiene_problems(text, forbidden=[plain]))
+
+
+def test_the_recorder_checks_the_files_for_the_real_key_values_it_used(tmp_path):
+    plain = "abcabcabcabcabc1"
+
+    async def echo(k):
+        tools.cassette_path("cohere_rerank").write_text(json.dumps({"x": plain}), "utf-8")
+
+    out = Lines()
+    status = record_cassettes.main(
+        ["--run", "--only", "cohere_rerank"],
+        keys(COHERE_API_KEY=plain),
+        out=out,
+        folder=tmp_path,
+        scenarios={"cohere_rerank": echo},
+    )
+    assert status == 1 and "DELETED" in "\n".join(out)
+    assert plain not in "\n".join(out) and not (tmp_path / "cohere_rerank.json").exists()
+
+
+def test_the_text_of_a_request_body_is_replaced_and_its_call_parameters_kept():
+    body = json.dumps(
+        {
+            "model": "gemini-embedding-2",
+            "dimensions": 768,
+            "input": ["What is my PAN ABCPE1234F?", "second text"],
+            "messages": [{"role": "user", "content": "private question about my policy"}],
+        }
+    ).encode()
+    scrubbed = tools.scrub_request(vcr.request.Request("POST", "https://h.test/p", body, {}))
+    data = json.loads(scrubbed.body)
+    assert data["model"] == "gemini-embedding-2" and data["dimensions"] == 768
+    assert data["input"] == [tools.BODY_PLACEHOLDER, tools.BODY_PLACEHOLDER]
+    assert data["messages"][0] == {"role": "user", "content": tools.BODY_PLACEHOLDER}
+    assert b"ABCPE1234F" not in scrubbed.body and b"private question" not in scrubbed.body
+
+
+def test_a_request_body_that_is_not_json_is_dropped():
+    scrubbed = tools.scrub_request(
+        vcr.request.Request("POST", "https://h.test/p", b"user=me&text=private", {})
+    )
+    assert b"private" not in scrubbed.body

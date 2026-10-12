@@ -22,7 +22,7 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -78,12 +78,48 @@ def _scrub_uri(uri: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(pairs)))
 
 
+# Request body fields that describe the CALL and carry no user text: kept as they are. Every
+# other string in a request body (a prompt, a question, a passage) is replaced.
+SAFE_BODY_FIELDS = {
+    "model", "dimensions", "top_n", "max_tokens", "temperature", "task_type", "type",
+    "response_format", "reasoning_effort", "encoding_format", "role", "output_dimensionality",
+}  # fmt: skip
+BODY_PLACEHOLDER = "REDACTED-TEXT"
+
+
+def _scrub_body_value(value: Any, field: str = "") -> Any:
+    if isinstance(value, dict):
+        return {k: _scrub_body_value(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_body_value(v, field) for v in value]
+    if isinstance(value, str) and field not in SAFE_BODY_FIELDS:
+        return BODY_PLACEHOLDER
+    return value
+
+
+def _scrub_body(body: Any) -> Any:
+    """Keep the shape of a JSON request body (so the cassette still documents the call) and
+    replace every text in it that is not a call parameter. A body that is not JSON is dropped."""
+    if body in (None, b"", ""):
+        return body
+    raw = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return b"REDACTED-BODY" if isinstance(body, bytes) else "REDACTED-BODY"
+    cleaned = json.dumps(_scrub_body_value(data))
+    return cleaned.encode("utf-8") if isinstance(body, bytes) else cleaned
+
+
 def scrub_request(request: Any) -> Any:
-    """`before_record_request`: header values and key-like query parameters are replaced."""
+    """`before_record_request`: header values (a list value too, as VCR keeps them), key-like
+    query parameters and the text of the body are replaced."""
     for name in list(request.headers):
         if name.lower() in SENSITIVE_HEADERS:
-            request.headers[name] = REDACTED
+            value = request.headers[name]
+            request.headers[name] = [REDACTED] * len(value) if isinstance(value, list) else REDACTED
     request.uri = _scrub_uri(request.uri)
+    request.body = _scrub_body(request.body)
     return request
 
 
@@ -210,8 +246,26 @@ def use_cassette(name: str, record_mode: str = "none"):
 
 
 # -------------------------------------------------------------------------------- the hygiene
-def hygiene_problems(text: str) -> list[str]:
-    """Names of the rules a cassette's text breaks (never the offending text itself)."""
+def _header_problems(node: Any) -> bool:
+    """True when a credential header anywhere in the parsed cassette holds anything but the
+    placeholder (a string, or a list of strings as VCR stores them)."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and key.lower() in SENSITIVE_HEADERS:
+                values = value if isinstance(value, list) else [value]
+                if any(v != REDACTED for v in values):
+                    return True
+            if _header_problems(value):
+                return True
+    elif isinstance(node, list):
+        return any(_header_problems(item) for item in node)
+    return False
+
+
+def hygiene_problems(text: str, forbidden: Sequence[str] = ()) -> list[str]:
+    """Names of the rules a cassette's text breaks (never the offending text itself).
+
+    `forbidden` are the real key values the recorder used: none of them may appear anywhere."""
     found: list[str] = []
     for index, shape in enumerate(_KEY_SHAPES):
         if shape.search(text):
@@ -220,11 +274,23 @@ def hygiene_problems(text: str) -> list[str]:
         if entropy(token) >= ENTROPY_LIMIT and token != REDACTED + "-TOKEN":
             found.append("long high-entropy string")
             break
-    for match in re.finditer(r'"(?i:authorization|x-goog-api-key|x-api-key|api-key)"\s*:\s*', text):
-        tail = text[match.end() : match.end() + 60]
-        if REDACTED not in tail.split(",")[0] and not tail.lstrip().startswith("["):
+    try:
+        structured = json.loads(text)
+    except ValueError:
+        structured = None
+    if structured is not None:
+        if _header_problems(structured):
             found.append("a credential header that is not replaced")
-            break
+    else:
+        for match in re.finditer(
+            r'"(?i:authorization|x-goog-api-key|x-api-key|api-key)"\s*:\s*', text
+        ):
+            tail = text[match.end() : match.end() + 60].lstrip("[ ")
+            if not tail.startswith('"' + REDACTED):
+                found.append("a credential header that is not replaced")
+                break
+    if any(value and len(value) >= 8 and value in text for value in forbidden):
+        found.append("a real key value is in the file")
     return found
 
 

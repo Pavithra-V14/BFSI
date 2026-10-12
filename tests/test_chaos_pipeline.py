@@ -119,3 +119,53 @@ def test_a_rate_limited_answer_tier_is_unavailable_and_exposes_nothing_of_the_pr
     clean_unavailable(result)
     blob = repr(result.audit) + repr(result.warnings) + repr(result.degraded)
     assert "retry" not in blob.lower() and "groq" not in blob.lower()
+
+
+# ==== the real gateway, on a fake clock, under the pipeline ====
+def test_the_real_gateway_under_the_pipeline_trips_and_heals_on_a_fake_clock(rig):
+    """The other tests in this file use a scripted gateway. This one puts the REAL gateway (key
+    pools, limiter, breakers, backoff) under the pipeline, with fake providers and a fake clock,
+    so what the user sees comes from breakers that really tripped and really healed."""
+    import httpx
+
+    from app.gateway.config import BREAKER_OPEN_SECONDS
+    from tests.helpers import (
+        FakeBackend,
+        FakeClock,
+        FakeDecisionClient,
+        WordCounter,
+        lit,
+        make_config,
+        make_gateway,
+        ok,
+    )
+
+    clock = FakeClock()
+    healthy = [False]
+    backend = FakeBackend(lambda m, k, n: ok("not json") if healthy[0] else lit("Timeout"))
+    client = FakeDecisionClient(lambda call, n: lit("Timeout"))
+    gateway = make_gateway(
+        make_config(),
+        backend=backend,
+        decision_client=client,
+        clock=clock,
+        counter=WordCounter(),
+        rerank_transport=httpx.MockTransport(lambda request: httpx.Response(503)),
+    )
+    rig.deps.gateway = gateway
+
+    clean_unavailable(run(rig.ask(QUESTIONS[0])))  # every provider fails: the fixed text
+    assert stored_messages(rig) == 0
+    assert gateway.health()["gemini"]["state"] == "circuit_open"
+    spent = len(backend.calls)
+    assert spent > 0 and clock.t > 1_000.0, "the failures really cost (fake) time and calls"
+
+    clean_unavailable(run(rig.ask(QUESTIONS[1])))  # breakers open: no chat provider is asked
+    assert len(backend.calls) == spent
+
+    healthy[0] = True
+    clock.advance(BREAKER_OPEN_SECONDS + 61)  # the open period and the key cooldowns pass
+    run(rig.ask(QUESTIONS[2]))
+    assert len(backend.embed_calls) > 0, "the embedding provider is asked again"
+    assert "generate" in [s.stage for s in rig.spans], "the request reached the answer model"
+    assert gateway.health()["groq"]["state"] == "healthy"

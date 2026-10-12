@@ -130,8 +130,35 @@ def test_a_pool_that_recovers_one_provider_at_a_time_answers_from_the_first_that
 
 
 # ===================================================================== slow but successful
-@pytest.mark.parametrize("seconds", [8.0, 15.0, 25.0])
-def test_a_slow_provider_that_still_answers_never_trips_the_breaker(seconds):
+# The per-call timeout is a setting (GATEWAY_TIMEOUT_SECONDS, default 10 s, spec 5): a call that
+# is slow but ANSWERS within it is a success and never counts against the provider; a call that
+# runs past it is cut and counts as a timeout failure, like any other.
+def test_a_call_under_the_default_per_call_timeout_never_trips_the_breaker():
+    clock = FakeClock()
+    backend = TimedBackend(clock, 8.0)  # slow, but inside the 10 s default
+    gateway = make_gateway(backend=backend, clock=clock)
+    for _ in range(6):
+        result = run(gateway.complete(MESSAGES, timeout_s=30.0))
+        assert result.decider == "groq" and result.fallback_reason is None
+    assert states(gateway) == {"groq": CLOSED, "gemini": CLOSED, "openrouter": CLOSED}
+    assert gateway.health()["groq"]["state"] == "healthy"
+
+
+def test_a_call_over_the_default_per_call_timeout_is_a_timeout_failure_and_trips_the_breakers():
+    clock = FakeClock()
+    backend = TimedBackend(clock, 15.0)  # past the 10 s default: cut at 10 s, every time
+    gateway = make_gateway(backend=backend, clock=clock)
+    with pytest.raises(AllProvidersFailed):
+        run(gateway.complete(MESSAGES, timeout_s=300.0))
+    assert backend.timeouts and max(backend.timeouts) <= 10.0 + 1e-9, "nothing ran past the limit"
+    # the fake clock has moved on by the time of the three timeouts: a breaker that opened first
+    # may already be half open, but none of them is closed again
+    assert CLOSED not in states(gateway).values(), "a timeout counts like any other failure"
+    assert gateway.health()["groq"]["state"] == "circuit_open" or states(gateway)["groq"] != CLOSED
+
+
+@pytest.mark.parametrize("seconds", [15.0, 25.0])
+def test_the_same_slow_call_is_a_success_when_the_timeout_setting_is_thirty(seconds):
     clock = FakeClock()
     backend = TimedBackend(clock, seconds)
     gateway = make_gateway(make_config(timeout_seconds=30.0), backend=backend, clock=clock)
@@ -139,7 +166,6 @@ def test_a_slow_provider_that_still_answers_never_trips_the_breaker(seconds):
         result = run(gateway.complete(MESSAGES, timeout_s=30.0))
         assert result.decider == "groq" and result.fallback_reason is None
     assert states(gateway) == {"groq": CLOSED, "gemini": CLOSED, "openrouter": CLOSED}
-    assert gateway.health()["groq"]["state"] == "healthy"
 
 
 def test_a_slow_failure_leaves_the_next_attempt_only_the_time_that_is_left():
@@ -187,7 +213,11 @@ def test_a_key_that_was_told_to_wait_stays_out_until_the_time_is_over():
         run(gateway.complete(MESSAGES))
         seen.append(backend.calls[-1][1])
     assert KEYS[0] not in seen, "the limited key is not used while it cools down"
-    clock.advance(121)
+    clock.advance(100)  # well past the 60 s default, still inside the 120 s the header asked for
+    for _ in range(6):
+        run(gateway.complete(MESSAGES))
+        assert backend.calls[-1][1] != KEYS[0], "Retry-After 120 is honoured past the default"
+    clock.advance(21)
     keys_used = set()
     for _ in range(8):
         run(gateway.complete(MESSAGES))

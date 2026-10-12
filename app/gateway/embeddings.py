@@ -61,7 +61,13 @@ def vectors_ok(vectors: list[list[float]], count: int, dimensions: int = DIMENSI
     if len(vectors) != count:
         return False
     for vector in vectors:
-        if len(vector) != dimensions or not all(math.isfinite(x) for x in vector):
+        if not isinstance(vector, (list, tuple)) or len(vector) != dimensions:
+            return False
+        numbers = all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+            for x in vector
+        )
+        if not numbers:  # None, text and booleans are not coordinates
             return False
         if norm(vector) == 0:
             return False

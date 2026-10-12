@@ -17,6 +17,7 @@ from app.gateway.decisions import (
     ChoiceQuestion,
     NoulAnswer,
     NoulQuestion,
+    OpenRouterDecisionsClient,
     ScoreAnswer,
     ScoreQuestion,
     extract_json,
@@ -85,6 +86,22 @@ BAD_DECISIONS = {
     "confidence above one": replaced(product_line={**GOOD["product_line"], "confidence": 7}),
     "score above the scale": replaced(urgency={**GOOD["urgency"], "score": 7.0}),
     "score as text": replaced(urgency={**GOOD["urgency"], "score": "high"}),
+    "score below zero": replaced(urgency={**GOOD["urgency"], "score": -0.5}),
+    "confidence below zero": replaced(product_line={**GOOD["product_line"], "confidence": -0.1}),
+    "noul as a boolean": replaced(domain_relevance={"type": "noul", "noul": True}),
+    "a probability above one": replaced(
+        product_line={**GOOD["product_line"], "probabilities": {"banking": 1.5, "insurance": 0.2}}
+    ),
+    "a probability below zero": replaced(
+        product_line={**GOOD["product_line"], "probabilities": {"banking": -0.2, "insurance": 1.2}}
+    ),
+    "a probability as text": replaced(
+        product_line={**GOOD["product_line"], "probabilities": {"banking": "0.8"}}
+    ),
+    "empty probabilities": replaced(product_line={**GOOD["product_line"], "probabilities": {}}),
+    "probabilities is a list": replaced(
+        product_line={**GOOD["product_line"], "probabilities": [0.8, 0.2]}
+    ),
 }
 
 
@@ -232,6 +249,11 @@ def test_good_embedding_vectors_pass(vectors, count):
         ([[0.0] * DIMENSIONS], 1),
         ([[float("nan")] + [0.0] * (DIMENSIONS - 1)], 1),
         ([[float("inf")] + [0.0] * (DIMENSIONS - 1)], 1),
+        ([[None] + [0.0] * (DIMENSIONS - 1)], 1),  # None inside a vector
+        ([["0.5"] + [0.0] * (DIMENSIONS - 1)], 1),  # a number as text
+        ([[True] + [0.0] * (DIMENSIONS - 1)], 1),
+        (["not a vector"], 1),
+        ([None], 1),
     ],
 )
 def test_bad_embedding_vectors_never_pass(vectors, count):
@@ -241,7 +263,12 @@ def test_bad_embedding_vectors_never_pass(vectors, count):
 # ================================================================================== rerank
 def rerank(body, status=200, n_docs=3):
     def handler(request):
-        return httpx.Response(status, json=body)
+        # raw bytes: a provider can send NaN or Infinity, which httpx's json= refuses to encode
+        return httpx.Response(
+            status,
+            content=json.dumps(body).encode(),
+            headers={"content-type": "application/json"},
+        )
 
     return asyncio.run(
         http_rerank(
@@ -275,9 +302,86 @@ def test_a_good_rerank_response_is_sorted_best_first_with_integer_indexes():
         {"results": [{"index": 0, "relevance_score": "high"}]},
         {"results": [None]},
         ["not", "an", "object"],
+        {"results": []},  # three passages asked, nothing ranked
+        {"results": {"0": 0.5}},
+        {"results": [{"index": "1", "relevance_score": 0.5}]},  # an index as text
+        {"results": [{"index": 1.0, "relevance_score": 0.5}]},  # an index as a float
+        {"results": [{"index": True, "relevance_score": 0.5}]},  # an index as a boolean
+        {"results": [{"index": 0, "relevance_score": "0.9"}]},  # a score as text
+        {"results": [{"index": 0, "relevance_score": True}]},
+        {"results": [{"index": 0, "relevance_score": float("nan")}]},
+        {"results": [{"index": 0, "relevance_score": float("inf")}]},
+        {"results": [{"index": 0, "relevance_score": 0.5}, {"index": 0, "relevance_score": 0.4}]},
     ],
 )
 def test_a_bad_rerank_response_is_a_typed_surprise(body):
     with pytest.raises(GatewayError) as caught:
         rerank(body)
     assert isinstance(caught.value, SchemaSurprise)
+
+
+def test_extra_fields_and_extra_answers_are_ignored_and_never_reach_the_result():
+    noisy = {
+        **GOOD,
+        "an_unrequested_question": {"type": "noul", "noul": 0.1},
+        "domain_relevance": {"type": "noul", "noul": 0.9, "reasoning": "a note from the model"},
+    }
+    parsed = parse_answers(noisy, QUESTIONS)
+    assert set(parsed) == {q.id for q in QUESTIONS}
+    assert parsed["domain_relevance"] == NoulAnswer(0.9)
+    assert "reasoning" not in repr(parsed)
+
+
+# ==== a deeply nested payload that really reaches the recursion path ====
+def test_a_closed_deeply_nested_payload_is_an_invalid_output_not_a_crash():
+    depth = 5_000
+    text = '{"a": ' * depth + "1" + "}" * depth  # complete, so extract_json hands it to json
+    with pytest.raises(InvalidOutput):
+        extract_json(text)
+    with pytest.raises(InvalidOutput):
+        parse_fallback_answers(text, QUESTIONS)
+    answer, error = parse_answer('{"answer": ' * depth + '"x"' + "}" * depth)
+    assert answer is None and error == "not_json"
+
+
+# ==== a 200 that is not JSON, at the HTTP clients ====
+def test_a_200_with_a_non_json_body_is_a_typed_surprise_for_rerank_and_jev():
+    def transport(body):
+        return httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+
+    for body in (b"", b"<html>gateway error</html>", b"not json"):
+        with pytest.raises(SchemaSurprise):
+            asyncio.run(
+                http_rerank(
+                    "cohere",
+                    model="m",
+                    query="q",
+                    documents=["a", "b"],
+                    top_n=None,
+                    api_key="k" * 12,
+                    timeout=5.0,
+                    transport=transport(body),
+                )
+            )
+        client = OpenRouterDecisionsClient(transport=transport(body))
+        with pytest.raises(SchemaSurprise):
+            asyncio.run(
+                client.decide(model="m", state={}, questions={}, api_key="k" * 12, timeout=5.0)
+            )
+
+
+def test_a_bad_vector_from_a_provider_fails_over_instead_of_being_an_internal_error():
+    """Through the gateway, not only the checker: key A returns a vector with None in it, key B
+    is asked next and answers."""
+    from app.gateway.backend import RawEmbedding
+    from tests.helpers import FakeBackend, make_gateway
+
+    good = [1.0] + [0.0] * (DIMENSIONS - 1)
+    bad = [None] + [0.0] * (DIMENSIONS - 1)
+    backend = FakeBackend()
+    backend.embed_handler = lambda model, key, inputs, n: RawEmbedding(
+        [bad if n == 1 else good for _ in inputs], 3, 0.0001, "litellm"
+    )
+    result = asyncio.run(make_gateway(backend=backend).embed(["a clause"]))
+    assert len(result.vectors) == 1 and len(backend.embed_calls) == 2
+    assert vectors_ok(result.vectors, 1)

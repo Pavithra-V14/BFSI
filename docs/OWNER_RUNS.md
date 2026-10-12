@@ -88,10 +88,10 @@ never set.)
 | 21 | The first baseline run and the variance band (the active set, then three runs) | Phase 13 | PENDING (needs your yes: real keys) |
 | 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | PENDING (needs your yes: real keys) |
 | 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | PENDING |
-| 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | ANY TIME (before every push) |
+| 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | PENDING (then repeat before every push) |
 | 25 | Record the provider cassettes: five real calls, one per provider (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) | Phase 14 | PENDING (needs your yes: real keys) |
 | 26 | Stubbed-model load test on this machine (users step up from 10; no key) | Phase 14 | PENDING |
-| 27 | Real-provider load test, short, against your own local API (estimate first) | Phase 14 | PENDING (needs your yes: real keys) |
+| 27 | Real-provider load test, short, on this machine: local SQLite, test collection read only, estimate and a single-use ticket first | Phase 14 | PENDING (needs your yes: real keys) |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much. The
@@ -1464,7 +1464,7 @@ It asks you to type the id.
 - **Real calls:** the start button runs a real evaluation (see Run 21); the other steps make none.
 - **Safe to repeat:** yes.
 
-## Run 24. Secret scan on this machine before a push (a pre-push check): ANY TIME
+## Run 24. Secret scan on this machine before a push (a pre-push check): PENDING
 
 - **Verifies:** that the history of this repository has no secret in it, with the same program,
   the same version and the same settings as the CI job, so a red scan is found here and not
@@ -1553,76 +1553,110 @@ It asks you to type the id.
   the event loop, the password-hashing gate, connection use, locks. It does **not** show how big
   a host must be, and it does not exercise a cloud database or a real provider's limits: the
   report states this itself.
-- **Before it:** nothing. No key, no cloud address, no quota. It refuses to start while any
-  store address in this window points at a remote host.
+- **Before it:** nothing. No key, no cloud address, no quota. The server refuses to start while
+  any store address in this window points at a remote host.
+- **Which stores are written:** a throw-away SQLite file in a temporary folder (the load users,
+  their chats), deleted when window A stops, and `load_out\` in the project folder (the users'
+  made-up credentials and the run's CSV files; git-ignored). Nothing else, nothing in the cloud.
 - **Needs:** two PowerShell windows in the project folder, and about 10 minutes.
 - **Step 1. Window A, start the stubbed API (the first start loads the name model, about a
-  minute):**
+  minute). It makes the load users first, in its own SQLite file, with the application's account
+  function; nobody registers through the API (the registration limit per address stays on):**
 
       uv run python load/stub_server.py
 
   You should see `stub server on http://127.0.0.1:8099 (scripted model, 300 ms per answer,
-  SQLite, in-memory vector store)`. Leave it running.
-- **Step 2. Window B, the users (the default plan is five one-minute steps):**
+  SQLite, in-memory vector store, 160 accounts made)`. Leave it running.
+- **Step 2. Window B, the users (the default plan is five one-minute steps). The flag
+  `--csv-full-history` is needed: without it Locust writes the whole run's percentiles, which
+  hide a step that got slow late:**
 
-      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8099 --csv load_out/run
+      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8099 --csv load_out/run --csv-full-history
 
-  You should see the banner `STUBBED MODEL: a scripted model, a local store ...`, then Locust's
-  table every few seconds, and the run ends by itself after the last step. A shorter plan:
-  `$env:LOAD_STEPS = "10x20,20x20,40x20"` first.
+  You should see the banner `STUBBED MODEL: ...`, then Locust's table every few seconds, and the
+  run ends by itself after the last step. A shorter plan, set in BOTH windows before step 1:
+  `$env:LOAD_STEPS = "10x20,20x20,40x20"` (a step is at least 20 seconds).
 - **Step 3. Where did it break:**
 
       uv run python load/report.py load_out/run
 
-  You should see one line per step (users, requests, failed share, p50, p95, ok or BROKE), then
-  either `it did not break up to N users` or `first step that broke: N users (...)`, and the
-  list of what this run cannot show (the Postgres connection ceiling, host capacity, provider
-  limits).
-- **If a line differs:** `the stub mode runs against this machine only` means the host is not
+  You should see one line per step: users, requests, failed %, unavailable %, active %, limited
+  (the per-user rate limit, by design, not a failure), p50, p95 and ok or BROKE, then either
+  `it did not break up to N users` or `first step that broke: N users (reason)`, and the list of
+  what this run cannot show. A step breaks when more than 1 % failed, more than 1 % of answers
+  were "temporarily unavailable", p95 passed 30 s, or fewer than 80 % of its users were active.
+- **If a line differs:** `refused: ... listens on this machine only` means the host is not
   127.0.0.1. `refused: these settings point at a remote host: NAME` means unset that variable in
-  window A. A step with failures: send me the report and the last 30 lines of window A (they
-  hold no text of a question).
+  window A. `WARNING: ... CUMULATIVE percentiles` means step 2 was run without
+  `--csv-full-history`. A step that broke: send me the report and the last 30 lines of window A
+  (they hold no text of a question).
 - **Send back:** the report (it holds numbers and names only).
-- **Clear:** press Ctrl+C in window A; delete `load_out\` if you wish (git-ignored).
+- **Clear:** press Ctrl+C in window A (the SQLite file goes with it); delete `load_out\`.
 - **Real calls:** none.
 - **Safe to repeat:** yes.
 
-## Run 27. Real-provider load test, short, on your own local API (needs your yes): PENDING
+## Run 27. Real-provider load test, short, on this machine (needs your yes): PENDING
 
 - **Verifies:** the same users against the real providers, to see rate limits, retries and
-  latency that a scripted model cannot show. It is short on purpose: every step spends the free
-  tiers (the estimate shows by how much).
-- **Before it:** Run 16 (the local API works with real providers) and Run 26. It runs against
-  **your own local API**, never against the deployed address: capacity of the deployed service is
-  measured in Phases 15 and 16, with a short real run you approve then.
-- **Needs (names only):** the settings of Run 16 in window A, `LOAD_MODE`, `LOAD_STEPS` and
-  `LOAD_CONFIRM` in window B.
-- **Step 1. The estimate (no call):**
+  latency that a scripted model cannot show. It is short on purpose: every step spends free-tier
+  quota (the estimate shows by how much).
+- **Before it:** Run 26 and Run 16 (the providers work from this machine). It is **not** run
+  against your normal local API of Run 16 and never against the deployed address: capacity of the
+  deployed service is measured in Phases 15 and 16 with a short real run you approve then.
+- **Which stores are written, exactly:**
+  - accounts, chats, messages, audit rows: a throw-away SQLite file in a temporary folder, made
+    by `load/real_server.py` and deleted when it stops. **Never** your cloud database;
+  - counters, rate limits, the answer cache: an in-process Redis stand-in. **Never** Upstash;
+  - the cloud vector store: only **read**, only the `documents_eval` collection (or the `_eval`
+    collection named in `LOAD_COLLECTION`); every call that could write is refused in code;
+  - the providers: free-tier quota (answers, triage, embeddings, rerank, Jev) on YOUR keys;
+  - `load_out\` in the project folder (ticket, marker, made-up credentials, CSV files).
+  Nothing has to be removed from any cloud store afterwards, because nothing is written there.
+- **Needs (names only), in window A:** your provider keys (the settings of Run 12),
+  `QDRANT_URL` and `QDRANT_API_KEY`, `LOAD_STEPS` and `LOAD_CONFIRM`. In window B: `LOAD_MODE`,
+  `LOAD_STEPS`, `LOAD_CONFIRM`. **`DATABASE_URL`, `UPSTASH_REDIS_URL`, `EVAL_DATABASE_URL` must be
+  unset in both windows**: the tools refuse to start with a remote one set, even though the run
+  would not use it (the same guard as the evaluation). The collection must be `documents_eval`
+  (Run 19) or another name that matches `^[a-z0-9]+_eval$`.
+- **Step 1. The estimate (no call). It also makes the ticket:**
 
       uv run python scripts/load_estimate.py --steps 10x20,20x20
 
   You should see the plan, about how many questions it sends, the requests and tokens per
-  provider against each provider's daily limit, and a line with `LOAD_MODE=real  LOAD_STEPS=...
-  LOAD_CONFIRM=CODE`. If the plan does not fit one day it says so and prints no code.
+  provider against each provider's daily limit, then: `The ticket is for THIS plan and for today
+  (UTC ...), is valid for 30 minutes from now, and works ONCE`, and the line `LOAD_MODE=real
+  LOAD_STEPS=... LOAD_CONFIRM=CODE`. If the plan does not fit one day it says so and makes no
+  ticket.
 - **Step 2. Your decision.** Send me the estimate or decide yourself. Nothing starts without the
-  code, and the code belongs to this exact plan.
-- **Step 3. Window A: the API as in Run 16. Window B:**
+  ticket's code, and the code works once, today, within 30 minutes.
+- **Step 3. Window A, the real server (it consumes the ticket when it is ready):**
+
+      $env:LOAD_STEPS = "10x20,20x20"; $env:LOAD_CONFIRM = "CODE"
+      uv run python load/real_server.py
+
+  You should see `REAL PROVIDERS: ...` and `real server on http://127.0.0.1:8099 for the plan
+  10x20,20x20 (20 accounts in a temporary SQLite file)`.
+- **Step 4. Window B, the users, then the report:**
 
       $env:LOAD_MODE = "real"; $env:LOAD_STEPS = "10x20,20x20"; $env:LOAD_CONFIRM = "CODE"
-      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8000 --csv load_out/real
-      uv run python load/report.py load_out/real --mode real
+      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8099 --csv load_out/real --csv-full-history
+      uv run python load/report.py load_out/real
 
-  You should see the banner `REAL PROVIDERS: ...`, the Locust table, and then the report.
-- **If a line differs:** `LOAD_CONFIRM does not match this plan` means the steps changed since the
-  estimate: make a new one. Many `limited or busy: by design` lines are the per-user rate limit
-  and a free tier's own limit working; they are counted apart from failures.
+- **If a line differs:** `refused: the ticket is older than 30 minutes` / `from another day` /
+  `already used`: make a new estimate. `refused: ... DATABASE_URL points at a remote host`:
+  unset it in that window. `refused: the collection is refused`: set `LOAD_COLLECTION` to an
+  `_eval` collection. `no real server is running for this plan`: start step 3 first. Many
+  `limited` in the report are the per-user rate limit and a free tier's own limit working; they
+  are counted apart from failures. `unavail %` above 1 means the service answered "temporarily
+  unavailable" (every provider limited or timed out): that IS a break.
 - **Send back:** the estimate and the report.
-- **Clear:** unset `LOAD_MODE`, `LOAD_STEPS`, `LOAD_CONFIRM` and the provider variables of
-  window A; delete `load_out\`.
-- **Real calls:** about the number the estimate shows (about 5 per question), spread over the
-  providers' free tiers.
-- **Safe to repeat:** only after the daily limits have reset (the estimate checks the same
-  limits again, but it does not know what you used elsewhere today).
+- **Clear:** Ctrl+C in window A (the SQLite file goes); unset `LOAD_MODE`, `LOAD_STEPS`,
+  `LOAD_CONFIRM` and the provider variables; delete `load_out\`.
+- **Real calls:** about the number the estimate shows (about 5 per question), on your provider
+  keys.
+- **Safe to repeat:** only with a NEW estimate and ticket, and after the daily limits have reset
+  (the estimate checks the same limits again, but it does not know what you used elsewhere
+  today, and production traffic shares these keys).
 
 ---
 

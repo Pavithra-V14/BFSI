@@ -175,22 +175,66 @@ def test_each_node_gets_the_smaller_of_its_timeout_and_the_time_left(rig):
     never given more than the budget, never more than its own limit, and a later node never gets
     more than an earlier one (time only runs out)."""
     budget = 3.0
+    triage_limit = NODE_LIMITS["triage"][0]
     rig.deps.config = PipelineConfig(budget_seconds=budget)
     run(rig.ask(QUESTION))
-    decide_timeout = rig.gateway.calls_of("decide")[0]["timeout_s"]
-    embed_timeout = rig.gateway.calls_of("embed")[0]["timeout_s"]
-    triage_limit = NODE_LIMITS["triage"][0]
-    assert 0 < decide_timeout <= budget  # the node limit is cut to the time left
-    assert decide_timeout < triage_limit
-    assert embed_timeout <= decide_timeout
+    # a very slow start can leave too little time for triage (it is then skipped, by design):
+    # whatever was asked is checked, and at least one node must have been
+    asked = [c["timeout_s"] for kind in ("decide", "embed") for c in rig.gateway.calls_of(kind)[:1]]
+    assert asked, "no node was reached"
+    assert all(0 < t <= budget for t in asked), asked  # cut to the time left
+    decide_calls = rig.gateway.calls_of("decide")
+    embed_calls = rig.gateway.calls_of("embed")
+    if decide_calls:
+        assert decide_calls[0]["timeout_s"] < triage_limit
+    if decide_calls and embed_calls:
+        assert embed_calls[0]["timeout_s"] <= decide_calls[0]["timeout_s"]
+    before = len(decide_calls)
     rig.deps.config = PipelineConfig(budget_seconds=30.0)
     run(rig.ask(QUESTION + " once more"))
+    roomy_calls = rig.gateway.calls_of("decide")[before:]
+    assert roomy_calls, "with 30 s left triage runs"
     # with plenty of time left a node is given its own limit (less the little it had already
-    # used inside the node): more than with the short budget, and never more than the limit
-    roomy = rig.gateway.calls_of("decide")[1]["timeout_s"]
-    assert decide_timeout < roomy <= triage_limit
-    assert roomy > triage_limit / 2
+    # used inside the node): never more than the limit, and well over half of it
+    roomy = roomy_calls[0]["timeout_s"]
+    assert triage_limit / 2 < roomy <= triage_limit
+    if decide_calls:
+        assert decide_calls[0]["timeout_s"] < roomy
     assert rig.gateway.calls_of("complete", what="answer")[-1]["timeout_s"] <= 12.0
+
+
+def stage_limits_seen(rig, monkeypatch, budget):
+    """{stage: the timeout its node was given}, read where the graph hands it to wait_for."""
+    import app.pipeline.graph as graph_module
+
+    seen: dict[str, float] = {}
+    real = asyncio.wait_for
+
+    async def spy(awaitable, timeout=None):
+        name = getattr(getattr(awaitable, "cr_code", None), "co_name", "")
+        if name.endswith("_stage") and name[: -len("_stage")] in NODE_LIMITS:
+            seen.setdefault(name[: -len("_stage")], timeout)
+        return await real(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(graph_module.asyncio, "wait_for", spy)
+    rig.deps.config = PipelineConfig(budget_seconds=budget)
+    run(rig.ask(QUESTION + f" ({budget})"))
+    monkeypatch.undo()
+    return seen
+
+
+def test_no_node_is_given_more_than_its_own_limit_or_the_time_that_is_left(rig, monkeypatch):
+    """Every node, not only triage and embed: with a short budget each node's timeout is cut to
+    the budget; with a long one each gets its own limit (less what it had already used)."""
+    short = stage_limits_seen(rig, monkeypatch, 3.0)
+    assert len(short) >= 3, f"too few stages were seen: {sorted(short)}"
+    for stage, given in short.items():
+        assert 0 < given <= min(NODE_LIMITS[stage][0], 3.0) + 1e-9, stage
+    long = stage_limits_seen(rig, monkeypatch, 30.0)
+    for stage in ("embed", "retrieve", "rerank", "generate"):
+        assert stage in long, f"{stage} did not run with a 30 s budget"
+        limit = NODE_LIMITS[stage][0]
+        assert limit / 2 < long[stage] <= limit + 1e-9, (stage, long[stage], limit)
 
 
 def test_a_call_that_cannot_finish_is_never_started(rig):

@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 13 closed (9c6406d, 45ed9b0); Phase 14 (testing completion) built, awaiting the owner's "commit" and approval (next is Phase 15)
+Current phase: Phase 13 closed; Phase 14 (testing completion) committed (28a3690), its hardening round ("Phase 14 hardening") written and awaiting the owner's "commit" and approval (next is Phase 15)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -926,11 +926,15 @@ network, except the two owner-run steps marked below.
 
 - **Chaos tests** (`tests/test_chaos_gateway.py`, `tests/test_chaos_pipeline.py`, marker `chaos`).
   Schedules of failures over time on a fake clock: every provider failing, the breakers opening,
-  one probe after the open period, healing; slow-but-successful providers (8, 15 and 25 s) that
-  must not trip a breaker; slow failures that must leave each next attempt only the time that is
-  left; 429 with `Retry-After` (a key stays out until the time is over, 0 is raised to the floor);
-  Jev, embeddings and the rerank chain failing and returning. Seen from the user: a clean answer
-  or the one fixed "temporarily unavailable" text, nothing stored, and the next request recovers.
+  one probe after the open period, healing; slow calls against the per-call timeout
+  (`GATEWAY_TIMEOUT_SECONDS`, default 10 s): 8 s is a success and never trips a breaker, 15 s is
+  cut at 10 s and counts as a timeout failure, and with the setting at 30 s both 15 s and 25 s
+  succeed; slow failures that must leave each next attempt only the time that is left; 429 with
+  `Retry-After` (a key stays out until the time the header asked for, probed at about 100 s of a
+  120 s header; 0 is raised to the floor); Jev, embeddings and the rerank chain failing and
+  returning. Seen from the user: a clean answer or the one fixed "temporarily unavailable" text,
+  nothing stored, and the next request recovers. One test puts the REAL gateway on a fake clock
+  under the pipeline; the other pipeline tests use the scripted gateway (with real, short sleeps).
 - **Contract tests** (`tests/test_contract_schemas.py`, marker `contract`). A table of good and
   bad payloads for each structured output (typed decisions in Jev's shape, a chat model's JSON,
   the generator's answer, embedding vectors, rerank responses): a bad one is a typed gateway error,
@@ -949,13 +953,27 @@ network, except the two owner-run steps marked below.
   throw-away Postgres container so the Postgres tests count. Run it here:
   `uv run pytest -q --cov=app --cov-branch --cov-report=json:coverage.json` then
   `uv run python scripts/coverage_report.py coverage.json`.
-- **Load tests** (`load/`, Locust). Two modes. `stub`: `load/stub_server.py` is the real API with a
-  scripted model, the sample corpus in an in-memory store and SQLite behind it; users step up from
-  10 (default 10, 20, 40, 80, 160, one minute each) and `load/report.py` names the first step that
-  failed more than 1 % or passed a p95 of 30 s [T]. The report always states that it shows how the
-  code behaves under concurrency, not the capacity of a host. `real`: only with the code that
-  `scripts/load_estimate.py` printed for that exact plan, after your explicit yes, against your own
-  local API (Run 27). Runs 26 and 27 are in `docs/OWNER_RUNS.md`.
+- **Load tests** (`load/`, Locust). The accounts of the load users are made by the server process
+  straight in its local SQLite file with the application's own account functions
+  (`load/seed.py`): the per-address registration limit stays on and is never what is measured;
+  users only log in (the per-address LOGIN limit is switched off in the load servers, since every
+  virtual user shares one address). Two modes. `stub`: `load/stub_server.py` is the real API with a
+  scripted model, the sample corpus in an in-memory store and SQLite behind it. `real`:
+  `load/real_server.py` is the real API with your providers, and everything it WRITES is local (a
+  SQLite file in a temporary folder, an in-process Redis stand-in); the cloud vector store is only
+  READ, through a wrapper that refuses every write call, and only an `_eval` collection. It
+  refuses a cloud `DATABASE_URL`, `UPSTASH_REDIS_URL` or `EVAL_DATABASE_URL`, any other collection
+  name, a non-loopback host, and it needs the single-use ticket that `scripts/load_estimate.py`
+  made for that plan: bound to the plan and the UTC date, valid for 30 minutes, used up when the
+  real server starts (Run 27). Users step up from 10 (default 10, 20, 40, 80, 160, a step is at
+  least 20 s). `load/report.py` reads Locust's history (run it with `--csv-full-history`: only
+  then are the percentiles the current ~10 s window and not the whole run so far; the report
+  warns when they are cumulative), assigns rows to steps by TIME, and a step breaks at more than
+  1 % failed requests, more than 1 % of chat answers "temporarily unavailable" (HTTP 503
+  `service_unavailable` is a failure; only 429 `too_many_requests` and the hasher's busy at login
+  are expected rejections), a p95 above 30 s, or fewer than 80 % of the step's users active. The
+  report always states that a stub run shows how the code behaves under concurrency, not host
+  capacity. Runs 26 and 27 are in `docs/OWNER_RUNS.md`.
 - **Known blind spots of a load run (recorded for Phase 15).** The API opens one database
   connection per chat request and the stub uses SQLite, so a cloud Postgres connection limit is
   not exercised. **Phase 15 decides** whether the running service uses the provider's direct
@@ -965,11 +983,18 @@ network, except the two owner-run steps marked below.
 - **Phase 16.** The step sizes, the 1 % failure share, the 30 s p95 and the 80 % coverage target
   are placeholders for the baseline; the 30 s total request budget [T] is recalibrated only from a
   real run you approved.
-- **Known limitations.** The stub server loosens one thing on purpose: the per-address login and
-  registration throttles (every virtual user shares this machine's address). A free tier's own
-  limit and the per-user rate limit appear in a real run as "limited or busy: by design", counted
-  apart from failures. A cassette is a snapshot: a provider that changes its answer shape is seen
-  only when you record again.
+- **Known limitations (Phase 14).** The load servers loosen one thing on purpose: the per-address
+  LOGIN limit. The per-user rate limit and a free tier's own limit appear in a real run as
+  `limited` in the report, counted apart from failures. A cassette is a snapshot: a provider
+  that changes its answer shape is seen only when you record again, and matching ignores request
+  bodies. `extract_json` takes the first `{...}` of a prose answer, so an earlier brace hides a
+  later object. The stub server imports the test fixtures (`tests.eval_rig`), so it is a
+  development tool only. `yaml` (used by two tests) arrives with vcrpy and is not listed on its
+  own. Whether VCR intercepts LiteLLM's HTTP client for Gemini and OpenRouter is first shown by a
+  real recording (Run 25). The timing test cannot see a wrong value at a node that did not run
+  (a node skipped for lack of time is by design). Locust's own percentile semantics were read
+  in its source (`stats.py`): with `--csv-full-history` the Aggregated row uses the current
+  window, without it the cumulative values.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

@@ -92,7 +92,11 @@ def _main(
             out(f"{name}: FAILED ({type(error).__name__}); nothing was written")
             failed += 1
             continue
-        problems = tools.hygiene_problems(path.read_text("utf-8")) if path.is_file() else ["none"]
+        problems = (
+            tools.hygiene_problems(path.read_text("utf-8"), forbidden=list(keys.values()))
+            if path.is_file()
+            else ["none"]
+        )
         if problems:
             path.unlink(missing_ok=True)
             out(f"{name}: DELETED, the recording broke the hygiene rules: {', '.join(problems)}")

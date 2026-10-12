@@ -73,6 +73,20 @@ def top_items(scores: list[float], top_n: int | None) -> list[RerankItem]:
     return [RerankItem(i, scores[i]) for i in ranked]
 
 
+def _index(value: Any) -> int:
+    """A passage position: a real integer, not a bool, a float or a numeric string."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("index is not an integer")
+    return value
+
+
+def _score(value: Any) -> float:
+    """A relevance score: a finite number, not a bool or a numeric string."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("score is not a finite number")
+    return float(value)
+
+
 async def http_rerank(
     provider: str,
     *,
@@ -100,9 +114,15 @@ async def http_rerank(
         raise status_to_error(response.status_code, response.headers)
     try:
         results = response.json()["results"]
-        items = [RerankItem(int(r["index"]), float(r["relevance_score"])) for r in results]
+        if not isinstance(results, list):
+            raise TypeError("results is not a list")
+        items = [RerankItem(_index(r["index"]), _score(r["relevance_score"])) for r in results]
     except (ValueError, KeyError, TypeError):
         raise SchemaSurprise() from None
     if any(not 0 <= item.index < len(documents) for item in items):
+        raise SchemaSurprise()
+    if len({item.index for item in items}) != len(items):  # the same passage twice
+        raise SchemaSurprise()
+    if documents and not items:  # an answer that ranks nothing is not an answer
         raise SchemaSurprise()
     return sorted(items, key=lambda item: -item.score)
