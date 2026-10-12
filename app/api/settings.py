@@ -25,6 +25,7 @@ MIN_DISTINCT_CHARACTERS_HEX = 12  # a hex key has only 16 symbols to choose from
 RELATED_LENGTH = 12  # two keys sharing a piece this long are treated as built from each other
 RUN_LENGTH = 7  # a run of this many neighbouring keys (or letters, or digits) is a keyboard run
 DEFAULT_HASH_CONCURRENCY = 2  # [P] password hashes running at once
+MAX_TRUSTED_PROXY_HOPS = 3  # [P] how many proxies in front of the API may be believed
 MAX_HASH_CONCURRENCY = 16
 DEFAULT_JWT_EXPIRE_MINUTES = 480  # [P] 8 hours
 MAX_JWT_EXPIRE_MINUTES = 60 * 24 * 30
@@ -68,6 +69,10 @@ class ApiSettings:
     token_budget_customer: int = DEFAULT_TOKEN_BUDGET_CUSTOMER
     token_budget_staff: int = DEFAULT_TOKEN_BUDGET_STAFF
     password_hash_concurrency: int = DEFAULT_HASH_CONCURRENCY
+    # [P] How many proxies stand in front of the API and are trusted to have added their own
+    # entry to X-Forwarded-For. 0 (the default): the header is never read and the address is the
+    # socket's (a Phase 4 rule). On Render it is 1: the last entry is what Render's proxy saw.
+    trusted_proxy_hops: int = 0
 
     def __post_init__(self) -> None:
         check_secret(self.jwt_secret, "JWT_SECRET_KEY")
@@ -81,6 +86,15 @@ class ApiSettings:
         _positive(self.token_budget_customer, "TOKEN_BUDGET_CUSTOMER")
         _positive(self.token_budget_staff, "TOKEN_BUDGET_STAFF")
         _positive(self.password_hash_concurrency, "PASSWORD_HASH_CONCURRENCY", MAX_HASH_CONCURRENCY)
+        hops = self.trusted_proxy_hops
+        if (
+            isinstance(hops, bool)
+            or not isinstance(hops, int)
+            or not (0 <= hops <= MAX_TRUSTED_PROXY_HOPS)
+        ):
+            raise SettingsError(
+                f"TRUSTED_PROXY_HOPS must be a whole number from 0 to {MAX_TRUSTED_PROXY_HOPS}"
+            )
         if self.cors_origin is not None:
             check_origin(self.cors_origin)
 
@@ -103,6 +117,7 @@ class ApiSettings:
             password_hash_concurrency=_env_int(
                 env, "PASSWORD_HASH_CONCURRENCY", DEFAULT_HASH_CONCURRENCY
             ),
+            trusted_proxy_hops=_env_int(env, "TRUSTED_PROXY_HOPS", 0),
         )
 
 

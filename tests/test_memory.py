@@ -938,12 +938,16 @@ def test_the_sweep_deletes_everything_of_the_chat_and_writes_one_audit_row_of_co
     assert "SENSITIVE" not in rows[0][3]
 
 
-def test_a_sweep_with_nothing_to_delete_writes_no_audit_row(db):
+def test_a_sweep_with_nothing_to_delete_still_records_that_it_ran(db):
+    """One row per real run, with zero counts: it is the proof the scheduled task ran (the
+    `retention_overdue` alert looks for it). A dry run writes nothing (tested elsewhere)."""
     user = new_user(db)
     session_active(db, user, 3)
     assert retention.sweep(db, now=NOW, actor="cli:test").sessions == 0
     assert retention.sweep(db, now=NOW, actor="cli:test").sessions == 0
-    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 0
+    rows = db.query_all("SELECT action, details FROM audit_log")
+    assert [r[0] for r in rows] == ["retention_sweep", "retention_sweep"]
+    assert all('"sessions": 0' in r[1] for r in rows)
 
 
 def test_the_sweep_runs_with_foreign_keys_on(db):

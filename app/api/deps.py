@@ -11,6 +11,7 @@ flood cannot use up connections and gets its 401 even while the database is down
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import time
@@ -148,9 +149,37 @@ def get_db(request: Request) -> Iterator[Any]:
         db.close()
 
 
+def forwarded_entries(request: Request) -> list[str]:
+    """The entries of every X-Forwarded-For header, in order, stripped, empty ones left out."""
+    values = request.headers.getlist("x-forwarded-for")
+    return [part.strip() for value in values for part in value.split(",") if part.strip()]
+
+
+def client_address(request: Request, hops: int) -> tuple[str, str]:
+    """(the address to use, where it came from: "socket" or "forwarded").
+
+    With `hops` = 0 the header is never read: the address is the socket's. With `hops` = N the
+    entry N places from the END is used: each trusted proxy appends the address it saw, so the
+    last entry is the one our own proxy wrote and anything before it is the client's claim. A
+    header with fewer entries than hops, or an entry that is not an address, falls back to the
+    socket's address (a request that did not come through the proxy is never believed)."""
+    socket_address = request.client.host if request.client else "unknown"
+    if hops <= 0:
+        return socket_address, "socket"
+    entries = forwarded_entries(request)
+    if len(entries) < hops:
+        return socket_address, "socket"
+    candidate = entries[-hops]
+    try:
+        return str(ipaddress.ip_address(candidate)), "forwarded"
+    except ValueError:
+        return socket_address, "socket"
+
+
 def client_ip(request: Request) -> str:
-    """The address of the socket that connected. Never read from a header."""
-    return request.client.host if request.client else "unknown"
+    """The address a per-address limit counts: the socket's, or with TRUSTED_PROXY_HOPS the one
+    our own proxy saw (see `client_address`)."""
+    return client_address(request, services(request).settings.trusted_proxy_hops)[0]
 
 
 def _sign_in_again() -> ApiError:

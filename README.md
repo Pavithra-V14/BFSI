@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 14 (testing completion) closed (28a3690, 7d57953); Runs 19 to 27 are pending with the owner; next is Phase 15, not started
+Current phase: Phase 14 closed; Phase 15 (deployment) built, awaiting the owner's "commit" and approval; Runs 19 to 33 are pending with the owner (next is Phase 16)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -995,6 +995,68 @@ network, except the two owner-run steps marked below.
   (a node skipped for lack of time is by design). Locust's own percentile semantics were read
   in its source (`stats.py`): with `--csv-full-history` the Aggregated row uses the current
   window, without it the cumulative values.
+
+## Deployment (Phase 15)
+Nothing here was deployed by Claude: it is the files and the guide for YOU to deploy. The guide is
+`docs/DEPLOY.md` (click by click, with what you should see); every real step is a run in
+`docs/OWNER_RUNS.md` (Runs 28 to 33).
+
+- **`render.yaml`.** The blueprint: `bfsi-api` and `bfsi-frontend`, free plan, health checks
+  `/live` and `/_stcore/health`, start commands from the repository root (so `prompts/` and
+  `.streamlit/config.toml` are found), `autoDeployTrigger: checksPass` (Render deploys by itself
+  after the CI checks pass: no Render secret in GitHub). Every secret is `sync: false`: a name,
+  never a value. The region is a marked placeholder you fill in (Run 28).
+- **The client address behind Render's proxy.** The API still reads only the socket's address
+  unless `TRUSTED_PROXY_HOPS` is set (default 0). On Render it is 1: the LAST entry of
+  `X-Forwarded-For` is used (each trusted proxy appends what it saw; what a client wrote earlier is
+  never believed). uvicorn starts with `--no-proxy-headers` so only our own code reads the header.
+  `GET /admin/diagnostics` (admin only) shows the number of header entries, the address that
+  would be used, and the process memory: Run 28 compares the address with your real public one.
+  Which header Render adds is unverified until Run 28.
+- **The spaCy model wheel is pinned by SHA-256** in `requirements.txt` (`#sha256=`): pip and uv
+  refuse a different file. The value was computed from one download of the release asset.
+- **The pinger** (`.github/workflows/keepalive.yml`) pings both services only inside 08:00 to 20:00
+  India time on weekdays (free hours are about 750 a month for all services together [T]). GitHub's
+  scheduled workflows are best effort and are switched off after 60 days without repository
+  activity. **After a deploy**, the CI job `post-deploy-smoke` (alert only) asks `/live`.
+- **Backups.** `scripts/qdrant_snapshot.py` (list, create, download, prune; `--run` for anything
+  that changes). If the free cluster refuses snapshots, the documented backup is a re-ingest from
+  `originals/`, whose own backup you keep and whose restore you test once
+  (`docs/runbooks/restore-documents.md`).
+- **Runbooks** (`docs/runbooks/`, with an index and a rehearsal column): all keys down; wrong
+  answer reported; document withdrawn; suspected personal data; key leaked; bad deploy (go back);
+  restore the documents. **Key rotation**: `docs/KEY_ROTATION.md` and
+  `scripts/key_inventory.py` (names, counts and eight-character fingerprints only).
+  **Data flow**: `docs/DATA_FLOW.md`. **Release records**: `docs/releases/` and
+  `scripts/release_record.py`. **Cost**: `docs/COST_PROJECTION.md` and
+  `scripts/cost_projection.py`.
+- **Database address.** The running API uses the DIRECT address for now. The pooled address is not
+  recommended until a deliberate test on a real pooled connection checks the session isolation
+  setting and the start-up options. `scripts/db_connections.py` (Run 32) measures the connection
+  count first.
+- **Scheduled jobs** run on the admin machine from Windows Task Scheduler (Render's free plan has
+  no cron): retention (daily), the drift report (weekly), the snapshot (weekly). The retention task
+  now writes one `retention_sweep` audit row on every real run, also when it deleted nothing; the
+  service raises the warning `retention_overdue` when none is three days old. Judging the sample
+  stays manual (it needs the code of its own estimate).
+- **The first deploy is in the `shadow` stage** and stays there until the checklist of
+  `DEPLOY.md` section 6 is true: moving on is a deliberate step.
+
+**Known limitations (recorded in Phase 15)**
+- **Phase 16.** Render's free-plan numbers (750 hours, 512 MB, sleep after about 15 minutes) and
+  the blueprint key `autoDeployTrigger: checksPass` are stated from memory and marked [T]; the
+  header Render adds and `RENDER=true` as the signal for "on the host" are confirmed by Run 28.
+- **Phase 16.** The persist queue and every in-process number (the live counts, the alert windows,
+  the 5-second stage cache, the session locks) reset at a restart; a queued transcript write is
+  lost if the service restarts before it is written. One instance only.
+- **Phase 16.** The post-deploy check cannot tell the new build from the old one (the liveness
+  answer reveals nothing by design). The first-deploy memory number is a single measurement
+  (Run 28).
+- **Phase 16.** The 90-day, 30-day and 3-day periods, the 08:00 to 20:00 window and the 80 %
+  checklist items are placeholders for the baseline.
+- **Owner decision recorded.** `EVAL_*` names are not all kept off Render: `EVAL_DATABASE_URL`
+  and `EVAL_SAMPLE_RATE` are set there on purpose (the masked production sample); the evaluation
+  keys, the judge model and the test collection names never are.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

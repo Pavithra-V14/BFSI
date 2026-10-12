@@ -32,6 +32,8 @@ def day_floor(moment: datetime) -> datetime:
 
 ROLLUP_SECONDS = 300.0
 TRACE_SECONDS = 60.0
+RETENTION_CHECK_SECONDS = 3_600.0  # the overdue check runs once an hour
+RETENTION_OVERDUE_DAYS = 3  # [T] no retention_sweep row for this long is a warning
 AUDIT_RETENTION_DAYS = 30  # the pilot value (spec 12.1); to be revisited in Phase 16
 ROLLUP_HOURLY_DAYS = 30
 
@@ -120,6 +122,32 @@ class Observability:
             db.close()
         return written
 
+    def check_retention_once(self) -> bool:
+        """True when the scheduled retention task looks overdue, and then raises the warning
+        `retention_overdue`. The task writes one `retention_sweep` row every time it runs; the
+        check compares the newest one with `RETENTION_OVERDUE_DAYS`. Before any row exists the
+        clock starts at the service's oldest audit row, so a new deployment is not blamed."""
+        db = self._db_factory()
+        try:
+            newest = db.query_one(
+                "SELECT MAX(created_at) FROM audit_log WHERE action = 'retention_sweep'"
+            )
+            since = newest[0] if newest and newest[0] else None
+            if since is None:
+                oldest = db.query_one("SELECT MIN(created_at) FROM audit_log")
+                since = oldest[0] if oldest and oldest[0] else None
+        finally:
+            db.close()
+        if since is None:
+            return False
+        started = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        overdue = self._now() - started > timedelta(days=RETENTION_OVERDUE_DAYS)
+        if overdue:
+            self.alerts.raise_rule("retention_overdue", alerts_module.WARNING, 1)
+        return overdue
+
     def process_traces_once(self) -> traces.PassResult | None:
         if self.deleter is None:
             return None
@@ -155,6 +183,7 @@ class Observability:
         for target, seconds, name in (
             (self.rollup_once, ROLLUP_SECONDS, "rollup-writer"),
             (self.process_traces_once, TRACE_SECONDS, "trace-deleter"),
+            (self.check_retention_once, RETENTION_CHECK_SECONDS, "retention-check"),
         ):
             thread = threading.Thread(
                 target=self._every, args=(target, seconds), name=name, daemon=True

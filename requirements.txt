@@ -22,10 +22,12 @@ PyJWT==2.15.1
 argon2-cffi==25.1.0
 # Phase 6: query masking (spec 9.2, production uses the SMALL spaCy model). Presidio finds names
 # and structured identifiers, spaCy runs it. The model is installed from its release file (it is not
-# on PyPI). The large model, torch and Unstructured stay in requirements-ingest.txt, never here.
+# on PyPI); pip and uv refuse a file whose SHA-256 differs from the one after `#sha256=` (Phase 15:
+# a build-time check of the wheel). The large model, torch and Unstructured stay in
+# requirements-ingest.txt, never here.
 presidio-analyzer==2.2.364
 spacy==3.8.16
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 # Phase 8: the query pipeline is a LangGraph graph (spec 4). The graph is compiled with no
 # checkpointer and LangChain / LangSmith tracing is switched off in code (the state holds the raw
 # question). Its dependencies are light (about 27 MB, no torch or numpy); they are resolved at install time.

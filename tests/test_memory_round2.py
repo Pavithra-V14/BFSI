@@ -706,7 +706,9 @@ def test_a_chat_resumed_after_the_list_was_read_is_not_deleted(db, monkeypatch):
     result = retention.sweep(db, now=NOW, actor="cli:test")
     assert (result.sessions, result.messages) == (0, 0)
     assert db.query_one("SELECT COUNT(*) FROM sessions")[0] == 1
-    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 0  # nothing deleted: no audit row
+    # nothing deleted, but the run itself is recorded (the proof that the task ran): zero counts
+    rows = db.query_all("SELECT action, details FROM audit_log")
+    assert [r[0] for r in rows] == ["retention_sweep"] and '"sessions": 0' in rows[0][1]
 
 
 def test_only_the_chats_that_were_really_deleted_are_counted(db, monkeypatch):

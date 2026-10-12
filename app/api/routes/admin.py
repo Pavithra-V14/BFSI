@@ -9,11 +9,19 @@ import re
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
 from app.accounts import users
-from app.api.deps import CurrentUser, get_db, require_admin
+from app.api import diagnostics
+from app.api.deps import (
+    CurrentUser,
+    client_address,
+    forwarded_entries,
+    get_db,
+    require_admin,
+    services,
+)
 from app.api.errors import ApiError
 from app.db.connection import Database
 
@@ -51,3 +59,25 @@ def change_role(
         status, message = _REFUSALS.get(refusal.code, (409, "That change is not allowed."))
         raise ApiError(status, refusal.code, message) from None
     return {"id": user_id, "role": new, "previous_role": old}
+
+
+@router.get("/diagnostics")
+def diagnostics_report(
+    request: Request, current: CurrentUser = Depends(require_admin)
+) -> dict[str, object]:
+    """For the owner's first deployment (Run 28): what this request looks like from the API and
+    what the process holds. The admin's OWN address only, no other user's. Reads no database."""
+    svc = services(request)
+    hops = svc.settings.trusted_proxy_hops
+    address, source = client_address(request, hops)
+    return {
+        "forwarded_entries": len(forwarded_entries(request)),
+        "trusted_proxy_hops": hops,
+        "client_address_used": address,
+        "address_source": source,
+        "socket_address": request.client.host if request.client else "unknown",
+        "memory_mb": diagnostics.memory_now_mb(),
+        "peak_memory_mb": diagnostics.memory_peak_mb(),
+        "hash_concurrency": svc.settings.password_hash_concurrency,
+        "on_render": svc.on_render,
+    }

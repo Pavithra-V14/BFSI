@@ -27,3 +27,10 @@ eval_data/
 # Secrets (.env.example is kept: it holds placeholders only)
 .env*
 !.env.example
+
+# Qdrant snapshots copied down by scripts/qdrant_snapshot.py (Phase 15)
+backups/
+
+# Local run leftovers: a log of the API in a terminal, a throw-away SQLite file (Phase 15)
+*.log
+*.db

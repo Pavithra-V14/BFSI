@@ -1,0 +1,63 @@
+name: Keep the free services awake
+
+# The uptime pinger (spec 11.2, 17.1). ALERT ONLY: a red cross never blocks anything.
+#
+# Render's free instances sleep when idle, and an always-awake service uses its free hours (about
+# 750 a month per account for ALL services together [T: verify]; two services awake all month
+# would need about 1,490). So this pings only inside a stated window: 08:00 to 20:00 India time,
+# Monday to Friday (02:30 to 14:30 UTC). Outside it the services sleep and the first visitor
+# waits about a minute.
+#
+# Honest limits, written here so nobody is surprised:
+# - GitHub's scheduled workflows are best effort: a run can be late or skipped;
+# - GitHub switches a scheduled workflow OFF after 60 days without activity in the repository
+#   (a commit is enough to switch it back on);
+# - it holds no secret: the two addresses are repository VARIABLES (Settings, Secrets and
+#   variables, Variables): RENDER_API_URL and RENDER_FRONTEND_URL. Without them it does nothing.
+
+on:
+  schedule:
+    - cron: "*/10 2-14 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Stay inside the window (02:30 to 14:30 UTC, Monday to Friday)
+        id: window
+        run: |
+          now=$(date -u +%H%M)
+          day=$(date -u +%u)
+          if [ "$day" -le 5 ] && [ "$now" -ge 0230 ] && [ "$now" -le 1430 ]; then
+            echo "inside=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "outside the window: nothing to do"
+            echo "inside=no" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Ping the API and the frontend
+        if: steps.window.outputs.inside == 'yes'
+        env:
+          API_URL: ${{ vars.RENDER_API_URL }}
+          FRONTEND_URL: ${{ vars.RENDER_FRONTEND_URL }}
+        run: |
+          failed=0
+          if [ -n "$API_URL" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "${API_URL%/}/live" || true)
+            echo "API /live: HTTP $code"
+            [ "$code" = "200" ] || failed=1
+          else
+            echo "RENDER_API_URL is not set: the API is not pinged"
+          fi
+          if [ -n "$FRONTEND_URL" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "${FRONTEND_URL%/}/_stcore/health" || true)
+            echo "frontend /_stcore/health: HTTP $code"
+            [ "$code" = "200" ] || failed=1
+          else
+            echo "RENDER_FRONTEND_URL is not set: the frontend is not pinged"
+          fi
+          exit $failed

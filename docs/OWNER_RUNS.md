@@ -92,6 +92,12 @@ never set.)
 | 25 | Record the provider cassettes: five real calls, one per provider (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) | Phase 14 | PENDING (needs your yes: real keys) |
 | 26 | Stubbed-model load test on this machine (users step up from 10; no key) | Phase 14 | PENDING |
 | 27 | Real-provider load test, short, on this machine: local SQLite, test collection read only, estimate and a single-use ticket first | Phase 14 | PENDING (needs your yes: real keys) |
+| 28 | First deploy to Render (DEPLOY.md section 2): services, client address check, memory check, shadow stage | Phase 15 | PENDING (needs your yes: real keys and accounts) |
+| 29 | The rollback drill: back to the last good build in under 5 minutes, with a stopwatch | Phase 15 | PENDING (after Run 28) |
+| 30 | Qdrant snapshot, download and one restore test (or the re-ingest from originals/ if snapshots are refused) | Phase 15 | PENDING |
+| 31 | A key rotation drill on one embedding key | Phase 15 | PENDING (after Run 28) |
+| 32 | The database connection count on the deployed service, against the plan's limit | Phase 15 | PENDING (after Run 28) |
+| 33 | The scheduled tasks on this machine: retention, drift, snapshot (Windows Task Scheduler) | Phase 15 | PENDING |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much. The
@@ -1657,6 +1663,143 @@ It asks you to type the id.
 - **Safe to repeat:** only with a NEW estimate and ticket, and after the daily limits have reset
   (the estimate checks the same limits again, but it does not know what you used elsewhere
   today, and production traffic shares these keys).
+
+## Run 28. First deploy to Render (needs your yes: real keys and accounts): PENDING
+
+- **Verifies:** that the two services start on Render from `render.yaml`, that the client address
+  the API counts is your real address, that the 512 MB host holds the masker and a login being
+  hashed together, and that a new deploy is in the shadow stage.
+- **Before it:** Runs 1 to 3 and 10 (the database, the collection, the cache and the documents
+  exist), Run 24 (the secret scan is clean) and Run 25 if you want the recorded tests first.
+- **Needs (names only):** the accounts of `docs/DEPLOY.md` section 1 and every secret of its
+  table in section 5 (the "required" rows). You also fill in the region placeholder of
+  `render.yaml`.
+- **Steps:** follow `docs/DEPLOY.md` section 2.1 to 2.9 in order. The numbers to send back come
+  from three of them:
+  1. **2.5:** `curl https://YOUR-API.onrender.com/live` shows `{"status":"ok"}`.
+  2. **2.6, the client address:** `GET /admin/diagnostics` with the admin's token. Compare
+     `client_address_used` with your real public address from a "what is my IP" page. They must be
+     equal and `address_source` must be `forwarded`.
+  3. **2.7, memory:** read `/admin/diagnostics` right after a question was asked and a sign-in
+     was done in a second tab: send `memory_mb` and `peak_memory_mb`.
+- **You should see:** `/live` ok; the sign-in page; an admin who can sign in; the stage `shadow`
+  on the Rollout page; the diagnostics numbers above.
+- **If a line differs:** an address that is not yours, or `socket`: stop, do not open the service,
+  and send `forwarded_entries`, `trusted_proxy_hops`, `address_source` and
+  `client_address_used`'s first two groups only. `peak_memory_mb` over about 450: `DEPLOY.md`
+  section 7 (lower `PASSWORD_HASH_CONCURRENCY`, then a larger instance; masking stays on).
+  `refusing to start: NAME`: fix that variable.
+- **Send back:** the three outputs, and the date and time the first deploy went Live.
+- **Clear:** nothing to clear; do not move the stage out of `shadow` (DEPLOY.md section 6 is the
+  checklist for that, a decision of its own).
+- **Real calls:** a few (three to six questions to check it works).
+- **Safe to repeat:** yes.
+
+## Run 29. The rollback drill: PENDING
+
+- **Verifies:** spec 17.3, "rollback by redeploying the previous build, in under 5 minutes,
+  rehearsed once".
+- **Before it:** Run 28.
+- **Steps (with a stopwatch):**
+  1. Make a harmless commit on `main` (for example a comment in `docs/runbooks/README.md`) and wait
+     until Render shows the new deploy **Live**.
+  2. Start the stopwatch. Render, `bfsi-api`, **Deploys**, the deploy before the last one,
+     **Rollback**. Stop the stopwatch when `https://YOUR-API.onrender.com/live` answers ok.
+  3. Ask one question in the frontend.
+  4. Roll forward again (Deploys, the newest, **Rollback** to it, or push a new commit).
+- **You should see:** the time under 5 minutes, `/live` ok, a question answered.
+- **If a line differs:** more than 5 minutes: write what took the time (a cold start, a slow
+  build) and send it; the runbook may need a different order.
+- **Send back:** the minutes and seconds, and the date. Also write them in
+  `docs/runbooks/README.md` (the rehearsal column for "Bad deploy: go back").
+- **Clear:** nothing.
+- **Real calls:** one question.
+- **Safe to repeat:** yes.
+
+## Run 30. Qdrant snapshot and one restore test: PENDING
+
+- **Verifies:** spec 11.3: whether the free cluster allows snapshots, and that one restore works;
+  otherwise that the re-ingest from `originals/` works from your backup copy.
+- **Before it:** Run 2 and Run 10 (a populated `documents` collection).
+- **Needs (names only):** `QDRANT_URL`, `QDRANT_API_KEY`.
+- **Step 1. See what is there (no change):**
+
+      uv run python scripts/qdrant_snapshot.py list
+
+  You should see `N snapshot(s) of 'documents'`.
+- **Step 2. Make one and copy it down:**
+
+      uv run python scripts/qdrant_snapshot.py create --run
+      uv run python scripts/qdrant_snapshot.py list
+      uv run python scripts/qdrant_snapshot.py download SNAPSHOT_NAME --run
+
+  You should see `created ...`, then the name in the list, then `saved ... in ...backups\qdrant`.
+- **Step 3. If a line says `the server refused snapshots`** (exit code 2): the plan does not
+  include them. Then the backup is a re-ingest. Do the restore test of
+  `docs/runbooks/restore-documents.md` (one document into `documents_eval`, compare the active
+  chunk counts) and fill in where `originals/` is backed up.
+- **If a line differs:** `not started: QDRANT_URL is not set`: set it in this window. A different
+  error prints its class name only.
+- **Send back:** the output (names and sizes) and the result of the restore test.
+- **Clear:** unset the two variables; `backups\` is git-ignored.
+- **Real calls:** about 3 requests to Qdrant.
+- **Safe to repeat:** yes.
+
+## Run 31. A key rotation drill: PENDING
+
+- **Verifies:** `docs/KEY_ROTATION.md`: that you can replace a key without downtime and prove it.
+- **Before it:** Run 28.
+- **Steps:** rotate `GEMINI_EMBEDDING_KEY_B` (the failover key, the safe one) exactly in the order
+  of `docs/KEY_ROTATION.md`, using `uv run python scripts/key_inventory.py` before and after.
+- **You should see:** the fingerprint of the key changed, the count the same, no warning that a
+  key appears twice, `/health` healthy, a question answered.
+- **If a line differs:** the old fingerprint is still there: the old key is still in the list;
+  remove it and save.
+- **Send back:** the two inventory outputs (names, counts and fingerprints) and the minutes it
+  took.
+- **Clear:** unset the variables in your window.
+- **Real calls:** one question.
+- **Safe to repeat:** yes.
+
+## Run 32. The database connection count on the deployed service: PENDING
+
+- **Verifies:** how many connections the API holds, against the plan's limit, before anyone
+  considers the pooled address (`docs/DEPLOY.md` section 4).
+- **Before it:** Run 28.
+- **Needs (names only):** `DATABASE_URL` (the direct address, in this window only).
+- **Steps:** open the frontend in four browser tabs and ask a question in each at about the same
+  time, then at once run:
+
+      uv run python scripts/db_connections.py
+
+- **You should see:** `connections open now: N of M`, the states, and the share of the limit.
+  Repeat it three times during use and note the highest.
+- **If a line differs:** `refused: this is a SQLite address`: the shell holds the wrong address.
+- **Send back:** the highest `N of M` and the share. No decision about the pooled address is made
+  from this alone: it needs its own deliberate test.
+- **Clear:** unset `DATABASE_URL`.
+- **Real calls:** the questions of the tabs.
+- **Safe to repeat:** yes.
+
+## Run 33. The scheduled tasks on this machine: PENDING
+
+- **Verifies:** that retention, the weekly drift report and the weekly snapshot run by themselves
+  from Windows Task Scheduler, and that the `retention_overdue` alert stays quiet.
+- **Before it:** Runs 22 and 30 for the drift and snapshot tasks; the encrypted secret files of
+  `docs/DEPLOY.md` section 9.1.
+- **Steps:** create the three tasks of the table in section 9 and run each once by hand from Task
+  Scheduler (**Run**). Read each output.
+- **You should see:** the retention task prints counts and a line for the evaluation samples (or
+  the fixed "not purged (ClassName)" line, exit 0); the drift task prints the sample counts and
+  `alerts: none` or names; the snapshot task prints `created ...` and `deleted ...` or nothing to
+  delete.
+- **If a line differs:** `not started: NAME is not set in this window`: the encrypted file of that
+  name is missing.
+- **Send back:** the three outputs (counts and names only) and the date the tasks were created.
+  Three days later check the admin banner has no `retention_overdue`.
+- **Clear:** the encrypted files stay (they are yours); remove a task you no longer want.
+- **Real calls:** a few requests to the database, the cache and Qdrant; no model call.
+- **Safe to repeat:** yes.
 
 ---
 

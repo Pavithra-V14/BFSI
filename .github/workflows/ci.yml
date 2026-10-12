@@ -97,6 +97,37 @@ jobs:
       - name: Audit runtime and development packages
         run: uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt -r requirements-dev.txt
 
+  # Deploy and the check after it (spec 17.2, Phase 15). Render deploys by itself when this
+  # workflow's checks pass (`autoDeployTrigger: checksPass` in render.yaml), so NOTHING here holds
+  # a Render secret and a pull request from a fork cannot reach one. This job only LOOKS: after a
+  # push to main has passed the blocking jobs it asks the API's public liveness address (a
+  # repository VARIABLE, not a secret) until it answers, for up to 12 minutes, and goes red when
+  # it does not. It is alert only (`continue-on-error`): a red cross never blocks anything (build
+  # rule 5). It cannot tell the new build from the old one (the liveness answer reveals nothing,
+  # by design); it shows that the service is up after the deploy window.
+  post-deploy-smoke:
+    needs: [lint, test, secret-scan, pip-audit]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Ask the liveness address until it answers
+        env:
+          API_URL: ${{ vars.RENDER_API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "RENDER_API_URL is not set as a repository variable: nothing to check yet"
+            exit 0
+          fi
+          for attempt in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${API_URL%/}/live" || true)
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "the API did not answer /live within 12 minutes"
+          exit 1
+
   # Coverage (spec 16, Phase 14). ALERT ONLY, like the evaluation job: `continue-on-error` means
   # a red cross never blocks a merge or a release (build rule 5). It runs the whole suite WITH the
   # throw-away Postgres container, so the Postgres tests count, and reports each package's line

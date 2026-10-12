@@ -291,6 +291,11 @@ class AlertManager:
             return
         self._submit(name, severity, 1, None)
 
+    def raise_rule(self, name: str, severity: str, count: int = 1) -> None:
+        """A rule that is evaluated elsewhere (the retention check) fired: same limits, same
+        banner and webhook as every other alert."""
+        self._submit(name, severity, count, None)
+
     def observe(self, obs: RequestObservation) -> None:
         """A finished request: feeds the window rules and the budget-variance rule."""
         with self._lock:

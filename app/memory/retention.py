@@ -107,15 +107,17 @@ def sweep(
                 deleted += 1
                 messages += count
                 removed_ids.append(session_id)
-        if deleted:  # no audit row when nothing was deleted
-            write_audit(
-                db,
-                actor=actor,
-                action="retention_sweep",
-                target="sessions",
-                details={"sessions": deleted, "messages": messages, "days": days},
-                now=now,
-            )
+        # One row for every real run, also a run that found nothing to delete: it is the proof
+        # that the scheduled task ran (the alert "retention_overdue" looks for it, Phase 15).
+        # A dry run writes nothing.
+        write_audit(
+            db,
+            actor=actor,
+            action="retention_sweep",
+            target="sessions",
+            details={"sessions": deleted, "messages": messages, "days": days},
+            now=now,
+        )
     return SweepResult(deleted, messages, False)
 
 

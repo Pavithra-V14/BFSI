@@ -1,0 +1,101 @@
+# Render blueprint for the BFSI assistant: two free web services, the API and the Streamlit
+# frontend (spec 17.1, 17.4). Read docs/DEPLOY.md first: it explains every line in plain words.
+#
+# Rules this file keeps (tests/test_deploy_structure.py checks them):
+# - No secret VALUE is written here. Every secret is `sync: false`: Render asks you for it in its
+#   own dashboard and keeps it in its secret store.
+# - No evaluation key, no ADMIN_MACHINE, no ENTITY_REVIEW_ENABLED, no DEV_STAGE_TRACE, no
+#   INGEST_COLLECTION, no GATEWAY_ENABLE_MOCK, and none of the other "admin machine only" names
+#   of .env.example, ever (spec 2, 13.3).
+# - Both services start from the repository root, so `prompts/` sits next to `app/` and the
+#   Streamlit safety settings of `.streamlit/config.toml` are read.
+# - Deploys happen after the CI checks pass (autoDeployTrigger: checksPass). Nothing in GitHub
+#   holds a Render secret.
+#
+# BEFORE THE FIRST DEPLOY (Run 28): replace REPLACE_WITH_REGION_NEAR_YOUR_NEON_DATABASE below,
+# in both services, with the Render region closest to your Neon database (for example the Neon
+# region's neighbour in the list in DEPLOY.md). Render refuses the file until you do.
+
+services:
+  # ---- the API --------------------------------------------------------------------------
+  - type: web
+    name: bfsi-api
+    runtime: python
+    plan: free
+    region: REPLACE_WITH_REGION_NEAR_YOUR_NEON_DATABASE
+    autoDeployTrigger: checksPass
+    buildCommand: pip install -r requirements.txt
+    # --no-proxy-headers: uvicorn must NOT rewrite the client address from X-Forwarded-For. Only
+    # our own code reads the header, and only as many entries from the end as TRUSTED_PROXY_HOPS.
+    startCommand: uvicorn app.api.main:create_app_from_env --factory --host 0.0.0.0 --port $PORT --no-proxy-headers
+    healthCheckPath: /live
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+      - key: PASSWORD_HASH_CONCURRENCY
+        value: "2"
+      # Secrets and addresses: set in Render's dashboard (sync: false). Names only here.
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: AUDIT_HASH_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: GROQ_API_KEYS
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: OPENROUTER_API_KEYS
+        sync: false
+      - key: JEV_OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_EMBEDDING_KEY_A
+        sync: false
+      - key: GEMINI_EMBEDDING_KEY_B
+        sync: false
+      - key: COHERE_API_KEY
+        sync: false
+      - key: JINA_API_KEY
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        sync: false
+      - key: LANGFUSE_USER_HASH_KEY
+        sync: false
+      - key: ALERT_WEBHOOK_URL
+        sync: false
+      - key: EVAL_DATABASE_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGIN
+        sync: false
+      - key: COMPANY_DOMAINS
+        sync: false
+
+  # ---- the Streamlit frontend -------------------------------------------------------------
+  - type: web
+    name: bfsi-frontend
+    runtime: python
+    plan: free
+    region: REPLACE_WITH_REGION_NEAR_YOUR_NEON_DATABASE
+    autoDeployTrigger: checksPass
+    buildCommand: pip install -r requirements-frontend.txt
+    # From the repository root, so .streamlit/config.toml (the safety settings) is read.
+    startCommand: streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+      # The https address of bfsi-api, for example https://bfsi-api.onrender.com
+      - key: API_BASE_URL
+        sync: false

@@ -184,7 +184,7 @@ def test_a_failing_sample_purge_never_hides_or_undoes_the_main_parts(
     assert "1 audit rows" in out, "the audit sweep ran first and is reported"
     assert "evaluation samples: not purged (RuntimeError)" in out
     assert "postgresql" not in out and "pw@host" not in out
-    assert counts(db)[0] == 1  # only the purge's own audit row is left
+    assert counts(db)[0] == 2  # the sweep's row (it ran) and the purge's own row
 
 
 def test_the_sample_purge_writes_its_own_audit_row_of_counts(db, tmp_path, monkeypatch, capsys):
