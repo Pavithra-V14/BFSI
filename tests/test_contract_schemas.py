@@ -332,16 +332,40 @@ def test_extra_fields_and_extra_answers_are_ignored_and_never_reach_the_result()
     assert "reasoning" not in repr(parsed)
 
 
-# ==== a deeply nested payload that really reaches the recursion path ====
-def test_a_closed_deeply_nested_payload_is_an_invalid_output_not_a_crash():
-    depth = 5_000
-    text = '{"a": ' * depth + "1" + "}" * depth  # complete, so extract_json hands it to json
+# ==== a deeply nested payload: the recursion path, on every Python build ====
+# Whether the JSON decoder raises RecursionError for a given depth depends on the Python build
+# (a Windows build did at 5,000 levels, the Linux CI build did not), so the tests do not rely on
+# the depth. The path is reached deterministically by making the decoder raise it, and the real
+# deep payload is checked for what must hold on any build: nothing but the typed result.
+def _recursion(*args, **kwargs):
+    raise RecursionError("maximum recursion depth exceeded")
+
+
+def test_a_decoder_that_runs_out_of_depth_is_an_invalid_output_not_a_crash(monkeypatch):
+    from app.gateway import decisions
+    from app.guardrails import output
+
+    monkeypatch.setattr(decisions.json, "loads", _recursion)
     with pytest.raises(InvalidOutput):
-        extract_json(text)
+        extract_json('{"a": {"b": 1}}')
     with pytest.raises(InvalidOutput):
-        parse_fallback_answers(text, QUESTIONS)
-    answer, error = parse_answer('{"answer": ' * depth + '"x"' + "}" * depth)
+        parse_fallback_answers('{"domain_relevance": {"noul": 0.9}}', QUESTIONS)
+    monkeypatch.setattr(output.json, "loads", _recursion)
+    answer, error = parse_answer('{"answer": "x", "citations": []}')
     assert answer is None and error == "not_json"
+
+
+def test_a_really_deep_payload_never_crashes_and_never_becomes_an_answer():
+    depth = 5_000
+    deep = '{"a": ' * depth + "1" + "}" * depth
+    try:  # an InvalidOutput, or a plain object that is not the decisions asked for
+        assert isinstance(extract_json(deep), dict)
+    except InvalidOutput:
+        pass
+    with pytest.raises(InvalidOutput):
+        parse_fallback_answers(deep, QUESTIONS)
+    answer, error = parse_answer('{"answer": ' * depth + '"x"' + "}" * depth)
+    assert answer is None and error in ("not_json", "no_answer")
 
 
 # ==== a 200 that is not JSON, at the HTTP clients ====
