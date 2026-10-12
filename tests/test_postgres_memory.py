@@ -274,7 +274,11 @@ def test_the_retention_queries_compare_text_times_with_the_timestamp_column(db):
     assert json.loads(rows[0][1]) == {"days": 90, "messages": 2, "sessions": 1}
     assert old not in {r[0] for r in db.query_all("SELECT id FROM sessions")}
     assert retention.sweep(db, now=NOW, actor="cli:test").sessions == 0
-    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 1
+    # Phase 15: every real run writes its own row, also one that deleted nothing (it is the proof
+    # that the scheduled task ran); the second run is the second row, with zero sessions
+    rows = db.query_all("SELECT action, details FROM audit_log ORDER BY created_at, id")
+    assert [r[0] for r in rows] == ["retention_sweep", "retention_sweep"]
+    assert sorted(json.loads(r[1])["sessions"] for r in rows) == [0, 1]
 
 
 def test_summaries_built_from_a_document_are_found_with_like_and_a_subselect(db):
@@ -442,7 +446,10 @@ def test_the_sweep_rechecks_the_last_active_time_under_a_row_lock(db, monkeypatc
     result = retention.sweep(db, now=NOW, actor="cli:test")
     assert (result.sessions, result.messages) == (0, 0)
     assert db.query_one("SELECT COUNT(*) FROM sessions")[0] == 1
-    assert db.query_one("SELECT COUNT(*) FROM audit_log")[0] == 0
+    # Phase 15: the run finished and deleted nothing: its row says so (zero sessions, zero messages)
+    rows = db.query_all("SELECT action, details FROM audit_log")
+    assert [r[0] for r in rows] == ["retention_sweep"]
+    assert json.loads(rows[0][1])["sessions"] == 0 and json.loads(rows[0][1])["messages"] == 0
 
 
 def test_last_active_never_moves_backwards_with_greatest_and_a_naive_time_is_refused(db):
