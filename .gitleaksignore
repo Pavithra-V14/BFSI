@@ -17,3 +17,9 @@ bb18ef1ecdaa9282dde6e798d444d8cb6890c2ca:tests/test_gateway_round3.py:generic-ap
 # "latency_p95_ms_creep". Words with an underscore, not a key; the entropy rule took the pair of
 # strings for one. The line is reworded in the next commit so it is not reported again.
 9c6406d1e4cb3c91ba4bac00361158ac94601c70:tests/test_eval_drift.py:generic-api-key:159
+
+# Phase 13 (commit 9c6406d): `for key in ("tokens_mean", "latency_p95_ms"):` in the drift
+# module. Two metric names, not a key; the entropy rule read the loop variable's name and the
+# short strings as a key assignment. The loop variable is renamed in the next commit, and so are
+# the other loops over short quoted names that used a variable called key or secret.
+9c6406d1e4cb3c91ba4bac00361158ac94601c70:app/eval/drift.py:generic-api-key:153

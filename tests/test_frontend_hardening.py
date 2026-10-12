@@ -270,8 +270,8 @@ def test_the_client_raises_for_every_call_made_with_a_token(monkeypatch):
 def test_signing_out_drops_every_fx_key(monkeypatch):
     api = FakeApi()
     at = ask(signed_in(api, monkeypatch).run())
-    for key in ("fx_user_pick", "fx_section", "fx_pending", "fx_rated", "fx_confirm", "fx_zzz"):
-        at.session_state[key] = "x"
+    for slot in ("fx_user_pick", "fx_section", "fx_pending", "fx_rated", "fx_confirm", "fx_zzz"):
+        at.session_state[slot] = "x"
     button(at, "Sign out").click().run()
     # what is left are the empty boxes of the sign-in page that was drawn after signing out
     left = [k for k in at.session_state.keys() if str(k).startswith("fx_")]

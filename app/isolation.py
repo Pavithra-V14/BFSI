@@ -89,8 +89,8 @@ def url_hosts(value: str) -> list[str] | None:
             }
     except ValueError:
         return None
-    for key in ("host", "hostaddr"):
-        for entry in query.get(key, []):
+    for parameter in ("host", "hostaddr"):
+        for entry in query.get(parameter, []):
             hosts.extend(host for host in entry.split(",") if host)
     if not hosts and not query and _BARE_AUTHORITY.fullmatch(text):
         # A store address with no scheme, such as "localhost:6333" (Qdrant clients accept it).

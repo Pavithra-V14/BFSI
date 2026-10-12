@@ -91,8 +91,8 @@ def test_structured_identifiers_are_masked(masker, text, kind):
     result = masker.mask(text)
     assert PLACEHOLDERS[kind] in result.text, (text, result.text)
     assert result.counts.get(kind, 0) >= 1
-    for secret in ("9876543210", "ABCPE1234F", "4111", "POL1234567", "98765432", "123456789012"):
-        assert secret not in result.text.replace(" ", ""), (text, result.text)
+    for value in ("9876543210", "ABCPE1234F", "4111", "POL1234567", "98765432", "123456789012"):
+        assert value not in result.text.replace(" ", ""), (text, result.text)
 
 
 def test_a_made_up_aadhaar_or_card_number_that_fails_its_checksum_is_left_alone(masker):
@@ -141,8 +141,8 @@ def test_several_things_in_one_message(masker):
         assert placeholder in result.text
     assert result.text.endswith("What is the waiting period?")
     assert result.counts["ID"] == 3 and result.counts["PERSON"] == 1
-    for secret in ("Rahul", "ABCPE", "9876543210", "rahul@example", "POL1234567"):
-        assert secret not in result.text
+    for value in ("Rahul", "ABCPE", "9876543210", "rahul@example", "POL1234567"):
+        assert value not in result.text
 
 
 def test_masking_is_idempotent_and_keeps_the_question(masker):

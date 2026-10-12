@@ -151,10 +151,11 @@ def drift_report(
             level = "watch"
         report["measures"][name] = {"psi": score, "js": divergence, "level": level}
     report["creep"] = {"recent": _creep(recent), "baseline": _creep(baseline)}
-    for key in ("tokens_mean", "latency_p95_ms"):
-        was, now = report["creep"]["baseline"][key], report["creep"]["recent"][key]
+    for measure in ("tokens_mean", "latency_p95_ms"):
+        was = report["creep"]["baseline"][measure]
+        now = report["creep"]["recent"][measure]
         if was and now and now > 1.3 * was:  # [T] 30 % creep
-            report["alerts"].append(f"{key}_creep")
+            report["alerts"].append(f"{measure}_creep")
     report["distribution"] = {k: dict(v) for k, v in now_d.items()}
     return report
 

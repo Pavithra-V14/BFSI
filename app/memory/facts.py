@@ -95,10 +95,10 @@ def facts_for_prompt(facts: Mapping[str, Any]) -> dict[str, Any]:
     """The facts a prompt may carry, validated again. Bookkeeping such as `unclear_turns`, the
     document ids and anything that is not a clean label are dropped."""
     shown: dict[str, Any] = {}
-    for key in ("product_line", "topic"):
-        label = clean_label(facts.get(key))
+    for field in ("product_line", "topic"):
+        label = clean_label(facts.get(field))
         if label:
-            shown[key] = label
+            shown[field] = label
     names = [e["name"] for e in clean_entities(facts.get("entities"))]
     if names:
         shown["entities"] = names
