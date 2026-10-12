@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 12 closed; Phase 13 (evaluation) committed (9c6406d), its hardening round ("Phase 13 hardening") written and awaiting the owner's "commit" and approval (next is Phase 14)
+Current phase: Phase 13 closed (9c6406d, 45ed9b0); Phase 14 (testing completion) built, awaiting the owner's "commit" and approval (next is Phase 15)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -919,6 +919,57 @@ loaded by it.
 - **Not seen with real models yet.** The 60 cases and the stubbed-model run prove the harness; how
   the real system does on them is Run 21. Names of people in the made-up PII cases are masked by the
   NER model, which only a real run exercises.
+
+## Testing completion (Phase 14)
+What each kind of test is for, where it lives and how to run it. None of it needs a key or a
+network, except the two owner-run steps marked below.
+
+- **Chaos tests** (`tests/test_chaos_gateway.py`, `tests/test_chaos_pipeline.py`, marker `chaos`).
+  Schedules of failures over time on a fake clock: every provider failing, the breakers opening,
+  one probe after the open period, healing; slow-but-successful providers (8, 15 and 25 s) that
+  must not trip a breaker; slow failures that must leave each next attempt only the time that is
+  left; 429 with `Retry-After` (a key stays out until the time is over, 0 is raised to the floor);
+  Jev, embeddings and the rerank chain failing and returning. Seen from the user: a clean answer
+  or the one fixed "temporarily unavailable" text, nothing stored, and the next request recovers.
+- **Contract tests** (`tests/test_contract_schemas.py`, marker `contract`). A table of good and
+  bad payloads for each structured output (typed decisions in Jev's shape, a chat model's JSON,
+  the generator's answer, embedding vectors, rerank responses): a bad one is a typed gateway error,
+  never a value.
+- **Recorded tests** (`tests/test_recorded_providers.py`, marker `recorded`) replay five
+  recordings of real provider answers (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) through
+  the real client code with `record_mode="none"`. **The recordings are made by you** with
+  `scripts/record_cassettes.py --run` (Run 25); until then these five tests are skipped with a
+  plain message. Hygiene (`tests/test_cassette_hygiene.py`): headers and `key=` parameters are
+  replaced, response headers dropped, embedding vectors cut to 8 numbers (the length is kept and
+  restored on replay), long random-looking tokens replaced, and a detector refuses any file with a
+  key-shaped value or a long high-entropy string. Run gitleaks on the folder before committing it.
+- **Coverage** (`scripts/coverage_report.py`, CI job `coverage`, alert only). Target 80 % of lines
+  on gateway, guardrails, cache and memory (measured 97 to 99 % when this phase was built);
+  accounts, api, pipeline and ingest are reported for information. The CI job runs with the
+  throw-away Postgres container so the Postgres tests count. Run it here:
+  `uv run pytest -q --cov=app --cov-branch --cov-report=json:coverage.json` then
+  `uv run python scripts/coverage_report.py coverage.json`.
+- **Load tests** (`load/`, Locust). Two modes. `stub`: `load/stub_server.py` is the real API with a
+  scripted model, the sample corpus in an in-memory store and SQLite behind it; users step up from
+  10 (default 10, 20, 40, 80, 160, one minute each) and `load/report.py` names the first step that
+  failed more than 1 % or passed a p95 of 30 s [T]. The report always states that it shows how the
+  code behaves under concurrency, not the capacity of a host. `real`: only with the code that
+  `scripts/load_estimate.py` printed for that exact plan, after your explicit yes, against your own
+  local API (Run 27). Runs 26 and 27 are in `docs/OWNER_RUNS.md`.
+- **Known blind spots of a load run (recorded for Phase 15).** The API opens one database
+  connection per chat request and the stub uses SQLite, so a cloud Postgres connection limit is
+  not exercised. **Phase 15 decides** whether the running service uses the provider's direct
+  address or its pooled one, and checks the connection count on the deployed service. Host
+  capacity (Render's free instance) is measured there with a short real run you approve (Phase
+  15/16).
+- **Phase 16.** The step sizes, the 1 % failure share, the 30 s p95 and the 80 % coverage target
+  are placeholders for the baseline; the 30 s total request budget [T] is recalibrated only from a
+  real run you approved.
+- **Known limitations.** The stub server loosens one thing on purpose: the per-address login and
+  registration throttles (every virtual user shares this machine's address). A free tier's own
+  limit and the per-user rate limit appear in a real run as "limited or busy: by design", counted
+  apart from failures. A cassette is a snapshot: a provider that changes its answer shape is seen
+  only when you record again.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

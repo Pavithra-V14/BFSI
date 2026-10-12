@@ -89,6 +89,9 @@ never set.)
 | 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | PENDING (needs your yes: real keys) |
 | 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | PENDING |
 | 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | ANY TIME (before every push) |
+| 25 | Record the provider cassettes: five real calls, one per provider (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) | Phase 14 | PENDING (needs your yes: real keys) |
+| 26 | Stubbed-model load test on this machine (users step up from 10; no key) | Phase 14 | PENDING |
+| 27 | Real-provider load test, short, against your own local API (estimate first) | Phase 14 | PENDING (needs your yes: real keys) |
 
 Order matters for the pending runs: 8, then 9, then 10, then 11, then 12, then 13. Runs 9 and 10
 use up free-tier calls, so do them on a day when you have not used the providers much. The
@@ -1500,6 +1503,126 @@ It asks you to type the id.
 - **Clear:** nothing to clear.
 - **Real calls:** none.
 - **Safe to repeat:** yes; run it before every push.
+
+## Run 25. Record the provider cassettes (needs your yes: real keys): PENDING
+
+- **Verifies:** that the real client code reads what the five real providers really answer. The
+  recorded tests replay these recordings with the network switched off; until you record them
+  they are skipped with the message `cassette ... is not recorded yet`.
+- **Before it:** nothing else. Do not hand-write a cassette: a hand-written one only tests our
+  own guess of the answer.
+- **Needs (names only):** `COHERE_API_KEY`, `JINA_API_KEY`, `JEV_OPENROUTER_API_KEY`,
+  `GEMINI_EMBEDDING_KEY_A`, `OPENROUTER_API_KEYS` (the first one is used). Set them with
+  `Read-Secret` in this window only; never put them in a file.
+- **Step 1. The plan (no call):**
+
+      uv run python scripts/record_cassettes.py
+
+  You should see `plan: 5 real call(s), one per provider`, one line per provider with `key set`
+  or `key NOT set`, and `nothing was called: add --run to record`.
+- **Step 2. Record (five real calls):**
+
+      uv run python scripts/record_cassettes.py --run
+
+  You should see one line per provider such as `cohere_rerank: recorded (1234 bytes), hygiene
+  rules passed`, and `5 of 5 cassette(s) recorded`. The files are in `tests\cassettes\`. The
+  recording removes every key header and `key=` parameter, cuts each embedding vector to its
+  first 8 numbers (the original length is kept beside it and restored on replay), replaces long
+  random-looking tokens and drops every response header but the content type. A file that still
+  breaks one of these rules is deleted and the line says `DELETED`.
+- **Step 3. Scan the folder with gitleaks (Run 24 explains the install) and replay it:**
+
+      gitleaks dir --redact --no-banner --verbose tests\cassettes
+      uv run pytest tests\test_cassette_hygiene.py tests\test_recorded_providers.py -q
+
+  You should see `no leaks found`, then all tests passing and no `skipped` for a cassette.
+- **If a line differs:** `key NOT set` names the setting to add. `FAILED (ClassName)` is a
+  provider error (a wrong key, a limit): send me the class name; nothing was written for it.
+  `DELETED` means the hygiene rules caught something: send me the line. A replay test that fails
+  after a good recording means our parser and the provider disagree: send me the test name.
+- **Send back:** the output of steps 1 to 3. Do not commit the folder: I read the structure of
+  each file (no keys appear in it) and then commit it with you.
+- **Clear:** unset the five variables.
+- **Real calls:** 5 (Cohere rerank 1, Jina rerank 1, Jev decisions 1 (a fraction of a cent),
+  Gemini embeddings 1 call of 2 texts, OpenRouter chat 1 on the free Gemma model).
+- **Safe to repeat:** yes; each run overwrites the cassettes (and uses 5 calls again).
+
+## Run 26. Stubbed-model load test on this machine: PENDING
+
+- **Verifies:** how the CODE behaves when users arrive in steps (10, 20, 40, 80, 160): threads,
+  the event loop, the password-hashing gate, connection use, locks. It does **not** show how big
+  a host must be, and it does not exercise a cloud database or a real provider's limits: the
+  report states this itself.
+- **Before it:** nothing. No key, no cloud address, no quota. It refuses to start while any
+  store address in this window points at a remote host.
+- **Needs:** two PowerShell windows in the project folder, and about 10 minutes.
+- **Step 1. Window A, start the stubbed API (the first start loads the name model, about a
+  minute):**
+
+      uv run python load/stub_server.py
+
+  You should see `stub server on http://127.0.0.1:8099 (scripted model, 300 ms per answer,
+  SQLite, in-memory vector store)`. Leave it running.
+- **Step 2. Window B, the users (the default plan is five one-minute steps):**
+
+      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8099 --csv load_out/run
+
+  You should see the banner `STUBBED MODEL: a scripted model, a local store ...`, then Locust's
+  table every few seconds, and the run ends by itself after the last step. A shorter plan:
+  `$env:LOAD_STEPS = "10x20,20x20,40x20"` first.
+- **Step 3. Where did it break:**
+
+      uv run python load/report.py load_out/run
+
+  You should see one line per step (users, requests, failed share, p50, p95, ok or BROKE), then
+  either `it did not break up to N users` or `first step that broke: N users (...)`, and the
+  list of what this run cannot show (the Postgres connection ceiling, host capacity, provider
+  limits).
+- **If a line differs:** `the stub mode runs against this machine only` means the host is not
+  127.0.0.1. `refused: these settings point at a remote host: NAME` means unset that variable in
+  window A. A step with failures: send me the report and the last 30 lines of window A (they
+  hold no text of a question).
+- **Send back:** the report (it holds numbers and names only).
+- **Clear:** press Ctrl+C in window A; delete `load_out\` if you wish (git-ignored).
+- **Real calls:** none.
+- **Safe to repeat:** yes.
+
+## Run 27. Real-provider load test, short, on your own local API (needs your yes): PENDING
+
+- **Verifies:** the same users against the real providers, to see rate limits, retries and
+  latency that a scripted model cannot show. It is short on purpose: every step spends the free
+  tiers (the estimate shows by how much).
+- **Before it:** Run 16 (the local API works with real providers) and Run 26. It runs against
+  **your own local API**, never against the deployed address: capacity of the deployed service is
+  measured in Phases 15 and 16, with a short real run you approve then.
+- **Needs (names only):** the settings of Run 16 in window A, `LOAD_MODE`, `LOAD_STEPS` and
+  `LOAD_CONFIRM` in window B.
+- **Step 1. The estimate (no call):**
+
+      uv run python scripts/load_estimate.py --steps 10x20,20x20
+
+  You should see the plan, about how many questions it sends, the requests and tokens per
+  provider against each provider's daily limit, and a line with `LOAD_MODE=real  LOAD_STEPS=...
+  LOAD_CONFIRM=CODE`. If the plan does not fit one day it says so and prints no code.
+- **Step 2. Your decision.** Send me the estimate or decide yourself. Nothing starts without the
+  code, and the code belongs to this exact plan.
+- **Step 3. Window A: the API as in Run 16. Window B:**
+
+      $env:LOAD_MODE = "real"; $env:LOAD_STEPS = "10x20,20x20"; $env:LOAD_CONFIRM = "CODE"
+      uv run locust -f load/locustfile.py --headless --host http://127.0.0.1:8000 --csv load_out/real
+      uv run python load/report.py load_out/real --mode real
+
+  You should see the banner `REAL PROVIDERS: ...`, the Locust table, and then the report.
+- **If a line differs:** `LOAD_CONFIRM does not match this plan` means the steps changed since the
+  estimate: make a new one. Many `limited or busy: by design` lines are the per-user rate limit
+  and a free tier's own limit working; they are counted apart from failures.
+- **Send back:** the estimate and the report.
+- **Clear:** unset `LOAD_MODE`, `LOAD_STEPS`, `LOAD_CONFIRM` and the provider variables of
+  window A; delete `load_out\`.
+- **Real calls:** about the number the estimate shows (about 5 per question), spread over the
+  providers' free tiers.
+- **Safe to repeat:** only after the daily limits have reset (the estimate checks the same
+  limits again, but it does not know what you used elsewhere today).
 
 ---
 

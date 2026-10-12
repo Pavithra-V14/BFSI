@@ -97,6 +97,43 @@ jobs:
       - name: Audit runtime and development packages
         run: uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt -r requirements-dev.txt
 
+  # Coverage (spec 16, Phase 14). ALERT ONLY, like the evaluation job: `continue-on-error` means
+  # a red cross never blocks a merge or a release (build rule 5). It runs the whole suite WITH the
+  # throw-away Postgres container, so the Postgres tests count, and reports each package's line
+  # and branch coverage. Only gateway, guardrails, cache and memory have the 80 % target; the
+  # others (accounts, api, pipeline, ingest, ...) are shown for information.
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Create the environment and install packages
+        run: |
+          uv venv
+          uv pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tests with coverage
+        run: uv run pytest -q --cov=app --cov-branch --cov-report=json:coverage.json
+      - name: Per-package report (alert only)
+        run: uv run python scripts/coverage_report.py coverage.json
+
   # The 20-case evaluation (spec 17.2, Phase 13). ALERT ONLY: `continue-on-error` means a red
   # cross here never blocks a merge or a release (build rule 5). It runs the active set through the
   # real pipeline over a small copy of the sample corpus with a SCRIPTED model, so it needs no key

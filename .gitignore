@@ -13,6 +13,9 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 .coverage
+coverage.json
+# Locust output of a load run (Phase 14): numbers only, but regenerated every run
+load_out/
 
 # Ingestion keeps the original PDFs here (Phase 5). It is the ONLY copy: back it up yourself.
 originals/

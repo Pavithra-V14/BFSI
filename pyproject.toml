@@ -31,4 +31,7 @@ pythonpath = ["."]
 addopts = "-ra"
 markers = [
     "postgres: needs TEST_POSTGRES_URL (CI service container); skipped when it is not set",
+    "chaos: providers forced to fail on a fake clock; breakers trip and recover (spec 16)",
+    "contract: structured outputs against what providers return (spec 16)",
+    "recorded: replays cassettes of real provider responses; skipped until recorded (spec 16)",
 ]
