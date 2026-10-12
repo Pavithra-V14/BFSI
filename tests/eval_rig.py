@@ -333,7 +333,15 @@ class EvalRig:
             now=lambda: START,
         )
         self.pipeline = Pipeline(self.deps)
-        self.harness = Harness(self.pipeline, self.db, self.qdrant, COLLECTION, tmp_path / "work")
+        self.embed_calls: list[list[str]] = []
+
+        async def embed(texts: list[str]) -> list[list[float]]:
+            self.embed_calls.append(list(texts))
+            return self.embedder(list(texts), None)
+
+        self.harness = Harness(
+            self.pipeline, self.db, self.qdrant, COLLECTION, tmp_path / "work", embed=embed
+        )
 
     def case(self, case_id: str) -> Case:
         return next(c for c in self.cases if c.id == case_id)

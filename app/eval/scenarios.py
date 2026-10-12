@@ -23,7 +23,7 @@ from qdrant_client import models
 from app.eval import constants as c
 from app.eval.cases import Op
 from app.vector import sparse
-from app.vector.documents import SPARSE_VECTOR
+from app.vector.documents import DENSE_VECTOR, SPARSE_VECTOR
 
 PAGE = 128
 
@@ -40,7 +40,13 @@ class Scenario:
         journal: Path,
         *,
         now: Any = lambda: datetime.now(UTC),
+        embed: Any = None,
     ) -> None:
+        # `embed`: an async function (list of texts) -> list of dense vectors. With it, an edited
+        # or newer clause is re-embedded (one embedding request for that clause only), so the
+        # dense branch of retrieval sees the new meaning too. Without it only the lexical branch
+        # does.
+        self._embed = embed
         self.client = client
         self.collection = c.check_eval_collection(collection)
         self.journal = journal
@@ -100,15 +106,21 @@ class Scenario:
         return wanted
 
     # ---- applying -----------------------------------------------------------------------
-    def apply(self, op: Op) -> None:
+    async def apply(self, op: Op) -> None:
         if op.op == "withdraw_document":
             self._withdraw(op)
         elif op.op == "edit_text":
-            self._edit(op)
+            await self._edit(op)
         elif op.op == "supersede_text":
-            self._supersede(op)
+            await self._supersede(op)
         else:
             raise ScenarioError("unknown operation")
+
+    async def _dense(self, text: str, fallback: Any) -> Any:
+        if self._embed is None:
+            return fallback
+        vectors = await self._embed([text])
+        return list(vectors[0])
 
     def _remember(self, record: dict[str, Any]) -> None:
         self._undo.append(record)
@@ -128,33 +140,41 @@ class Scenario:
         self._remember({"kind": "reactivate", "ids": [str(i) for i in active]})
         self._set_effective_to(active, self._now().isoformat())
 
-    def _edit(self, op: Op) -> None:
-        points = self._matching(op)
+    async def _edit(self, op: Op) -> None:
+        points = self._matching(op, vectors=True)
         originals = {str(p.id): str(p.payload.get("text", "")) for p in points}
-        self._remember({"kind": "restore_text", "texts": originals})
+        dense_before = {str(p.id): list((p.vector or {}).get(DENSE_VECTOR) or []) for p in points}
+        self._remember({"kind": "restore_text", "texts": originals, "dense": dense_before})
         for point in points:
             text = str(point.payload.get("text", "")).replace(op.old, op.new)
-            self._write_text(point.id, point.payload, text)
+            dense = await self._dense(text, None)
+            self._write_text(point.id, point.payload, text, dense)
 
-    def _write_text(self, point_id: Any, payload: dict[str, Any], text: str) -> None:
+    def _write_text(
+        self, point_id: Any, payload: dict[str, Any], text: str, dense: Any = None
+    ) -> None:
         self.client.set_payload(
             self.collection, payload={"text": text}, points=[point_id], wait=True
         )
-        vector = sparse.document_vector(
-            sparse.source_text(
-                [str(h) for h in payload.get("heading_path") or []],
-                payload.get("content_type"),
-                text,
-                payload.get("summary") if isinstance(payload.get("summary"), str) else None,
+        vectors: dict[str, Any] = {
+            SPARSE_VECTOR: sparse.document_vector(
+                sparse.source_text(
+                    [str(h) for h in payload.get("heading_path") or []],
+                    payload.get("content_type"),
+                    text,
+                    payload.get("summary") if isinstance(payload.get("summary"), str) else None,
+                )
             )
-        )
+        }
+        if dense:
+            vectors[DENSE_VECTOR] = list(dense)
         self.client.update_vectors(
             self.collection,
-            points=[models.PointVectors(id=point_id, vector={SPARSE_VECTOR: vector})],
+            points=[models.PointVectors(id=point_id, vector=vectors)],
             wait=True,
         )
 
-    def _supersede(self, op: Op) -> None:
+    async def _supersede(self, op: Op) -> None:
         points = self._matching(op, vectors=True)
         copies: list[models.PointStruct] = []
         for point in points:
@@ -169,6 +189,7 @@ class Scenario:
                 }
             )
             vectors = dict(point.vector or {})
+            vectors[DENSE_VECTOR] = await self._dense(text, vectors.get(DENSE_VECTOR))
             vectors[SPARSE_VECTOR] = sparse.document_vector(
                 sparse.source_text(
                     [str(h) for h in payload.get("heading_path") or []],
@@ -199,10 +220,13 @@ class Scenario:
             if kind == "reactivate":
                 self._set_effective_to(list(record["ids"]), None)
             elif kind == "restore_text":
+                dense_before = record.get("dense") or {}
                 for point_id, text in record["texts"].items():
                     found = self.client.retrieve(self.collection, ids=[point_id], with_payload=True)
                     if found:
-                        self._write_text(point_id, found[0].payload or {}, text)
+                        self._write_text(
+                            point_id, found[0].payload or {}, text, dense_before.get(point_id)
+                        )
             elif kind == "unsupersede":
                 self.client.delete(
                     self.collection,

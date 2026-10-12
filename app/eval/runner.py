@@ -33,10 +33,11 @@ from app.eval import checks, store
 from app.eval import constants as c
 from app.eval.cases import Case
 from app.eval.estimate import estimate_run
-from app.eval.guard import CostGuard, OverEstimate, check_confirmation
+from app.eval.guard import CostGuard, OverEstimate, check_confirmation, confirmation_expired
 from app.eval.judge import Judge
 from app.eval.judging import judge_item
 from app.eval.metrics import score_item
+from app.eval.notscored import NotScored
 from app.eval.scenarios import Scenario
 from app.pipeline.state import Request
 
@@ -75,13 +76,24 @@ class Harness:
         *,
         pace_seconds: float = 0.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        embed: Callable[[list[str]], Awaitable[list[list[float]]]] | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.db = db
         self.collection = c.check_eval_collection(collection)
         self.pace = pace_seconds
         self._sleep = sleep
-        self.scenario = Scenario(qdrant, self.collection, workdir / "scenario_journal.json")
+        # Where each model call of the system under test is counted, at the moment it is made
+        # (`bind_guard`): a span that ends is one call. None until a guard is bound.
+        self._sink: Callable[[str, int, int], None] | None = None
+        self._after_turn: Callable[[], None] | None = None
+        self._embed_raw = embed
+        self.scenario = Scenario(
+            qdrant,
+            self.collection,
+            workdir / "scenario_journal.json",
+            embed=self._counted_embed if embed is not None else None,
+        )
         self._users: dict[str, str] = {}
         self._captured: dict[str, tuple[Any, Any]] = {}
         previous = pipeline.deps.observer
@@ -92,6 +104,37 @@ class Harness:
                 previous(ctx, result)
 
         pipeline.deps.observer = observer
+        previous_span = pipeline.deps.on_span
+
+        def on_span(span: Any) -> None:
+            if previous_span is not None:
+                previous_span(span)
+            self._count_span(span)
+
+        pipeline.deps.on_span = on_span
+
+    def bind_guard(self, guard: Any) -> None:
+        """Count every call of the system under test on `guard` as it is made (never raising in
+        the middle of a turn) and let the guard stop the run between turns."""
+        self._sink = lambda who, n, t: guard.charge(requests=n, tokens=t, who=who, defer=True)
+        self._after_turn = guard.check
+
+    def _count_span(self, span: Any) -> None:
+        if self._sink is None:
+            return
+        tokens = int(getattr(span, "input_tokens", 0) or 0) + int(
+            getattr(span, "output_tokens", 0) or 0
+        )
+        if not (getattr(span, "model", None) or getattr(span, "provider", None) or tokens):
+            return
+        self._sink(_group_of(span), 1, tokens)
+
+    async def _counted_embed(self, texts: list[str]) -> list[list[float]]:
+        assert self._embed_raw is not None
+        vectors = await self._embed_raw(texts)
+        if self._sink is not None:
+            self._sink("embedding", 1, sum(len(t) // 4 + 1 for t in texts))
+        return vectors
 
     # ---- set-up -----------------------------------------------------------------------
     def recover(self) -> int:
@@ -122,7 +165,7 @@ class Harness:
             for index, text in enumerate(case.turns):
                 for op in case.setup:
                     if op.before_turn == index:
-                        self.scenario.apply(op)
+                        await self.scenario.apply(op)
                 request = Request(user_id=user, role=case.role, query=text, session_id=session_id)
                 started = time.perf_counter()
                 result = await self.pipeline.answer(request, self.db)
@@ -139,16 +182,34 @@ class Harness:
                     last = captured
                 else:
                     last = (None, result)
+                if self._after_turn is not None:
+                    self._after_turn()  # the cost guard may stop the run between turns
                 if self.pace:
                     await self._sleep(self.pace)
         finally:
             self.scenario.restore_all()
         ctx, result = last if last else (None, None)
         item = _item_from(ctx, result)
+        item["question_masked"] = self.masked_question(case, ctx)
         item["tokens"] = tokens
         item["latency_ms"] = round(latency_ms, 1)
         item["usage"] = usage
         return item
+
+    def masked_question(self, case: Case, ctx: Any) -> str:
+        """The question as the SAME masking function that makes a stored transcript makes it, for
+        every judge, Jev and RAGAS call (CLAUDE.md: masking happens before any model call). The
+        made-up identifiers of the PII cases never leave this machine unmasked."""
+        from app.guardrails.allowlist import AllowList
+        from app.guardrails.scan import mask_for_storage
+
+        masker = getattr(self.pipeline.deps.masker, "masker", None)
+        if masker is None:
+            raise NotScored("masker_unavailable")
+        allow = getattr(ctx, "allow", None) or AllowList()
+        return mask_for_storage(
+            case.question, masker=masker, allow=allow, doc_ids=set(case.source_docs)
+        ).text
 
     async def _settle(self, result: Any) -> None:
         """Wait until the transcript write of this turn has ended on the scratch database."""
@@ -253,6 +314,7 @@ def prepare_run(
     created_by: str,
     corpus_version: str | None = None,
     judged: bool = True,
+    now: datetime | None = None,
 ) -> tuple[str, dict[str, Any], str]:
     """Create a run in the 'estimated' state: nothing is called. Returns (run id, the estimate,
     the confirmation code the owner must give to start it)."""
@@ -272,6 +334,7 @@ def prepare_run(
         case_ids=[cid for batch in batches for cid in batch],
         batches=max(len(batches), 1),
         created_by=created_by,
+        now=now,
     )
     return run_id, estimate, code
 
@@ -286,15 +349,23 @@ def day_room_problem(
 ) -> str | None:
     """None when the current batch fits what is left of today's free-tier limits (what every run
     already used today counted), else a plain sentence saying which group would be passed."""
-    from app.eval.estimate import Need, case_need, daily_limits
+    from app.eval.estimate import Need, case_need
 
-    limits = daily_limits(config)
-    used = store.usage_for_day(eval_db, now.strftime("%Y-%m-%d"))
     need = Need()
     judged = bool(run["estimate"].get("judged", True))
     for case_id in current_batch(run):
         if case_id in cases:
             need.merge(case_need(cases[case_id], judged=judged))
+    return room_problem(eval_db, need, config, now=now)
+
+
+def room_problem(eval_db: Database, need: Any, config: Any, *, now: datetime) -> str | None:
+    """None when `need` fits what is left of today's free-tier limits: what EVERY run, calibration
+    and sample judging already used today counted (also the groups shared with production)."""
+    from app.eval.estimate import daily_limits
+
+    limits = daily_limits(config)
+    used = store.usage_for_day(eval_db, now.strftime("%Y-%m-%d"))
     for who in set(need.requests) | set(need.tokens):
         taken_r, taken_t = used.get(who, (0, 0))
         cap_r, cap_t = limits.requests.get(who), limits.tokens.get(who)
@@ -313,9 +384,17 @@ def start_run(
     cases: dict[str, Case] | None = None,
     config: Any = None,
     now: datetime | None = None,
+    claim_status: str = c.RUN_RUNNING,
+    take_over_starting: bool = False,
 ) -> dict[str, Any]:
-    """Check the confirmation code and the day's room, then mark the run as running. Raises
-    `NotConfirmed` (nothing is called) or `EvalConfigError`."""
+    """Check the confirmation code, its age and the day's room, then take the run for this one
+    process, atomically (`RunBusy` when another process holds it). The code belongs to its own
+    estimate and starts the run only within `CONFIRMATION_MINUTES` of that estimate; a run that
+    was already confirmed continues its own later batches under it. Raises `NotConfirmed` (nothing
+    is called), `ConfirmationExpired`, `RunBusy` or `EvalConfigError`.
+
+    `claim_status` is `starting` when the page starts the run (the process it spawns then takes
+    the run over with `take_over_starting`)."""
     run = store.get_run(eval_db, run_id)
     if run is None:
         raise c.EvalConfigError("no such run")
@@ -325,15 +404,36 @@ def start_run(
         given_code, run["estimate"], kind=run["kind"], dataset_version=run["dataset_version"]
     )
     moment = now or datetime.now(UTC)
+    if confirmation_expired(run["created_at"], run.get("confirmed_at"), moment):
+        raise ConfirmationExpired(
+            f"the confirmation code is valid for {c.CONFIRMATION_MINUTES} minutes from its "
+            "estimate: make a new estimate"
+        )
     if cases is not None and config is not None:
         problem = day_room_problem(eval_db, run, cases, config, now=moment)
         if problem:
             raise c.EvalConfigError(problem)
-    fields: dict[str, Any] = {"status": c.RUN_RUNNING, "started_at": moment}
+    claimed = store.claim_run(
+        eval_db,
+        run_id,
+        now=moment,
+        stale_minutes=c.HEARTBEAT_STALE_MINUTES,
+        status=claim_status,
+        take_over_starting=take_over_starting,
+    )
+    if not claimed:
+        raise RunBusy("this run is already running; wait for it or for its heartbeat to go stale")
     if run.get("confirmed_at") is None:
-        fields["confirmed_at"] = moment
-    store.update_run(eval_db, run_id, **fields)
+        store.update_run(eval_db, run_id, confirmed_at=moment)
     return run
+
+
+class ConfirmationExpired(c.EvalConfigError):
+    """The code is older than its window."""
+
+
+class RunBusy(c.EvalConfigError):
+    """Another process holds the run."""
 
 
 @dataclass
@@ -366,6 +466,21 @@ class RunExecutor:
         self.run_id = run_id
         self.lines = lines or []
         self._now = now
+        # every call, at the moment it is counted, becomes today's usage row and the run's totals
+        guard.on_charge = self._persist_charge
+        harness.bind_guard(guard)
+
+    def _persist_charge(self, who: str, requests: int, tokens: int) -> None:
+        moment = self._now()
+        store.add_usage(
+            self.db, self.run_id, moment.strftime("%Y-%m-%d"), who,
+            requests=requests, tokens=tokens,
+        )  # fmt: skip
+        store.update_run(
+            self.db, self.run_id,
+            tokens_used=self.guard.tokens, requests_used=self.guard.requests,
+            heartbeat_at=moment,
+        )  # fmt: skip
 
     async def run_batch(self, case_ids: list[str]) -> RunOutcome:
         """Work through the given cases (the current batch) that are still pending."""
@@ -378,10 +493,7 @@ class RunExecutor:
         try:
             for case_id in todo:
                 case = self.cases[case_id]
-                before = {who: list(row) for who, row in self.guard.usage.items()}
                 item = await self.harness.run_case(case)
-                for who, (n, t) in (item.get("usage") or {}).items():
-                    self.guard.charge(requests=n, tokens=t, who=who)
                 store.save_item(
                     self.db,
                     self.run_id,
@@ -408,7 +520,6 @@ class RunExecutor:
                     )  # fmt: skip
                 if self.judge is not None:
                     await self._judge(case, item)
-                self._record_usage(before)
                 finished += 1
                 store.update_run(
                     self.db, self.run_id,
@@ -428,20 +539,10 @@ class RunExecutor:
             )
         return self._close_batch(finished)
 
-    def _record_usage(self, before: dict[str, list[int]]) -> None:
-        """Write what this case used, by provider group, to today's usage rows."""
-        day = self._now().strftime("%Y-%m-%d")
-        for who, (requests, tokens) in self.guard.usage.items():
-            was = before.get(who, [0, 0])
-            if requests - was[0] or tokens - was[1]:
-                store.add_usage(
-                    self.db, self.run_id, day, who,
-                    requests=requests - was[0], tokens=tokens - was[1],
-                )  # fmt: skip
-
     async def _judge(self, case: Case, item: dict[str, Any]) -> None:
         assert self.judge is not None
-        for score in await judge_item(item, question=case.question, judge=self.judge, case=case):
+        question = item.get("question_masked") or ""
+        for score in await judge_item(item, question=question, judge=self.judge, case=case):
             store.save_result(
                 self.db, self.run_id, case.id, score.metric,
                 score=score.value, decider=score.decider, detail=score.detail,

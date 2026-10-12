@@ -160,3 +160,40 @@ def test_the_value_is_the_pilot_one_and_the_purge_is_not_called_by_the_service()
             ):
                 called_from.append(str(path.relative_to(ROOT)))
     assert called_from == []  # owner-run only, never automatic
+
+
+def _eval_stub(monkeypatch, result):
+    def fake(now, *, dry_run):
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(retention, "_purge_eval_samples", fake)
+
+
+def test_a_failing_sample_purge_never_hides_or_undoes_the_main_parts(
+    db, tmp_path, monkeypatch, capsys
+):
+    audit_at(db, 45)
+    db.raw.commit()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'r.db'}")
+    monkeypatch.delenv("LANGFUSE_USER_HASH_KEY", raising=False)
+    _eval_stub(monkeypatch, RuntimeError("postgresql://user:pw@host/db is down"))
+    assert retention.main([], now=NOW) == 0
+    out = capsys.readouterr().out
+    assert "1 audit rows" in out, "the audit sweep ran first and is reported"
+    assert "evaluation samples: not purged (RuntimeError)" in out
+    assert "postgresql" not in out and "pw@host" not in out
+    assert counts(db)[0] == 1  # only the purge's own audit row is left
+
+
+def test_the_sample_purge_writes_its_own_audit_row_of_counts(db, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'r.db'}")
+    monkeypatch.delenv("LANGFUSE_USER_HASH_KEY", raising=False)
+    _eval_stub(monkeypatch, 3)
+    assert retention.main([], now=NOW) == 0
+    assert "deleted 3 masked evaluation samples" in capsys.readouterr().out
+    row = db.query_one(
+        "SELECT target, details FROM audit_log WHERE action = 'audit_purge' ORDER BY created_at"
+    )
+    assert row[0] == "eval_samples" and '"eval_samples": 3' in row[1]

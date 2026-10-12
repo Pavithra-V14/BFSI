@@ -191,10 +191,16 @@ def test_labelling_uses_a_fixed_list_and_writes_an_audit_row(env, admin):
     )
     assert response.status_code == 200
     row = env.rows("SELECT status, label, labelled_by FROM review_queue WHERE id = ?", (item,))[0]
-    assert row == ("added_to_eval", "should_have_answered", admin_id)
+    # no evaluation database is set up here: the item is labelled, NOT marked as added
+    assert row == ("labelled", "should_have_answered", admin_id)
+    assert response.json()["status"] == "labelled"
     audit = env.rows("SELECT actor, details FROM audit_log WHERE action = 'review_label'")
     assert audit and audit[0][0] == admin_id
-    assert json.loads(audit[0][1]) == {"label": "should_have_answered", "status": "added_to_eval"}
+    assert json.loads(audit[0][1]) == {
+        "label": "should_have_answered",
+        "status": "labelled",
+        "evaluation_candidate": "no_evaluation_database",
+    }
 
 
 @pytest.mark.parametrize(

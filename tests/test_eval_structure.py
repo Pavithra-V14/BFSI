@@ -185,3 +185,17 @@ def test_the_ci_evaluation_job_is_alert_only_and_has_no_key():
     block = text[text.index("evaluation-core:") :]
     assert "secrets." not in block and "API_KEY" not in block and "EVAL_" not in block
     assert "stubbed_model" in block
+
+
+def test_the_ci_job_selects_at_least_one_test_so_it_cannot_pass_by_running_none():
+    """A renamed test would otherwise leave the alert-only job selecting nothing."""
+    import re
+
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
+    block = text[text.index("evaluation-core:") :]
+    match = re.search(r"pytest (tests/\S+\.py) -k (\S+)", block)
+    assert match, "the job runs one file with a -k selection"
+    source = (ROOT / match.group(1)).read_text("utf-8")
+    pattern = r"^(?:async )?def (test_\w*" + re.escape(match.group(2)) + r"\w*)\("
+    assert re.findall(pattern, source, re.M), "the CI selection matches no test"
+    assert "--co" not in block and "|| true" not in block  # a zero-test run must fail the step

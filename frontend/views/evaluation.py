@@ -34,6 +34,15 @@ VERDICT_WORDS = {
 }
 
 
+def _float(value: Any, default: float = 0.0) -> float:
+    """A number from an API value; a missing, odd or non-finite one is `default`, never a crash."""
+    try:
+        number_ = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number_ if number_ == number_ and abs(number_) != float("inf") else default
+
+
 def _pct(value: Any) -> str:
     try:
         return f"{float(value) * 100:.1f} %"
@@ -42,7 +51,7 @@ def _pct(value: Any) -> str:
 
 
 def _chart(rows: list[dict[str, Any]], x: str, y: str) -> None:
-    clean = [{x: render.safe_text(r.get(x)), y: float(r.get(y) or 0)} for r in rows]
+    clean = [{x: render.safe_text(r.get(x)), y: _float(r.get(y))} for r in rows]
     if clean and any(r[y] for r in clean):
         st.bar_chart(clean, x=x, y=y)
 
@@ -124,7 +133,7 @@ def _quality(data: dict[str, Any]) -> None:
         ]
     )
     points = [
-        {"when": render.safe_text(r.get("at")), "score": float(r["golden_score"])}
+        {"when": render.safe_text(r.get("at")), "score": _float(r.get("golden_score"))}
         for r in series
         if r.get("golden_score") is not None
     ]
@@ -288,7 +297,7 @@ def _estimate_table(estimate: dict[str, Any], batches: Any) -> None:
             "This does not fit one day: it is split into resumable batches, one a day, "
             "each started with the same code."
         )
-    margin = float(estimate.get("margin") or 0.25) * 100
+    margin = _float(estimate.get("margin"), 0.25) * 100
     render.caption(f"The run stops by itself when it uses more than {margin:.0f} % over this.")
 
 

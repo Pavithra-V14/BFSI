@@ -20,14 +20,17 @@ def test_the_band_is_two_standard_deviations_of_the_runs():
 
 
 def test_the_standard_deviation_is_the_sample_one():
-    assert variance.band([1.0, 3.0])["sd"] == pytest.approx(math.sqrt(2))
+    assert variance.band([1.0, 3.0, 5.0])["sd"] == pytest.approx(2.0)
+    assert variance.band([1.0, 2.0, 4.0, 5.0])["sd"] == pytest.approx(math.sqrt(10 / 3))
 
 
-def test_a_band_needs_two_runs():
-    for scores in ([], [0.9]):
+def test_a_band_needs_three_runs():
+    for scores in ([], [0.9], [0.9, 0.8]):
         band = variance.band(scores)
         assert band["width"] is None and band["low"] is None
     assert variance.band([0.9])["mean"] == 0.9
+    assert variance.band([0.9, 0.8])["n"] == 2 and variance.band([0.9, 0.8])["sd"] is None
+    assert variance.verdict(0.5, variance.band([0.9, 0.8])) == "no_band"
 
 
 def test_identical_runs_give_a_zero_width_band_so_any_move_is_a_change():
@@ -47,7 +50,8 @@ def test_inside_the_band_is_noise_and_outside_is_a_change():
 
 
 def test_not_a_number_scores_are_left_out_of_the_band():
-    assert variance.band([0.8, float("nan"), 0.9])["n"] == 2
+    assert variance.band([0.8, float("nan"), 0.9, 0.85])["n"] == 3
+    assert variance.band([0.8, float("nan"), 0.9])["width"] is None  # only two real scores
 
 
 def test_the_set_and_the_system_changing_together_is_flagged():
@@ -223,3 +227,39 @@ def test_a_drift_report_is_saved_and_listed_newest_first(tmp_path):
     assert [d["measures"]["n"] for d in listed] == [7, 14, 21]
     assert store.list_drift(db, "local") == []
     db.close()
+
+
+def test_a_sample_exactly_thirty_days_old_is_kept_and_one_second_older_is_purged(tmp_path):
+    url = store.sqlite_url(tmp_path / "e.db")
+    migrate(url, store.MIGRATIONS, log=lambda line: None)
+    db = store.open_db(url)
+    row = {"role": "customer", "result_kind": "answer", "question": "q", "answer": "a"}
+    store.insert_sample(db, row, now=END - timedelta(days=30))
+    store.insert_sample(db, row, now=END - timedelta(days=30, seconds=1))
+    assert store.purge_samples(db, now=END) == 1
+    assert store.count_samples(db) == 1
+    db.close()
+
+
+def _drift_week(**extra):
+    return [sample(**extra) for _ in range(30)]
+
+
+@pytest.mark.parametrize(
+    ("measure", "changed"),
+    [
+        ("corpus", {"corpus_version": "2"}),
+        ("refusal_reason", {"reason": "unclear"}),
+        ("length", {"question": "word " * 80}),
+        ("confidence", {"confidence": "low"}),
+        ("reduced_mode", {"degraded": ["rerank"]}),
+    ],
+)
+def test_each_distribution_measure_alerts_when_its_input_shifts(measure, changed):
+    report = drift.drift_report(
+        _drift_week(**changed),
+        _drift_week(),
+        window=(END - timedelta(days=7), END),
+        baseline_window=(END - timedelta(days=35), END - timedelta(days=7)),
+    )
+    assert f"{measure}_shift" in report["alerts"], report["measures"][measure]

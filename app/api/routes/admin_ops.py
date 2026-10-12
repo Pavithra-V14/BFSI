@@ -172,6 +172,32 @@ class LabelBody(BaseModel):
     status: Literal["labelled", "added_to_eval", "dismissed"] = "labelled"
 
 
+def _masked_again(request: Request, candidate: Any) -> Any:
+    """The candidate with its question masked once more by the application's own masker (the
+    review item holds the already-masked transcript text, so this changes nothing in the normal
+    case; it is the second lock that keeps an identifier out of the evaluation database). None
+    when the masker exists but is not ready. A deployment with no chat pipeline has no masker;
+    the text is then the stored, masked copy."""
+    import dataclasses
+
+    pipeline = getattr(services(request), "pipeline", None)
+    if pipeline is None:
+        return candidate
+    holder = pipeline.deps.masker
+    if not getattr(holder, "ready", False):
+        return None
+    from app.guardrails.allowlist import AllowList
+    from app.guardrails.scan import mask_for_storage
+
+    turns = tuple(
+        mask_for_storage(
+            text, masker=holder.masker, allow=AllowList(), doc_ids=set(candidate.source_docs)
+        ).text
+        for text in candidate.turns
+    )
+    return dataclasses.replace(candidate, turns=turns)
+
+
 def _add_evaluation_candidate(
     request: Request, db: Database, item_id: str, label: str, now: datetime
 ) -> str:
@@ -190,6 +216,9 @@ def _add_evaluation_candidate(
         candidate = candidate_from_review(item, label) if item is not None else None
         if candidate is None:
             return "not_added"
+        candidate = _masked_again(request, candidate)
+        if candidate is None:
+            return "failed"  # the masker is not ready: nothing is written (fail closed)
         target = "production" if "production" in environments else "local"
         eval_db = access.database(target)
         if eval_db is None:
@@ -216,30 +245,40 @@ def label_review_item(
     if not is_uuid(item_id):
         raise _not_found()
     now = datetime.now(UTC)
+    status = body.status
+    outcome: str | None = None
+    if status == "added_to_eval":
+        # The candidate is made FIRST, and the item is marked "added to evaluation" only when it
+        # really is in the evaluation set (added, or already there). Any other outcome leaves the
+        # item merely "labelled", so the queue never says "added" about something that is not.
+        outcome = _add_evaluation_candidate(request, db, item_id, body.label, now)
+        if outcome not in ("added", "already_added"):
+            status = "labelled"
     with db.transaction(write=True):
         found = review_queue.label_item(
             db,
             item_id=item_id,
             label=body.label,
-            status=body.status,
+            status=status,
             user_id=current.user.id,
             now=now,
         )
         if not found:
             raise _not_found()
+        details = {"label": body.label, "status": status}
+        if outcome is not None:
+            details["evaluation_candidate"] = outcome
         audit.write_audit(
             db,
             actor=current.user.id,
             action="review_label",
             target=item_id,
-            details={"label": body.label, "status": body.status},
+            details=details,
             now=now,
         )
-    reply = {"id": item_id, "label": body.label, "status": body.status}
-    if body.status == "added_to_eval":
-        reply["evaluation_candidate"] = _add_evaluation_candidate(
-            request, db, item_id, body.label, now
-        )
+    reply = {"id": item_id, "label": body.label, "status": status}
+    if outcome is not None:
+        reply["evaluation_candidate"] = outcome
     return reply
 
 

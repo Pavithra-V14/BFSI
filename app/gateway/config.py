@@ -243,7 +243,14 @@ def judge_model_problem(judge: str | None, answer_models: Mapping[str, str]) -> 
     if not judge:
         return None
     family = model_family(judge)
-    for name in ("GROQ_MODEL", "GEMINI_MODEL", "OPENROUTER_MODEL"):
+    for name in (
+        "GROQ_MODEL",
+        "GEMINI_MODEL",
+        "OPENROUTER_MODEL",
+        "GROQ_DECIDE_MODEL",
+        "GEMINI_DECIDE_MODEL",
+        "OPENROUTER_DECIDE_MODEL",
+    ):
         model = answer_models.get(name)
         if model and model_family(model) == family:
             return name

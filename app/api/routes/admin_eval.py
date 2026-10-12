@@ -26,7 +26,7 @@ from app.db.connection import Database
 from app.eval import constants as c
 from app.eval import dashboard, store
 from app.eval.access import EvalAccess
-from app.eval.guard import NotConfirmed, check_confirmation
+from app.eval.guard import NotConfirmed, check_confirmation, confirmation_expired
 
 router = APIRouter(prefix="/admin/evaluation", tags=["admin"])
 
@@ -193,8 +193,8 @@ def start(
         local.close()
     if run is None:
         raise ApiError(404, "not_found", "No such run.")
-    if run["status"] in (c.RUN_FINISHED, c.RUN_ABORTED, c.RUN_RUNNING):
-        raise ApiError(409, "run_not_startable", "This run has already ended or is running.")
+    if run["status"] in (c.RUN_FINISHED, c.RUN_ABORTED):
+        raise ApiError(409, "run_not_startable", "This run has already ended.")
     try:
         check_confirmation(
             body.confirm_code,
@@ -206,6 +206,29 @@ def start(
         raise ApiError(
             409, "confirmation_mismatch", "That code does not match this run's estimate."
         ) from None
+    moment = datetime.now(UTC)
+    if confirmation_expired(run["created_at"], run.get("confirmed_at"), moment):
+        raise ApiError(
+            409,
+            "confirmation_expired",
+            f"That code is older than {c.CONFIRMATION_MINUTES} minutes. Make a new estimate.",
+        )
+    # One atomic step takes the run for this start: a second press, or a second tab, finds the
+    # run taken and starts nothing (a run that crashed becomes free again after its heartbeat
+    # has been silent for HEARTBEAT_STALE_MINUTES).
+    local = _database(access, "local")
+    try:
+        taken = store.claim_run(
+            local,
+            run_id,
+            now=moment,
+            stale_minutes=c.HEARTBEAT_STALE_MINUTES,
+            status=c.RUN_STARTING,
+        )
+    finally:
+        local.close()
+    if not taken:
+        raise ApiError(409, "run_busy", "This run is already running or starting.")
     with db.transaction(write=True):
         audit.write_audit(
             db,
@@ -216,7 +239,15 @@ def start(
             now=datetime.now(UTC),
         )
     try:
-        access.starter(["run", run_id, "--confirm", body.confirm_code.strip().upper()])
+        access.starter(
+            ["run", run_id, "--confirm", body.confirm_code.strip().upper(), "--from-page"]
+        )
     except OSError:
+        local = _database(access, "local")
+        try:  # the process never started: give the run back
+            back = c.RUN_PAUSED if run.get("confirmed_at") else c.RUN_ESTIMATED
+            store.update_run(local, run_id, status=back)
+        finally:
+            local.close()
         raise ApiError(503, "service_unavailable", "The run could not be started here.") from None
     return {"run_id": run_id, "status": "starting"}

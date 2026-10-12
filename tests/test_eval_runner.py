@@ -59,6 +59,10 @@ def eval_db(tmp_path):
     db.close()
 
 
+def apply(scenario, op):
+    asyncio.run(scenario.apply(op))
+
+
 def run_case(rig, case_id):
     case = rig.case(case_id)
     return case, asyncio.run(rig.harness.run_case(case))
@@ -142,7 +146,7 @@ def snapshot_of(rig):
 def test_a_withdrawn_document_is_inactive_and_comes_back(rig):
     before = snapshot_of(rig)
     scenario = Scenario(rig.qdrant, COLLECTION, rig.tmp_path / "j.json")
-    scenario.apply(Op("withdraw_document", MF))
+    apply(scenario, Op("withdraw_document", MF))
     assert all(p.payload["effective_to"] for p in points_of(rig, MF))
     assert all(not p.payload["effective_to"] for p in points_of(rig, INS))  # only that document
     assert scenario.restore_all() == 1
@@ -152,7 +156,7 @@ def test_a_withdrawn_document_is_inactive_and_comes_back(rig):
 def test_an_edit_changes_the_text_and_the_lexical_vector_and_is_undone(rig):
     before = snapshot_of(rig)
     scenario = Scenario(rig.qdrant, COLLECTION, rig.tmp_path / "j.json")
-    scenario.apply(Op("edit_text", MF, anchor="Stamp duty of 0.005", old="0.005", new="0.010"))
+    apply(scenario, Op("edit_text", MF, anchor="Stamp duty of 0.005", old="0.005", new="0.010"))
     texts = [p.payload["text"] for p in points_of(rig, MF)]
     assert any("0.010 per cent" in t for t in texts) and not any(
         "0.005 per cent" in t for t in texts
@@ -164,8 +168,9 @@ def test_an_edit_changes_the_text_and_the_lexical_vector_and_is_undone(rig):
 def test_a_superseding_version_adds_a_newer_point_and_retires_the_old_one(rig):
     before = snapshot_of(rig)
     scenario = Scenario(rig.qdrant, COLLECTION, rig.tmp_path / "j.json")
-    scenario.apply(
-        Op("supersede_text", MF, anchor="taxed at 12.5 per cent", old="12.5", new="13.0")
+    apply(
+        scenario,
+        Op("supersede_text", MF, anchor="taxed at 12.5 per cent", old="12.5", new="13.0"),
     )
     points = points_of(rig, MF)
     active = [p for p in points if not p.payload["effective_to"]]
@@ -195,8 +200,8 @@ def test_changes_left_by_a_crash_are_restored_from_the_journal(rig):
     before = snapshot_of(rig)
     journal = rig.tmp_path / "crash.json"
     first = Scenario(rig.qdrant, COLLECTION, journal)
-    first.apply(Op("withdraw_document", INS))
-    first.apply(Op("edit_text", MF, anchor="Stamp duty of 0.005", old="0.005", new="0.010"))
+    apply(first, Op("withdraw_document", INS))
+    apply(first, Op("edit_text", MF, anchor="Stamp duty of 0.005", old="0.005", new="0.010"))
     assert journal.is_file() and snapshot_of(rig) != before
     # the process "dies": a new one finds the journal and puts everything back
     second = Scenario(rig.qdrant, COLLECTION, journal)
@@ -213,9 +218,9 @@ def test_a_scenario_refuses_the_production_collection(rig):
 def test_a_scenario_names_what_it_cannot_find(rig):
     scenario = Scenario(rig.qdrant, COLLECTION, rig.tmp_path / "j.json")
     with pytest.raises(ScenarioError):
-        scenario.apply(Op("withdraw_document", "no-such-document"))
+        apply(scenario, Op("withdraw_document", "no-such-document"))
     with pytest.raises(ScenarioError):
-        scenario.apply(Op("edit_text", MF, anchor="a phrase that is not there", old="a", new="b"))
+        apply(scenario, Op("edit_text", MF, anchor="a phrase that is not there", old="a", new="b"))
 
 
 def test_the_edit_case_sees_the_new_text_and_the_collection_is_whole_after(rig):
@@ -240,7 +245,8 @@ def prepared(rig, eval_db, case_ids, **kwargs):
     cases = [x for x in rig.cases if x.id in case_ids]
     run_id, estimate, code = prepare_run(
         eval_db, cases=cases, kind="active", environment="local",
-        dataset_version=rig.version, config=config(), created_by="test", judged=False, **kwargs,
+        dataset_version=rig.version, config=config(), created_by="test", judged=False, now=NOW,
+        **kwargs,
     )  # fmt: skip
     return run_id, estimate, code
 
@@ -343,7 +349,7 @@ def test_a_run_that_does_not_fit_a_day_pauses_after_a_batch_and_resumes(rig, eva
     tight = config(eval_openrouter_keys=["j" * 12])  # 50 judge requests a day
     run_id, estimate, code = prepare_run(
         eval_db, cases=cases, kind="active", environment="local",
-        dataset_version=rig.version, config=tight, created_by="test", judged=True,
+        dataset_version=rig.version, config=tight, created_by="test", judged=True, now=NOW,
     )  # fmt: skip
     assert len(estimate["batches"]) >= 2
     start_run(eval_db, run_id, code, now=NOW)
@@ -376,7 +382,7 @@ def test_the_active_set_runs_end_to_end_on_the_stubbed_model(rig, eval_db):
     active = [x for x in rig.cases if x.active]
     run_id, _estimate, code = prepare_run(
         eval_db, cases=active, kind="active", environment="local",
-        dataset_version=rig.version, config=config(), created_by="ci", judged=False,
+        dataset_version=rig.version, config=config(), created_by="ci", judged=False, now=NOW,
     )  # fmt: skip
     start_run(eval_db, run_id, code, now=NOW)
     before = rig.snapshot()

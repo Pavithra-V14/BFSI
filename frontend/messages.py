@@ -127,6 +127,13 @@ CANDIDATE_TEXT = {
     "no_evaluation_database": "The label was saved; no evaluation database is set up here.",
     "failed": "The label was saved; the candidate could not be written.",
 }
+CANDIDATE_TITLE = {
+    "added": "Added to the evaluation set",
+    "already_added": "Already in the evaluation set",
+    "not_added": "Label saved, not added",
+    "no_evaluation_database": "Label saved, not added",
+    "failed": "Label saved, not added",
+}
 STAGE_TEXT = {
     "shadow": "Shadow: only admins see answers",
     "staff_beta": "Staff beta: admins and staff see answers",

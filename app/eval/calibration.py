@@ -12,6 +12,7 @@ for or against.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -36,11 +37,18 @@ def agreement(pairs: Sequence[tuple[bool | None, bool]]) -> tuple[float | None, 
 
 
 def trusted(
-    jev_agreement: float | None, items: int, threshold: float = c.CALIBRATION_THRESHOLD
+    jev_agreement: float | None,
+    items: int,
+    counted: int | None = None,
+    threshold: float = c.CALIBRATION_THRESHOLD,
 ) -> bool:
-    """Jev is trusted for a metric only with enough counted verdicts and agreement at or above
-    the threshold."""
-    return jev_agreement is not None and items >= 5 and jev_agreement >= threshold
+    """Jev is trusted for a metric only when (a) at least five sixths of its `items` produced a
+    verdict from Jev itself (`counted`; an outage is a miss, so a Jev that is down half the time
+    is not trusted) and (b) its verdicts agree with the hand labels at or above the threshold.
+    With `counted` left out, all items are taken as counted."""
+    counted = items if counted is None else counted
+    needed = max(5, math.ceil(items * c.MIN_COUNTED_SHARE - 1e-9))
+    return jev_agreement is not None and counted >= needed and jev_agreement >= threshold
 
 
 def calibration_estimate(items: Sequence[CalibrationItem], config: Any) -> dict[str, Any]:
@@ -89,9 +97,14 @@ async def run_calibration(
     guard: CostGuard | None = None,
     threshold: float = c.CALIBRATION_THRESHOLD,
 ) -> dict[str, dict[str, Any]]:
-    """Put every item to the judge model alone and to Jev alone; returns per-metric figures."""
+    """Put every item to the judge model alone and to Jev alone; returns per-metric figures. The
+    model names are in the figures: a later change of either model makes the figures not count
+    (`trusted_metrics`)."""
     from app.eval.judge import VERDICT_TEXT
 
+    config = getattr(gateway, "config", None)
+    jev_model = (getattr(config, "models", None) or {}).get("JEV_MODEL")
+    judge_model = getattr(config, "eval_judge_model", None)
     judge_only = Judge(gateway, guard=guard, trusted={})
     jev_only = Judge(gateway, guard=guard, trusted={metric: True for metric in VERDICT_TEXT})
     verdicts: dict[str, dict[str, list[tuple[bool | None, bool]]]] = defaultdict(
@@ -119,14 +132,24 @@ async def run_calibration(
     for metric, parts in verdicts.items():
         judge_agree, judge_n = agreement(parts["judge"])
         jev_agree, jev_n = agreement(parts["jev"])
+        # Jev against the judge, on the items both answered: for information only
+        both = [
+            (j, v)
+            for (j, _), (v, _) in zip(parts["judge"], parts["jev"], strict=True)
+            if j is not None and v is not None
+        ]
+        between = sum(1 for j, v in both if j == v) / len(both) if both else None
         out[metric] = {
             "items": len(parts["judge"]),
             "judge_agreement": judge_agree,
             "judge_counted": judge_n,
             "jev_agreement": jev_agree,
             "jev_counted": jev_n,
+            "jev_judge_agreement": between,
+            "jev_model": jev_model,
+            "judge_model": judge_model,
             "threshold": threshold,
-            "trusted": trusted(jev_agree, jev_n, threshold),
+            "trusted": trusted(jev_agree, len(parts["jev"]), jev_n, threshold),
         }
     return out
 
@@ -143,10 +166,22 @@ def save(
             jev_agreement=row["jev_agreement"],
             threshold=float(row["threshold"]),
             trusted=bool(row["trusted"]),
+            counted=int(row.get("jev_counted") or 0),
+            jev_judge_agreement=row.get("jev_judge_agreement"),
+            jev_model=row.get("jev_model"),
+            judge_model=row.get("judge_model"),
             now=now,
         )
 
 
-def trusted_metrics(db: Database) -> dict[str, bool]:
-    """The metrics Jev may decide, from the stored calibration (empty: none)."""
-    return {metric: bool(row["trusted"]) for metric, row in store.get_calibration(db).items()}
+def trusted_metrics(
+    db: Database, *, jev_model: str | None = None, judge_model: str | None = None
+) -> dict[str, bool]:
+    """The metrics Jev may decide, from the stored calibration (empty: none). A row counts only
+    when it was made with the Jev model and the judge model that are configured now: a changed
+    model has not been calibrated, so its metrics go back to the judge model."""
+    out: dict[str, bool] = {}
+    for metric, row in store.get_calibration(db).items():
+        same = row.get("jev_model") == jev_model and row.get("judge_model") == judge_model
+        out[metric] = bool(row["trusted"]) and same
+    return out

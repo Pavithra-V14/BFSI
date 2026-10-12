@@ -20,6 +20,8 @@ import os
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from app.eval.notscored import NotScored
+
 os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")  # no usage report leaves this machine
 
 from langchain_core.embeddings import Embeddings  # noqa: E402,F401
@@ -115,9 +117,11 @@ async def score_sample(
     llm: GatewayLLM,
     embeddings: GatewayEmbeddings,
     metrics: Sequence[str] | None = None,
+    reasons: dict[str, str] | None = None,
 ) -> dict[str, float | None]:
     """The named metrics for one answered question. A metric that needs a reference is skipped
-    (absent from the result) when none is given."""
+    (absent from the result) when none is given. When `reasons` is given, a metric that could not
+    be computed gets its reason there (the judge's own reason when it was a judge outage)."""
     wanted = list(metrics or METRICS)
     sample = SingleTurnSample(
         user_input=question,
@@ -134,8 +138,15 @@ async def score_sample(
             continue
         try:
             value = await _metric(name, llm, embeddings).single_turn_ascore(sample)
-        except Exception:  # an unreadable output, a judge that is down: "not scored"
+        except NotScored as error:  # the judge is down or unset: its reason is kept
             out[name] = None
+            if reasons is not None:
+                reasons[name] = error.reason
+            continue
+        except Exception:  # an unreadable output: "not scored"
+            out[name] = None
+            if reasons is not None:
+                reasons[name] = "unreadable_output"
             continue
         out[name] = (
             None

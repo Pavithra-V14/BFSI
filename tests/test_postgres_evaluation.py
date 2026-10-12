@@ -188,3 +188,64 @@ def test_drift_snapshots_and_calibration_rows(db):
         now=NOW,
     )
     assert store.get_calibration(db)["claim_supported"]["trusted"] is False
+
+
+def test_runs_are_listed_newest_first_and_filtered_by_environment(db):
+    first = make_run(db, now=NOW - timedelta(days=2))
+    second = make_run(db, now=NOW - timedelta(days=1))
+    other = make_run(db, environment="local", now=NOW)
+    assert [r["id"] for r in store.list_runs(db, environment="production")] == [second, first]
+    assert [r["id"] for r in store.list_runs(db, environment="local")] == [other]
+    assert len(store.list_runs(db, limit=2)) == 2
+
+
+def test_the_items_of_a_run_come_back_with_their_saved_fields(db):
+    run_id = make_run(db)
+    store.save_item(
+        db, run_id, "a", status="done", answer_kind="answer", answer_text="t",
+        chunk_ids=["c"], contexts=["p"], models=["m"], cheap_checks={"cited_idx": [0]},
+        tokens=5, latency_ms=2.5,
+    )  # fmt: skip
+    items = {i["case_id"]: i for i in store.get_items(db, run_id)}
+    assert items["a"]["status"] == "done" and items["a"]["contexts"] == ["p"]
+    assert items["a"]["cheap_checks"] == {"cited_idx": [0]} and items["a"]["tokens"] == 5
+    assert items["b"]["status"] == "pending"
+
+
+def test_a_candidate_is_found_by_its_review_item_and_listed_apart_from_the_set(db):
+    from app.eval.candidates import candidate_from_review
+
+    item = type("I", (), {"id": uuid.uuid4(), "kind": "refused", "doc_id": None,
+                          "details": {"question": "What is the waiting period?"}})()  # fmt: skip
+    candidate = candidate_from_review(item, "should_have_answered")
+    assert store.candidate_exists(db, str(item.id)) is False
+    store.upsert_case(db, candidate, now=NOW)
+    assert store.candidate_exists(db, str(item.id)) is True
+    (found,) = store.list_cases(db, status="candidate")
+    assert found.review_item_id == str(item.id) and found.turns == candidate.turns
+    assert store.list_cases(db, status="set") == []
+
+
+def test_the_start_lock_is_one_atomic_update_and_the_heartbeat_column_exists(db):
+    run_id = make_run(db, kind="active", environment="local")
+    first = store.claim_run(db, run_id, now=NOW, stale_minutes=10, status="running")
+    second = store.claim_run(db, run_id, now=NOW + timedelta(minutes=1), stale_minutes=10,
+                             status="running")  # fmt: skip
+    assert first is True and second is False
+    stale = store.claim_run(db, run_id, now=NOW + timedelta(minutes=11), stale_minutes=10,
+                            status="running")  # fmt: skip
+    assert stale is True
+    store.update_run(db, run_id, heartbeat_at=NOW)
+    assert store.get_run(db, run_id)["heartbeat_at"] is not None
+
+
+def test_a_calibration_row_keeps_its_counts_and_the_two_model_names(db):
+    store.save_calibration(
+        db, "claim_supported", items=6, judge_agreement=0.9, jev_agreement=0.95,
+        threshold=0.85, trusted=True, counted=5, jev_judge_agreement=0.8,
+        jev_model="typesafe/jev-1.13", judge_model="meta-llama/llama-4-maverick", now=NOW,
+    )  # fmt: skip
+    row = store.get_calibration(db)["claim_supported"]
+    assert row["counted"] == 5 and row["jev_judge_agreement"] == 0.8
+    assert row["jev_model"] == "typesafe/jev-1.13"
+    assert row["judge_model"] == "meta-llama/llama-4-maverick"

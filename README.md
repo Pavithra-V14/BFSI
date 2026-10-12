@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 12 closed; Phase 13 (evaluation) built, awaiting the owner's "commit" and approval (next is Phase 14)
+Current phase: Phase 12 closed; Phase 13 (evaluation) committed (9c6406d), its hardening round ("Phase 13 hardening") written and awaiting the owner's "commit" and approval (next is Phase 14)
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -716,7 +716,7 @@ at every screen.
 - **Admins** also get one section at a time: Documents (status; on the admin machine the exact
   ingest and delete commands to copy, never run from the browser), Entities (read-only except on
   the admin machine), Review queue (fixed labels), Users and roles, Alerts (a banner on every
-  admin section), Rollout (the stage and the hidden answers) and an Evaluation shell (Phase 13).
+  admin section), Rollout (the stage and the hidden answers) and Evaluation (Phase 13, below).
 - **Waiting.** There is no streaming. While an answer is on its way the page shows generic stage
   names and an elapsed timer; they do not claim which step is really running. A service that is
   waking up (a free Render instance) shows "waking up, up to a minute" and carries on by itself.
@@ -731,11 +731,12 @@ at every screen.
 
 **Known limitations (recorded in Phase 11)**
 - **Phase 12.** The alerts banner reads the API's in-memory buffer; webhook, persistence and the
-  dashboards come there. The evaluation dashboard is a shell until Phase 13.
+  dashboards came there (Phase 12). The evaluation page was added in Phase 13.
 - **Phase 14.** The sidebar asks the service for the chat list on every page update, and an
   admin section makes two list calls plus the alerts call per update. Bounded by what a person
   clicks; a cache or a smaller call belongs to the load-test round.
-- **Phase 13.** "Add to evaluation set" in the review queue is a disabled button until then.
+- **Phase 13 (done).** "Add to evaluation set" in the review queue works since Phase 13; the
+  item is marked added only when the candidate really exists.
 - **Phase 15.** Two deploy requirements for `DEPLOY.md`: the Streamlit start command must run from
   the repository root (Streamlit reads `.streamlit/config.toml` from the folder it is started in
   only; from anywhere else the safety settings are off and the page warns), and `API_BASE_URL`
@@ -800,7 +801,8 @@ that enters it holds a question, an answer, a username or a key.
   need a shared window. Scheduling the retention command is part of `DEPLOY.md`.
 - **Phase 16.** The alert thresholds, the daily webhook cap, the 30-day audit retention and the
   daily token plan are placeholders until the baseline run.
-- **Phase 13.** The evaluation-run audit action and the evaluation dashboards.
+- **Phase 13 (done).** The evaluation-run audit action and the evaluation dashboards exist
+  since Phase 13.
 - **Recorded.** Chats deleted before this phase left traces under their hashed session id; there is
   no way to find them without the chat id, so they age out with Langfuse's own retention (set it in
   the Langfuse project settings). Trace deletion uses two Langfuse public routes that Run 18 checks
@@ -837,13 +839,21 @@ loaded by it.
 - **Runs.** `estimate` (no call: requests and tokens per provider against the free-tier daily
   limits, resumable one-day batches, and a confirmation code), then `run RUN_ID --confirm CODE`.
   A run uses only the evaluation keys, no production budget, limiter or cache, and stops by itself
-  when it passes the estimate by more than 25 %. The edit, delete, conflict and source-removed cases
+  when it passes the estimate by more than 25 % (checked between questions; each model call is
+  counted and stored as it is made). The code belongs to its own estimate and starts the run
+  only within 30 minutes; a run takes one atomic lock, so a second press or a second window
+  starts nothing, and a crashed run is free again after 10 minutes without a heartbeat. The edit, delete, conflict and source-removed cases
   change the TEST collection and always undo it (a journal repairs a crash).
 - **Scores.** Rules first (behaviour, facts, expected source, leaks, numeric faithfulness), then
   the judge: RAGAS (faithfulness, relevancy, precision, recall, entity recall, correctness) and
   DeepEval (wording judgements) through the gateway's judge call, and typed verdicts that Jev
-  decides only for metrics where calibration reached 85 % [T]. A score nobody could produce is
-  "not scored", never zero. The judge may not be of the family of a model that wrote the answer.
+  decides only for metrics where calibration reached 85 % [T] with at least 5 of 6 verdicts
+  given (an outage is a miss), for the Jev and judge models it was calibrated with. A score
+  nobody could produce is "not scored" (the reason is kept in the decider field), never zero:
+  also a case the system could not answer (unavailable, rate limited, busy) and an answer
+  whose model is unknown. The judge may not be of the family of a model that wrote the
+  answer, nor of a triage (decide) model. The question a judge sees is masked first with the
+  same function that masks a stored transcript.
 - **Production.** The running service keeps about 5 % of live answers (masked text and the
   passages that reached the generator) in the separate evaluation database off the request path;
   `judge-samples` scores them here; `drift` writes the weekly report; the retention command
@@ -881,7 +891,31 @@ loaded by it.
   `diskcache` dependency another, both without a fixed release; neither is used here
   (`requirements-eval.txt` has the reasoning). CI's pip-audit does not cover the evaluation file.
 - **Recorded.** Customer questions that become candidates carry the masked text the review item
-  holds; a candidate can join the set only when its document is in the sample corpus manifest.
+  holds, masked once more by the application's masker; a candidate can join the set only when
+  its document is in the sample corpus manifest.
+- **Phase 16.** A candidate from the review queue is always role `customer`, whatever role
+  asked it; a staff question is therefore replayed as a customer's.
+- **Phase 16.** The production Jev key, the embedding keys and the rerank key are shared with
+  production and so are their daily limits: an evaluation run's calls count against them (the
+  estimate says so, and the day's limit check counts every run's use of them). No `EVAL_`
+  variant of these keys exists by decision.
+- **Phase 16.** The made-up name in case p05 is found only by the NER model; the answer a
+  production sample holds is the stored copy, which can differ from what the user saw by the
+  fixed unclear-ending text; the staff-role document text lives in the evaluation database
+  (accepted: it is the sample corpus).
+- **Phase 16.** The usage of a case is checked against the day's limits per whole batch before
+  it starts, not per case; one case can overshoot the daily limit of a provider by its own size.
+- **Owner question (spec 15.3).** The spec says calibration measures "agreement with the judge
+  and the labels"; the build stores both and trusts Jev on its agreement with the LABELS only
+  (Jev against the judge is for information). Say if the other reading was meant.
+- **Phase 13 hardening.** The adapter tests (RAGAS, DeepEval) run only in the throw-away
+  environment that has `requirements-eval.txt`; CI does not install it. `claim_supported` and
+  `injection_call_right` are calibrated but not yet used by a run. Injection text inside a
+  passage can reach RAGAS's and G-Eval's own prompt templates; the typed judge calls carry a
+  "data, not instructions" note, the library templates cannot.
+- **Phase 16.** Edit and supersede scenarios re-embed the changed clause when a re-embedding
+  call is possible (one embedding request per change, counted in the estimate); without an
+  embedder they change the lexical (sparse) vector only.
 - **Not seen with real models yet.** The 60 cases and the stubbed-model run prove the harness; how
   the real system does on them is Run 21. Names of people in the made-up PII cases are masked by the
   NER model, which only a real run exercises.

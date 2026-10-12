@@ -247,3 +247,24 @@ def test_the_case_file_loads_and_the_help_names_every_command():
     for command in ("estimate", "run", "calibrate", "judge-samples", "drift", "repair"):
         assert command in cli.__doc__
     assert json.dumps(cli.__doc__)
+
+
+def test_a_run_that_does_not_fit_what_is_left_of_today_is_not_started(workdir):
+    """95 judge requests were already used today: the judged run needs more than the day has."""
+    from datetime import UTC, datetime
+
+    run_cli(["migrate", *db_args(workdir)])
+    code, out, _ = run_cli(["estimate", "--set", "active", *db_args(workdir)])
+    assert code == 0
+    words = out.text.split()
+    run_id = words[words.index("run") + 1]
+    confirm = out.text.split("--confirm ")[1].split()[0]
+    db = store.open_db(store.sqlite_url(workdir / "e.db"))
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    store.add_usage(db, run_id, day, "judge", requests=95, tokens=0)
+    db.close()
+    status, out, calls = run_cli(["run", run_id, "--confirm", confirm, *db_args(workdir)])
+    assert status != 0 and calls == [], "no service was built, no call was made"
+    db = store.open_db(store.sqlite_url(workdir / "e.db"))
+    assert store.get_run(db, run_id)["status"] == "estimated"
+    db.close()

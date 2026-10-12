@@ -239,3 +239,12 @@ def test_a_wrong_code_is_refused_by_the_service_and_shown(monkeypatch):
     [t for t in at.text_input if t.label == "Confirmation code"][0].set_value("ZZZZ-0000").run()
     button(at, "Start the run").click().run()
     assert "does not match" in seen(at) and "Run started" not in seen(at)
+
+
+def test_a_number_from_the_service_never_crashes_the_page():
+    from frontend.views import evaluation
+
+    assert evaluation._float("0.5") == 0.5 and evaluation._float(None) == 0.0
+    assert evaluation._float("not a number") == 0.0
+    assert evaluation._float(float("nan")) == 0.0 and evaluation._float(float("inf")) == 0.0
+    assert evaluation._float(None, 0.25) == 0.25

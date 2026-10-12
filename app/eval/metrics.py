@@ -55,6 +55,11 @@ CODE_METRICS = (
 )
 
 
+# The system did not answer because of a fault or a limit, not because of what it decided: the
+# case says nothing about quality, so it is "not scored", never a failure and never a pass.
+NOT_SCORED_KINDS = ("unavailable", "rate_limited", "busy")
+
+
 @dataclass(frozen=True)
 class Score:
     metric: str
@@ -75,6 +80,9 @@ def score_item(case: Case, item: dict[str, Any], prompt_lines: Iterable[str] = (
     kind = item.get("answer_kind") or ""
     answer = item.get("answer_text") or ""
     contexts: list[str] = list(item.get("contexts") or [])
+    if kind in NOT_SCORED_KINDS:
+        why = f"not_scored:{kind}"
+        return [Score("behaviour_correct", None, why), Score("case_pass", None, why)]
     behaviour = behaviour_met(case.behaviour, kind, item.get("reason"))
     out.append(Score("behaviour_correct", 1.0 if behaviour else 0.0, detail=f"kind={kind}"))
 

@@ -33,8 +33,13 @@ def normalise(text: str) -> str:
 
 
 def contains(text: str, phrase: str) -> bool:
+    """True when `phrase` is in `text` as a whole word or number: "5" is not in "15" or "5.5",
+    "2.5" is not in "12.5" or "2.55", and "tax" is not in "taxes"."""
     needle = normalise(phrase)
-    return bool(needle) and needle in normalise(text)
+    if not needle:
+        return False
+    pattern = r"(?<![0-9a-z])(?<!\d\.)" + re.escape(needle) + r"(?![0-9a-z])(?!\.\d)"
+    return re.search(pattern, normalise(text)) is not None
 
 
 def facts_present(answer: str, facts: Sequence[str]) -> tuple[int, int]:

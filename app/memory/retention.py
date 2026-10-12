@@ -218,27 +218,48 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
         return 2
     trace_key = (os.environ.get("LANGFUSE_USER_HASH_KEY") or "").strip() or None
     moment = now or datetime.now(UTC)
-    samples_purged = _purge_eval_samples(moment, dry_run=args.dry_run)
     db = connect(url)
     try:
         result = sweep(db, now=moment, actor=os_actor(), dry_run=args.dry_run, trace_key=trace_key)
-        purged = purge_old_rows(
-            db,
-            now=moment,
-            actor=os_actor(),
-            dry_run=args.dry_run,
-            eval_samples=samples_purged or 0,
-        )
+        purged = purge_old_rows(db, now=moment, actor=os_actor(), dry_run=args.dry_run)
         pending = traces.pending_count(db)
     finally:
         db.close()
+    # The evaluation database is a second, separate store: its purge runs AFTER the main sweep and
+    # can fail alone (address wrong, network down) without undoing or hiding the main parts. Only
+    # the class name of an error is printed, never its text (it may hold an address).
+    samples_purged: int | None = None
+    samples_error: str | None = None
+    try:
+        samples_purged = _purge_eval_samples(moment, dry_run=args.dry_run)
+        if samples_purged and not args.dry_run:
+            audit_db = connect(url)
+            try:
+                with audit_db.transaction(write=True):
+                    write_audit(
+                        audit_db,
+                        actor=os_actor(),
+                        action="audit_purge",
+                        target="eval_samples",
+                        details={"eval_samples": samples_purged, "days": SAMPLE_RETENTION_DAYS},
+                        now=moment,
+                    )
+            finally:
+                audit_db.close()
+    except Exception as error:
+        samples_error = type(error).__name__
     verb = "would delete" if result.dry_run else "deleted"
     print(f"{verb} {result.sessions} chats ({result.messages} messages)")
     print(
         f"{verb} {purged.audit_rows} audit rows, {purged.alert_rows} alert rows and "
         f"{purged.hourly_rows} hourly metric rows older than {AUDIT_RETENTION_DAYS} days"
     )
-    if samples_purged is not None:
+    if samples_error is not None:
+        print(
+            f"evaluation samples: not purged ({samples_error}); "
+            "the chat and audit parts above are done"
+        )
+    elif samples_purged is not None:
         print(
             f"{verb} {samples_purged} masked evaluation samples older than "
             f"{SAMPLE_RETENTION_DAYS} days"

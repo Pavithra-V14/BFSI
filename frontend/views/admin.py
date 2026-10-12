@@ -216,12 +216,17 @@ def review_queue(client: ApiClient) -> None:
         reply = client.label(chosen, label, status="added_to_eval")
         if reply.ok:
             result = str((reply.data or {}).get("evaluation_candidate") or "")
-            st.session_state["fx_rev_notice"] = messages.CANDIDATE_TEXT.get(result, "")
+            st.session_state["fx_rev_notice"] = (
+                messages.CANDIDATE_TITLE.get(result, "Label saved, not added"),
+                messages.CANDIDATE_TEXT.get(result, ""),
+                "ok" if result in ("added", "already_added") else "warn",
+            )
             st.rerun()
         render.show_notice("danger", "Not added", friendly(reply), urgent=True)
-    note = st.session_state.pop("fx_rev_notice", "")
+    note = st.session_state.pop("fx_rev_notice", None)
     if note:
-        render.show_notice("ok", "Added to the evaluation set", note)
+        title, text, kind = note
+        render.show_notice(kind, title, text)
 
 
 def users(client: ApiClient) -> None:

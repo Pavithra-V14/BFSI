@@ -1261,14 +1261,17 @@ It asks you to type the id.
       uv run python -m app.eval migrate
       uv run python -m app.eval cases-sync
 
-  You should see `applied 0001_evaluation.sql` and `local: 60 cases of dataset 2026-10-v1
-  written`. The file is `eval_data\eval.db` (git-ignored).
+  You should see a line naming `0001_evaluation.sql`, then `local evaluation database: 1
+  file(s) applied`, and for the second command `local: 60 cases of dataset 2026-10-v1 written`.
+  The file is `eval_data\eval.db` (git-ignored). If you ran an earlier version of this command,
+  nothing needs doing: the first version of this table set was never applied anywhere.
 - **Step 3. Create the test collection (REAL Qdrant, `documents_eval` only):**
 
       uv run python -m app.vector.documents --ensure --collection documents_eval
 
   You should see `collection 'documents_eval': created` and the payload indexes. The command
-  refuses `documents` and any name that does not end in `_eval`.
+  refuses `documents` and any name that does not match `^[a-z0-9]+_eval$` (lowercase letters and
+  digits, then `_eval`: `documents_eval` is right, `Documents-Eval` or `my_docs_eval` is not).
 - **Step 4. Make a local database for the test ingest, and ingest the three documents:**
 
       $env:DATABASE_URL = "sqlite:///eval_data/ingest.db"
@@ -1286,7 +1289,8 @@ It asks you to type the id.
 
   You should see counts of active chunks (no text). Do the same for the other two ids.
 - **If a line differs:** `refusing ... DATABASE_URL to be a local SQLite file` means step 4's
-  variable is missing; `must end in _eval` means the collection name was mistyped; a free-tier
+  variable is missing; `must match ^[a-z0-9]+_eval$` means the collection name was mistyped (it
+  is the same rule for `INGEST_COLLECTION`, which `--collection` sets for one run); a free-tier
   message from the embedding or caption call is safe to repeat later.
 - **Send back:** the output of step 1, and for step 5 the three status outputs (counts only).
 - **Clear:** `Remove-Item Env:DATABASE_URL` and the key variables you set. `eval_data\` stays
@@ -1312,13 +1316,20 @@ It asks you to type the id.
       uv run python -m app.eval calibrate
 
   You should see the requests and tokens for the judge model and for Jev against their daily
-  limits (about 30 and 30), and the line `To run it: calibrate --confirm CODE`.
+  limits (about 30 and 30), and the line `To run it: calibrate --confirm CODE`. The estimate
+  names which groups share their daily limits with production (Jev, embeddings, rerank): this
+  run's calls count against those limits and the day's check counts them too.
 - **Step 2. Run it (about 60 model calls) only if the estimate looks right:**
 
       uv run python -m app.eval calibrate --confirm CODE
 
-  You should see one line per metric (five): the judge's agreement, Jev's agreement and `Jev
-  trusted: yes` or `no`. The result is stored; the next evaluation runs use it.
+  You should see one line per metric (five): the judge's agreement, Jev's agreement with how many
+  of the 6 items Jev answered, Jev against the judge (for information only), and `Jev trusted:
+  yes` or `no`. Jev is trusted for a metric only when it answered at least 5 of the 6 items (an
+  outage is a miss) AND agrees with your labels at 85 % [T] or more. The result is stored with
+  the Jev and judge model names: if you change either model, that calibration no longer counts
+  and the metric goes back to the judge model until you run this again. The run is recorded
+  (`status` shows it as `calibration`) and its calls count against today's limits.
 - **If a line differs:** `stopped by the cost guard` means the run used more than 25 % over its
   estimate and stopped: send the numbers. A metric with `Jev agreement None` means Jev did not
   answer (an outage or the key): that metric stays with the judge model.
@@ -1346,9 +1357,14 @@ It asks you to type the id.
 
       uv run python -m app.eval run RUN_ID --confirm CODE
 
-  You should see `run RUN_ID: paused` (more batches wait) or `finished`, the cases done and the
-  requests and tokens used. The run saves every case: if it stops, run the same command again.
-  On the next day (UTC) run the same command again for the next batch.
+  You should see `run RUN_ID: paused; finished N case(s); R requests, T tokens used` (more
+  batches wait) or `run RUN_ID: finished; ...`. The code is valid for 30 minutes from its
+  estimate; after that the command says `not started: the code is older than 30 minutes` and you
+  make a new estimate. A run that is already running says `not started: this run is already
+  running`; if its window was closed by a crash, the same command works again after 10 minutes.
+  Every model call is counted and stored as it is made, so a stop or a crash loses none of the
+  day's count. On the next day (UTC) run the same command again for the next batch (a run that
+  was confirmed once is not asked for a new code).
 - **Step 3. The band:** make three runs with `--set variance` (an estimate for each, each started
   with its own code, all three on the same system and the same set), then open Run 23's page.
 - **Step 4. Look at the numbers:**
@@ -1379,7 +1395,8 @@ It asks you to type the id.
 
       uv run python -m app.eval migrate --production
 
-  You should see `applied 0001_evaluation.sql` for the production evaluation database.
+  You should see a line naming `0001_evaluation.sql` and `production evaluation database: 1
+  file(s) applied`.
 - **Step 2. Start the API with `EVAL_DATABASE_URL` and `EVAL_SAMPLE_RATE=1` set** as in Run 16,
   ask three questions in the frontend (one with a made-up PAN in it).
 - **Step 3. Check the samples are masked:**
@@ -1387,9 +1404,12 @@ It asks you to type the id.
       uv run python -m app.eval status --production
       uv run python -m app.eval drift --production
 
-  `drift` should say `3 sample(s) this week` and `too few samples to compare` (it needs 20 in each
-  window). The made-up PAN must not appear anywhere: ask your advisor to run the log scan on the
-  API log, and look at the Evaluation page's Production view (no text is shown there).
+  `drift` should say `production: 3 sample(s) this week, 0 in the baseline window`, a note
+  `too few samples to compare: at least 20 in each window` and `alerts: none`, and it exits with
+  code 0 even when it names alerts (they are alerts only). It also saves a snapshot, so next
+  week's report has a baseline window. The made-up PAN must not appear anywhere: ask your advisor
+  to run the log scan on the API log, and look at the Evaluation page's Production view (no text
+  is shown there).
 - **Step 4. Judge the queue (needs the evaluation keys; shows an estimate first):**
 
       uv run python -m app.eval judge-samples --limit 20 --production
@@ -1400,8 +1420,10 @@ It asks you to type the id.
 
       uv run python -m app.memory.retention --dry-run
 
-  With `EVAL_DATABASE_URL` set you should see a third line, `would delete 0 masked evaluation
-  samples older than 30 days`.
+  With `EVAL_DATABASE_URL` set you should see, after the chat and audit lines, `would delete 0
+  masked evaluation samples older than 30 days`. The chat and audit sweep runs first; if the
+  evaluation database cannot be reached you see `evaluation samples: not purged (ClassName); the
+  chat and audit parts above are done` and the command still exits 0.
 - **If a line differs:** `eval_sample_failed` in the API window (a class name) means the sample
   could not be written: check the address and that step 1 ran.
 - **Send back:** the `status` and `drift` lines and the judged count. Never the address.
@@ -1424,10 +1446,13 @@ It asks you to type the id.
      `EVAL_DATABASE_URL` is set): golden-set score, noise band, runs, per-category scores, the
      stage latency, model mix, the guardrail table, calibration and drift, each with its table.
   2. Under "Run an evaluation" press "Estimate (no call is made)": the table and a code appear.
-     Type the code and press "Start the run": the notice says it started; reload to see progress.
+     Type the code and press "Start the run" within 30 minutes: the notice says it started;
+     reload to see progress. A second press says the run is already running.
   3. Review queue: pick an item, set a label, press "Add to evaluation set". You should see a
-     notice that it waits as a candidate. The set is unchanged (candidates join only when a new
-     dataset version is made).
+     notice titled "Added to the evaluation set" (it waits as a candidate), or "Already in the
+     evaluation set". If no evaluation database is set up here, or the question is not added, the
+     notice is titled "Label saved, not added" and the item stays "labelled", never "added". The
+     set is unchanged (candidates join only when a new dataset version is made).
 - **If a line differs:** "The evaluation keys are not set on this machine" means window A lacks
   the evaluation variables; "That code does not match" means the code was mistyped.
 - **Send back:** what you saw for each of the three steps (a sentence each).

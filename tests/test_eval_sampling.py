@@ -242,3 +242,14 @@ def test_a_failing_sampler_never_changes_what_the_user_gets(tmp_path, fast_hashi
         assert response.status_code == 200 and response.json()["kind"] == "answer"
     finally:
         env.close()
+
+
+def test_the_sample_takes_the_stored_copy_never_the_text_the_user_was_shown(eval_url):
+    """The row holds what the transcript store holds (masked); the live result text may still
+    carry the raw words, so it is never the source."""
+    ctx = fake_ctx(copy=("Question with [PAN]", "Answer with [PAN]"))
+    result = fake_result(text="Answer with the raw ABCPE1234F")
+    make(eval_url).observe(ctx, result)
+    (row,) = rows(eval_url)
+    assert row[2] == "Question with [PAN]" and row[3] == "Answer with [PAN]"
+    assert "ABCPE1234F" not in json.dumps([list(map(str, r)) for r in rows(eval_url)])

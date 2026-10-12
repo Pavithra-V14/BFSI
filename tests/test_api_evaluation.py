@@ -5,7 +5,7 @@ nothing the dashboard returns holds answer text; the two environments are never 
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -289,7 +289,7 @@ def test_a_start_with_the_right_code_runs_the_command_with_that_code(env_and_acc
     run_id, code = estimate_of(env, admin)
     reply = start(env, admin, run_id, code.lower())
     assert reply.status_code == 202 and reply.json() == {"run_id": run_id, "status": "starting"}
-    assert starter.calls == [["run", run_id, "--confirm", code]]
+    assert starter.calls == [["run", run_id, "--confirm", code, "--from-page"]]
     assert [json.loads(r[2])["step"] for r in audit_rows(env)] == ["estimate", "start"]
 
 
@@ -305,10 +305,64 @@ def test_a_run_that_is_running_or_ended_is_not_started_again(env_and_access, adm
     env, access, starter = env_and_access
     run_id, code = estimate_of(env, admin)
     db = store.open_db(store.sqlite_url(access.local_path))
-    store.update_run(db, run_id, status=c.RUN_RUNNING)
+    store.update_run(db, run_id, status=c.RUN_RUNNING, heartbeat_at=datetime.now(UTC))
     db.close()
     reply = start(env, admin, run_id, code)
-    assert reply.status_code == 409 and starter.calls == []
+    assert reply.status_code == 409 and reply.json()["error"]["code"] == "run_busy"
+    assert starter.calls == []
+
+
+def test_a_second_press_of_start_starts_one_process_only(env_and_access, admin):
+    env, access, starter = env_and_access
+    run_id, code = estimate_of(env, admin)
+    first = start(env, admin, run_id, code)
+    second = start(env, admin, run_id, code)
+    assert first.status_code == 202 and second.status_code == 409
+    assert second.json()["error"]["code"] == "run_busy"
+    assert len(starter.calls) == 1
+    db = store.open_db(store.sqlite_url(access.local_path))
+    assert store.get_run(db, run_id)["status"] == c.RUN_STARTING
+    db.close()
+
+
+def test_a_run_whose_process_went_silent_can_be_started_again(env_and_access, admin):
+    env, access, starter = env_and_access
+    run_id, code = estimate_of(env, admin)
+    db = store.open_db(store.sqlite_url(access.local_path))
+    stale = datetime.now(UTC) - timedelta(minutes=c.HEARTBEAT_STALE_MINUTES + 5)
+    store.update_run(db, run_id, status=c.RUN_RUNNING, heartbeat_at=stale)
+    db.close()
+    assert start(env, admin, run_id, code).status_code == 202
+    assert len(starter.calls) == 1
+
+
+def test_a_code_older_than_its_window_starts_nothing(env_and_access, admin):
+    env, access, starter = env_and_access
+    run_id, code = estimate_of(env, admin)
+    db = store.open_db(store.sqlite_url(access.local_path))
+    old = datetime.now(UTC) - timedelta(minutes=c.CONFIRMATION_MINUTES + 5)
+    with db.transaction(write=True):
+        db.execute(
+            "UPDATE eval_runs SET created_at = ? WHERE id = ?", (store.utc_text(old), run_id)
+        )
+    db.close()
+    reply = start(env, admin, run_id, code)
+    assert reply.status_code == 409 and reply.json()["error"]["code"] == "confirmation_expired"
+    assert starter.calls == []
+
+
+def test_a_spawn_that_fails_gives_the_run_back(env_and_access, admin):
+    env, access, starter = env_and_access
+    run_id, code = estimate_of(env, admin)
+
+    def refuse(args):
+        raise OSError("no process")
+
+    access.starter = refuse
+    assert start(env, admin, run_id, code).status_code == 503
+    db = store.open_db(store.sqlite_url(access.local_path))
+    assert store.get_run(db, run_id)["status"] == c.RUN_ESTIMATED
+    db.close()
 
 
 def test_a_start_for_an_unknown_run_is_not_found(env_and_access, admin):
@@ -416,7 +470,8 @@ def test_without_an_evaluation_database_the_label_is_kept_and_the_reply_says_so(
         assert reply.status_code == 200
         assert reply.json()["evaluation_candidate"] == "no_evaluation_database"
         rows = env.rows("SELECT status FROM review_queue WHERE id = ?", (item,))
-        assert rows == [("added_to_eval",)]
+        assert rows == [("labelled",)], "never marked as added when it was not added"
+        assert reply.json()["status"] == "labelled"
     finally:
         env.close()
 
@@ -427,3 +482,45 @@ def test_the_label_audit_row_is_written_either_way(env_and_access, admin):
     label(env, admin, item)
     rows = env.rows("SELECT action, target FROM audit_log WHERE action = 'review_label'")
     assert rows == [("review_label", item)]
+
+
+def test_a_candidate_is_masked_again_before_it_is_written(env_and_access, admin, paths):
+    """The review item holds the stored (masked) question; the candidate passes the application's
+    own masker once more, so an identifier that got into the item still never reaches the
+    evaluation database."""
+    env, _access, _starter = env_and_access
+    item = add_review(env, question="My PAN is ABCPE1234F. What is the waiting period?")
+    reply = label(env, admin, item)
+    assert reply.json()["evaluation_candidate"] == "added"
+    (candidate,) = candidates_in(paths[1])
+    assert "ABCPE1234F" not in " ".join(candidate.turns)
+    assert "waiting period" in candidate.turns[0]
+
+
+def test_a_run_and_its_audit_rows_name_the_admin_who_made_them(env_and_access, admin):
+    env, access, _starter = env_and_access
+    run_id, code = estimate_of(env, admin)
+    start(env, admin, run_id, code)
+    admin_id, username = env.rows("SELECT id, username FROM users WHERE username = 'boss'")[0]
+    db = store.open_db(store.sqlite_url(access.local_path))
+    try:
+        assert store.get_run(db, run_id)["created_by"] == f"admin:{username}"
+    finally:
+        db.close()
+    sql = "SELECT actor FROM audit_log WHERE action = 'evaluation_run'"
+    assert {r[0] for r in env.rows(sql)} == {admin_id}
+
+
+def test_a_candidate_is_not_written_when_the_masker_is_not_ready(env_and_access, admin, paths):
+    env, _access, _starter = env_and_access
+    holder = env.rig.pipeline.deps.masker
+    ready = holder._ready
+    holder._ready = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    try:
+        item = add_review(env)
+        reply = label(env, admin, item)
+    finally:
+        holder._ready = ready
+    assert reply.json()["evaluation_candidate"] == "failed"
+    assert reply.json()["status"] == "labelled"
+    assert candidates_in(paths[1]) == []

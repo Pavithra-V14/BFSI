@@ -17,11 +17,13 @@ from app.eval import constants as c
 
 
 def band(scores: Sequence[float], sigmas: float = c.VARIANCE_SIGMAS) -> dict[str, Any]:
-    """Mean, sample standard deviation and the noise width (`sigmas` times it). Needs at least two
-    scores; with fewer the band is undefined (None)."""
+    """Mean, sample standard deviation and the noise width (`sigmas` times it). Needs
+    `VARIANCE_RUNS` (three) scores: with two, one standard deviation is a guess; with fewer the
+    band is undefined (None)."""
     values = [float(s) for s in scores if s is not None and not math.isnan(float(s))]
-    if len(values) < 2:
-        return {"n": len(values), "mean": values[0] if values else None, "sd": None,
+    if len(values) < c.VARIANCE_RUNS:
+        average = (sum(values) / len(values)) if values else None
+        return {"n": len(values), "mean": average, "sd": None,
                 "width": None, "low": None, "high": None}  # fmt: skip
     mean = sum(values) / len(values)
     variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)

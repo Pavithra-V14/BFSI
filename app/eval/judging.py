@@ -22,6 +22,7 @@ from typing import Any
 from app.eval.cases import Case
 from app.eval.judge import Judge, JudgeUnavailable
 from app.eval.metrics import Score, mean
+from app.eval.notscored import NotScored, decider_for
 
 MAX_PASSAGES = 5
 
@@ -32,7 +33,14 @@ def _share(values: dict[str, bool | None]) -> float | None:
 
 
 def _not_scored(names: Sequence[str], reason: str) -> list[Score]:
-    return [Score(name, None, decider="not_scored", detail=reason) for name in names]
+    return [Score(name, None, decider=decider_for(reason), detail=reason) for name in names]
+
+
+def _decider(verdict: Any) -> str:
+    """The decider of a verdict; a verdict nobody gave keeps its reason in the decider field."""
+    if verdict.decider == "not_scored":
+        return decider_for(verdict.reason)
+    return verdict.decider
 
 
 async def judge_item(
@@ -63,6 +71,10 @@ async def judge_item(
         judged_names.append("refusal_correct")
     if not judged_names:
         return []
+    if answered and not models:
+        # which model wrote the answer is not known (a cached answer, a lost trace): the rule
+        # "the judge is never the family of the writer" cannot be checked, so nothing is scored
+        return _not_scored(judged_names, "model_unknown")
     if judge.family_clash(models):
         return _not_scored(judged_names, "judge_same_family")
     if not judge.judge_model and not any(judge.trusted.values()):
@@ -75,7 +87,7 @@ async def judge_item(
             "chunk_relevant", list(passages), {"question": question, "passages": passages}
         )
         scores.append(
-            Score("context_relevance", _share(verdict.values), verdict.decider, verdict.reason)
+            Score("context_relevance", _share(verdict.values), _decider(verdict), verdict.reason)
         )
         cited = [
             f"p{i}"
@@ -89,7 +101,9 @@ async def judge_item(
                 {"claim": answer, "passages": {k: passages[k] for k in cited}},
             )
             scores.append(
-                Score("citation_accuracy", _share(support.values), support.decider, support.reason)
+                Score(
+                    "citation_accuracy", _share(support.values), _decider(support), support.reason
+                )
             )
     if kind == "refusal":
         refusal = await judge.verdicts(
@@ -102,7 +116,7 @@ async def judge_item(
             Score(
                 "refusal_correct",
                 None if value is None else (1.0 if value else 0.0),
-                refusal.decider,
+                _decider(refusal),
                 refusal.reason,
             )
         )
@@ -125,6 +139,7 @@ async def _ragas_scores(
         return _not_scored(["faithfulness", "answer_relevancy"], "ragas_not_installed")
     llm = ragas_adapter.GatewayLLM(judge.text)
     embeddings = ragas_adapter.GatewayEmbeddings(judge.embed)
+    reasons: dict[str, str] = {}
     try:
         raw = await ragas_adapter.score_sample(
             question=question,
@@ -133,11 +148,18 @@ async def _ragas_scores(
             reference=reference,
             llm=llm,
             embeddings=embeddings,
+            reasons=reasons,
         )
-    except JudgeUnavailable:
-        return _not_scored(list(ragas_adapter.METRICS), "judge_unavailable")
+    except NotScored as error:
+        return _not_scored(list(ragas_adapter.METRICS), error.reason)
     model = judge.judge_model or "judge"
-    out = [Score(name, value, f"ragas:{model}") for name, value in raw.items()]
+    out = [
+        Score(name, value, f"ragas:{model}")
+        if value is not None
+        else Score(name, None, decider_for(reasons.get(name, "unreadable_output")),
+                   reasons.get(name, "unreadable_output"))
+        for name, value in raw.items()
+    ]  # fmt: skip
     faithful = raw.get("faithfulness")
     if faithful is not None:  # reference-free hallucination rate (15.4a)
         out.append(Score("hallucination_rate", round(1.0 - faithful, 6), f"ragas:{model}"))
@@ -163,8 +185,8 @@ async def _deepeval_scores(
                 question, answer, case.reference, gateway_judge
             )
             out.append(Score("answer_equivalence", value, f"deepeval:{model}"))
-    except JudgeUnavailable:
-        out.append(Score("deepeval", None, "not_scored", "judge_unavailable"))
+    except JudgeUnavailable as error:
+        out.append(Score("deepeval", None, decider_for(error.reason), error.reason))
     return out
 
 

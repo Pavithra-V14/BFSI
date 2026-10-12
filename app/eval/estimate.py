@@ -31,11 +31,19 @@ TURN_GENERATE = ("answer", 1, 3_600)  # prompt with five chunks plus the answer
 TURN_REWRITE = ("answer", 1, 800)  # a follow-up's standalone question
 
 # What the judge does for one answered case: text calls on the judge model, typed verdicts on Jev.
-JUDGE_TEXT_CALLS = 14  # RAGAS faithfulness, relevancy, precision per chunk, recall, entities, ...
+JUDGE_TEXT_CALLS = 18  # RAGAS faithfulness, relevancy (3), precision per chunk, recall, entities,
+# correctness, one retry's worth of unreadable output, and G-Eval
 JUDGE_TEXT_TOKENS = 1_800
 JUDGE_VERDICT_CALLS = 3  # relevance of the chunks, support of the citations, the refusal
 JUDGE_VERDICT_TOKENS = 1_200
 JUDGE_EMBED_CALLS = 3
+
+# An edit or a newer version of a clause in the test collection re-embeds that one clause.
+SCENARIO_EMBED = ("embedding", 1, 200)
+
+# These groups use the keys the shell holds for the production service: an evaluation run shares
+# their provider daily limits with it (owner decision: accepted, stated in every estimate).
+SHARED_WITH_PRODUCTION = ("jev", "embedding", "rerank")
 
 PROVIDER_LABELS = {
     "answer": "answer models (Groq, Gemini)",
@@ -89,6 +97,9 @@ def case_need(case: Case, *, judged: bool = True) -> Need:
         elif case.behaviour == "refuse" and case.source_docs:
             need.add(*TURN_EMBED)  # a search that finds nothing visible, then no generation
             need.add(*TURN_RERANK)
+    for op in case.setup:
+        if op.op in ("edit_text", "supersede_text"):
+            need.add(*SCENARIO_EMBED)
     if judged and case.behaviour == "answer":
         need.add("judge", JUDGE_TEXT_CALLS, JUDGE_TEXT_CALLS * JUDGE_TEXT_TOKENS)
         need.add("jev", JUDGE_VERDICT_CALLS, JUDGE_VERDICT_CALLS * JUDGE_VERDICT_TOKENS)
@@ -135,7 +146,7 @@ def daily_limits(config: Any) -> DailyLimits:
             "judge": jr,
             "jev": per_day("JEV", 1)[0],
             "embedding": per_day("EMBEDDING", max(len(config.embedding_keys), 1))[0],
-            "rerank": None,
+            "rerank": per_day("COHERE" if config.cohere_key else "JINA", 1)[0],
         },
         tokens={
             "answer": max(answer_tpd) if answer_tpd else None,
@@ -232,6 +243,8 @@ def estimate_run(
         "batches": [list(b) for b in batches],
         "too_big_for_one_day": too_big,
         "margin": c.OVER_ESTIMATE_MARGIN,
+        "shared_with_production": [g for g in SHARED_WITH_PRODUCTION if g in providers],
+        "valid_minutes": c.CONFIRMATION_MINUTES,
     }
 
 
@@ -282,8 +295,18 @@ def describe(estimate: Mapping[str, Any]) -> list[str]:
             f"{len(estimate['too_big_for_one_day'])} case(s) alone exceed a day's limit: "
             "add keys or accept that they will be cut off."
         )
+    shared = estimate.get("shared_with_production") or []
+    if shared:
+        lines.append(
+            "Shared with production: " + ", ".join(shared) + " use the same provider keys as the "
+            "live service, so they share its daily limits; today's check counts what evaluation "
+            "runs used of them."
+        )
     lines.append(
         f"The run stops by itself when it uses more than {int(estimate['margin'] * 100)} % over "
         "this estimate."
     )
+    minutes = estimate.get("valid_minutes")
+    if minutes:
+        lines.append(f"The confirmation code is valid for {minutes} minutes from this estimate.")
     return lines

@@ -203,7 +203,7 @@ def create_run(
 _RUN_COLUMNS = (
     "id, environment, kind, dataset_version, system_version, status, estimate, estimate_code, "
     "confirmed_at, planned_items, finished_items, batch_no, batches, tokens_used, requests_used, "
-    "created_by, created_at, started_at, finished_at, note"
+    "created_by, created_at, started_at, finished_at, note, heartbeat_at"
 )
 _RUN_FIELDS = _RUN_COLUMNS.split(", ")
 
@@ -212,7 +212,7 @@ def _run_dict(row: tuple) -> dict[str, Any]:
     data = dict(zip(_RUN_FIELDS, row, strict=True))
     data["system_version"] = _load(data["system_version"], {})
     data["estimate"] = _load(data["estimate"], {})
-    for name in ("confirmed_at", "created_at", "started_at", "finished_at"):
+    for name in ("confirmed_at", "created_at", "started_at", "finished_at", "heartbeat_at"):
         if data[name] is not None:
             data[name] = str(data[name])
     return data
@@ -240,7 +240,7 @@ def list_runs(db: Database, *, environment: str | None = None, limit: int = 50) 
 def update_run(db: Database, run_id: str, **fields: Any) -> None:
     allowed = {
         "status", "confirmed_at", "finished_items", "batch_no", "tokens_used", "requests_used",
-        "started_at", "finished_at", "note",
+        "started_at", "finished_at", "note", "heartbeat_at",
     }  # fmt: skip
     unknown = set(fields) - allowed
     if unknown:
@@ -253,6 +253,35 @@ def update_run(db: Database, run_id: str, **fields: Any) -> None:
     sets = ", ".join(f"{name} = ?" for name in fields)
     with db.transaction(write=True):
         db.execute(f"UPDATE eval_runs SET {sets} WHERE id = ?", (*values, run_id))
+
+
+def claim_run(
+    db: Database,
+    run_id: str,
+    *,
+    now: datetime,
+    stale_minutes: int,
+    status: str,
+    take_over_starting: bool = False,
+) -> bool:
+    """Take the run for one process, atomically: one UPDATE that succeeds for exactly one caller.
+    A run can be taken when it is estimated or paused, or when it says running (or starting) but
+    its heartbeat is older than `stale_minutes` (a crash). `take_over_starting`: the process the
+    page started takes over the 'starting' mark that the page itself made. Returns whether this
+    caller now holds the run."""
+    cutoff = utc_text(now - timedelta(minutes=stale_minutes))
+    moment = utc_text(now)
+    starting = " OR status = 'starting'" if take_over_starting else ""
+    with db.transaction(write=True):
+        cursor = db.execute(
+            "UPDATE eval_runs SET status = ?, started_at = ?, heartbeat_at = ? WHERE id = ? AND ("
+            "status IN ('estimated', 'paused')"
+            + starting
+            + " OR (status IN ('running', 'starting')"
+            " AND (heartbeat_at IS NULL OR heartbeat_at < ?)))",
+            (status, moment, moment, run_id, cutoff),
+        )
+        return (cursor.rowcount or 0) == 1
 
 
 def pending_case_ids(db: Database, run_id: str) -> list[str]:
@@ -606,18 +635,27 @@ def save_calibration(
     jev_agreement: float | None,
     threshold: float,
     trusted: bool,
+    counted: int = 0,
+    jev_judge_agreement: float | None = None,
+    jev_model: str | None = None,
+    judge_model: str | None = None,
     now: datetime | None = None,
 ) -> None:
     with db.transaction(write=True):
         db.execute("DELETE FROM eval_calibration WHERE metric = ?", (metric,))
         db.execute(
-            "INSERT INTO eval_calibration (metric, items, judge_agreement, jev_agreement, "
-            "threshold, trusted, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO eval_calibration (metric, items, counted, judge_agreement, "
+            "jev_agreement, jev_judge_agreement, jev_model, judge_model, threshold, trusted, "
+            "computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 metric,
                 int(items),
+                int(counted),
                 judge_agreement,
                 jev_agreement,
+                jev_judge_agreement,
+                jev_model,
+                judge_model,
                 float(threshold),
                 bool(trusted),
                 utc_text(now or _now()),
@@ -629,7 +667,8 @@ def get_calibration(db: Database) -> dict[str, dict[str, Any]]:
     with db.transaction():
         rows = db.query_all(
             "SELECT metric, items, judge_agreement, jev_agreement, threshold, trusted, "
-            "computed_at FROM eval_calibration ORDER BY metric"
+            "computed_at, counted, jev_judge_agreement, jev_model, judge_model "
+            "FROM eval_calibration ORDER BY metric"
         )
     return {
         r[0]: {
@@ -639,6 +678,10 @@ def get_calibration(db: Database) -> dict[str, dict[str, Any]]:
             "threshold": r[4],
             "trusted": bool(r[5]),
             "computed_at": str(r[6]),
+            "counted": int(r[7] or 0),
+            "jev_judge_agreement": r[8],
+            "jev_model": r[9],
+            "judge_model": r[10],
         }
         for r in rows
     }

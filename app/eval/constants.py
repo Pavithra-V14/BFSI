@@ -6,6 +6,8 @@ baseline"). They are constants here so a test can see them and the owner can fin
 
 from __future__ import annotations
 
+import re
+
 from app.vector.documents import COLLECTION as PRODUCTION_COLLECTION
 
 # The collection an evaluation run reads. Never the production one: `check_eval_collection`.
@@ -48,16 +50,30 @@ OVER_ESTIMATE_MARGIN = 0.25
 DAILY_LIMIT_SAFETY = 0.8
 SAMPLE_RATE = 0.05  # [T] about 5 % of live answers (spec 15.4)
 SAMPLE_RETENTION_DAYS = 30  # [T] masked samples are purged by the retention command
-VARIANCE_RUNS = 3  # spec 15.4
+VARIANCE_RUNS = 3  # spec 15.4: a band needs this many runs of the active set
 VARIANCE_SIGMAS = 2.0  # the band is about two standard deviations
+
+# [T] A confirmation code belongs to its own estimate and starts that run only within this long
+# after the estimate was made. A confirmed run's later batches (the next days) continue under it.
+CONFIRMATION_MINUTES = 30
+# A run that says "running" but has made no progress for this long can be taken over (a crash).
+HEARTBEAT_STALE_MINUTES = 10
+# [T] Jev decides a metric only if at least this share of its calibration items got a verdict
+# from it (an outage counts as a miss) and its agreement with the labels reached the threshold.
+MIN_COUNTED_SHARE = 5 / 6
 
 # Statuses of a run.
 RUN_ESTIMATED = "estimated"
+RUN_STARTING = "starting"  # the page started it: its own process is on the way
 RUN_RUNNING = "running"
 RUN_PAUSED = "paused"  # a batch finished, more batches wait (next day's limits)
 RUN_FINISHED = "finished"
 RUN_ABORTED = "aborted_over_estimate"
 RUN_FAILED = "failed"
+
+
+# letters and digits, then exactly `_eval`: `documents_eval`, `release2_eval`
+EVAL_COLLECTION_NAME = re.compile(r"^[a-z0-9]+_eval$")
 
 
 class EvalConfigError(Exception):
@@ -70,6 +86,9 @@ def check_eval_collection(name: str) -> str:
     value = (name or "").strip()
     if not value or value == PRODUCTION_COLLECTION:
         raise EvalConfigError("an evaluation run must not use the production collection")
-    if not value.endswith("_eval") and not value.startswith(EVAL_COLLECTION):
-        raise EvalConfigError("the evaluation collection name must end in _eval")
+    if not EVAL_COLLECTION_NAME.match(value):
+        raise EvalConfigError(
+            "the evaluation collection name must match ^[a-z0-9]+_eval$ "
+            "(lowercase letters and digits, then _eval)"
+        )
     return value

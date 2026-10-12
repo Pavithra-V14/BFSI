@@ -91,8 +91,9 @@ def distributions(samples: Iterable[Mapping[str, Any]]) -> dict[str, Counter[str
         out["prompt"][str(s.get("prompt_hash") or "unknown")] += 1
         out["corpus"][str(s.get("corpus_version") or "unknown")] += 1
         out["result"][str(s.get("result_kind") or "unknown")] += 1
-        if s.get("reason"):
-            out["refusal_reason"][str(s["reason"])] += 1
+        # every sample is counted ("none" when there is no reason), so a week of answers that
+        # carry a reason is a shift from the baseline, not an empty side with nothing to compare
+        out["refusal_reason"][str(s.get("reason") or "none")] += 1
         out["length"][_bucket_length(str(s.get("question") or ""))] += 1
         out["confidence"]["low" if s.get("confidence") == "low" else "normal"] += 1
         out["reduced_mode"]["reduced" if s.get("degraded") else "normal"] += 1

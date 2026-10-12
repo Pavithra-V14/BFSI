@@ -51,6 +51,7 @@ CREATE TABLE eval_runs (
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMPTZ,
+    heartbeat_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     note TEXT,
     CONSTRAINT eval_runs_environment_check CHECK (environment IN ('local', 'production')),
@@ -157,13 +158,20 @@ CREATE TABLE eval_drift_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- eval_calibration: the judge-against-labels agreement per metric. Jev is used for a metric only
--- when `trusted` (agreement at or above the threshold) (spec 15.3).
+-- eval_calibration: agreement with the hand labels per metric. Jev is used for a metric only
+-- when `trusted`: at least `counted` verdicts of its `items` (an outage is a miss) and agreement
+-- with the labels at or above the threshold (spec 15.3). The models that were calibrated are
+-- stored: a changed Jev or judge model makes the row not count. `judge_agreement` and
+-- `jev_judge_agreement` (Jev against the judge) are kept for information only.
 CREATE TABLE eval_calibration (
     metric TEXT NOT NULL PRIMARY KEY,
     items INTEGER NOT NULL,
+    counted INTEGER NOT NULL DEFAULT 0,
     judge_agreement DOUBLE PRECISION,
     jev_agreement DOUBLE PRECISION,
+    jev_judge_agreement DOUBLE PRECISION,
+    jev_model TEXT,
+    judge_model TEXT,
     threshold DOUBLE PRECISION NOT NULL,
     trusted BOOLEAN NOT NULL DEFAULT FALSE,
     computed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

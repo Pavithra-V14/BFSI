@@ -26,6 +26,8 @@ from deepeval.metrics import GEval  # noqa: E402
 from deepeval.models import DeepEvalBaseLLM  # noqa: E402
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams  # noqa: E402
 
+from app.eval.notscored import NotScored  # noqa: E402
+
 Ask = Callable[[str], Awaitable[str]]
 
 REFUSAL_QUALITY = (
@@ -69,6 +71,8 @@ class GatewayJudge(DeepEvalBaseLLM):
 async def _measure(metric: GEval, case: LLMTestCase) -> float | None:
     try:
         await metric.a_measure(case, _show_indicator=False)
+    except NotScored:  # the judge is down or unset: the caller keeps the reason
+        raise
     except Exception:  # an unreadable judge output: "not scored"
         return None
     score = metric.score

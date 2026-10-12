@@ -122,6 +122,43 @@ def _actor() -> str:
         return "cli:unknown"
 
 
+def _trusted(db: Any, gateway: Any) -> dict[str, bool]:
+    """The metrics Jev may decide: calibrated trusted AND calibrated with the Jev model and the
+    judge model that are configured now."""
+    config = getattr(gateway, "config", None)
+    return calibration.trusted_metrics(
+        db,
+        jev_model=(getattr(config, "models", None) or {}).get("JEV_MODEL"),
+        judge_model=getattr(config, "eval_judge_model", None),
+    )
+
+
+def _need_from(estimate: Mapping[str, Any]) -> Any:
+    from app.eval.estimate import Need
+
+    need = Need()
+    for who, row in estimate["providers"].items():
+        need.add(who, int(row["requests"]), int(row["tokens"]))
+    return need
+
+
+def _count_to_usage(db: Any, guard: CostGuard, run_id: str) -> None:
+    """Every call the guard counts is written at once as today's usage of this run, so a crash
+    or a stop loses none of it (spec 15.1: the day's limit check counts every run)."""
+
+    def on_charge(who: str, requests: int, tokens: int) -> None:
+        now = datetime.now(UTC)
+        store.add_usage(db, run_id, now.strftime("%Y-%m-%d"), who, requests=requests, tokens=tokens)
+
+    guard.on_charge = on_charge
+
+
+def _day_room(db: Any, estimate: Mapping[str, Any], config: Any) -> str | None:
+    from app.eval.runner import room_problem
+
+    return room_problem(db, _need_from(estimate), config, now=datetime.now(UTC))
+
+
 def _need_admin_machine(env: Mapping[str, str]) -> None:
     from app.gateway.embeddings import running_on_render
 
@@ -226,14 +263,29 @@ def cmd_run(args, env, out, services_factory) -> int:
         cases = {case.id: case for case in store.list_cases(db, status="set")}
         # The code and the day's room are checked BEFORE anything is built or called: a wrong
         # code never loads the masker or touches a key.
+        from app.eval.runner import ConfirmationExpired, RunBusy
         from app.gateway import GatewayConfig
 
         try:
             start_run(
-                db, run["id"], args.confirm, cases=cases, config=GatewayConfig.for_evaluation(env)
+                db,
+                run["id"],
+                args.confirm,
+                cases=cases,
+                config=GatewayConfig.for_evaluation(env),
+                take_over_starting=bool(getattr(args, "from_page", False)),
             )
         except NotConfirmed:
             out("not started: the confirmation code does not match this estimate")
+            return 2
+        except ConfirmationExpired:
+            out(
+                f"not started: the code is older than {c.CONFIRMATION_MINUTES} minutes; "
+                "make a new estimate"
+            )
+            return 2
+        except RunBusy:
+            out("not started: this run is already running (or its last heartbeat is recent)")
             return 2
         services = services_factory(env)
         run = store.get_run(db, run["id"]) or run
@@ -241,9 +293,14 @@ def cmd_run(args, env, out, services_factory) -> int:
         judge = (
             None
             if args.no_judge
-            else Judge(services.gateway, guard=guard, trusted=calibration.trusted_metrics(db))
+            else Judge(services.gateway, guard=guard, trusted=_trusted(db, services.gateway))
         )
         from app.eval.runner import Harness
+
+        async def embed(texts: list[str]) -> list[list[float]]:
+            # a changed clause is re-embedded with the same call ingestion uses; one request
+            made = await services.gateway.embed(texts, task="document", max_wait_s=60.0)
+            return [list(v) for v in made.vectors]
 
         harness = Harness(
             services.pipeline,
@@ -252,6 +309,7 @@ def cmd_run(args, env, out, services_factory) -> int:
             services.pipeline.deps.collection,
             WORKDIR,
             pace_seconds=args.pace,
+            embed=embed,
         )
         executor = RunExecutor(db, harness, guard, judge, cases, run["id"], lines=prompt_lines())
         outcome = asyncio.run(executor.run_batch(current_batch(run)))
@@ -296,21 +354,54 @@ def cmd_calibrate(args, env, out, services_factory) -> int:
     except NotConfirmed:
         out("not started: the confirmation code does not match this estimate")
         return 2
-    services = services_factory(env)
-    db, _environment = _open(args, env)
+    db, environment = _open(args, env)
+    services = None
     try:
+        problem = _day_room(db, estimate, config)
+        if problem:
+            out(f"not started: {problem}")
+            return 2
+        services = services_factory(env)
+        # a calibration is a run like any other: its calls are counted against today's limits
+        run_id = store.create_run(
+            db,
+            environment=environment,
+            kind="calibration",
+            dataset_version="calibration-v1",
+            system_version={},
+            estimate=estimate,
+            estimate_code=code,
+            case_ids=[item.id for item in items],
+            batches=1,
+            created_by=_actor(),
+        )
+        store.update_run(db, run_id, status=c.RUN_RUNNING, started_at=datetime.now(UTC))
         guard = CostGuard(estimate["total_requests"], estimate["total_tokens"])
-        figures = asyncio.run(calibration.run_calibration(services.gateway, items, guard=guard))
+        _count_to_usage(db, guard, run_id)
+        try:
+            figures = asyncio.run(calibration.run_calibration(services.gateway, items, guard=guard))
+        except OverEstimate as stop:
+            store.update_run(
+                db, run_id, status=c.RUN_ABORTED, note=str(stop)[:200],
+                tokens_used=guard.tokens, requests_used=guard.requests,
+            )  # fmt: skip
+            out(f"stopped by the cost guard: {stop}")
+            return 3
         calibration.save(db, figures)
-    except OverEstimate as stop:
-        out(f"stopped by the cost guard: {stop}")
-        return 3
+        store.update_run(
+            db, run_id, status=c.RUN_FINISHED, finished_items=len(items),
+            tokens_used=guard.tokens, requests_used=guard.requests,
+            finished_at=datetime.now(UTC),
+        )  # fmt: skip
     finally:
-        services.close()
+        if services is not None:
+            services.close()
         db.close()
     for metric, row in sorted(figures.items()):
         out(
-            f"{metric}: judge {row['judge_agreement']}, Jev {row['jev_agreement']}, "
+            f"{metric}: judge {row['judge_agreement']}, Jev {row['jev_agreement']} "
+            f"({row['jev_counted']} of {row['items']} counted), "
+            f"Jev vs judge {row['jev_judge_agreement']}, "
             f"Jev trusted: {'yes' if row['trusted'] else 'no'}"
         )
     return 0
@@ -380,9 +471,13 @@ def cmd_judge_samples(args, env, out, services_factory) -> int:
         except NotConfirmed:
             out("not started: the confirmation code does not match this estimate")
             return 2
+        problem = _day_room(db, estimate, GatewayConfig.for_evaluation(env))
+        if problem:
+            out(f"not started: {problem}")
+            return 2
         services = services_factory(env)
         guard = CostGuard(estimate["total_requests"], estimate["total_tokens"])
-        judge = Judge(services.gateway, guard=guard, trusted=calibration.trusted_metrics(db))
+        judge = Judge(services.gateway, guard=guard, trusted=_trusted(db, services.gateway))
         run_id = store.create_run(
             db,
             environment=environment,
@@ -395,6 +490,8 @@ def cmd_judge_samples(args, env, out, services_factory) -> int:
             batches=1,
             created_by=_actor(),
         )
+        store.update_run(db, run_id, status=c.RUN_RUNNING, started_at=datetime.now(UTC))
+        _count_to_usage(db, guard, run_id)
 
         async def work() -> int:
             done = 0
@@ -555,6 +652,7 @@ def main(
     run.add_argument("--confirm", help="the confirmation code printed with the estimate")
     run.add_argument("--no-judge", action="store_true")
     run.add_argument("--pace", type=float, default=3.0, help="seconds between questions")
+    run.add_argument("--from-page", action="store_true", help=argparse.SUPPRESS)
     cal = with_db(commands.add_parser("calibrate", help="judge and Jev against the labels"))
     cal.add_argument("--confirm")
     samples = with_db(commands.add_parser("judge-samples", help="judge the production sample"))

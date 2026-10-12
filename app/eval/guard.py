@@ -12,7 +12,8 @@ resumed run (a later batch, another day) continues counting from where the run w
 from __future__ import annotations
 
 import hmac
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.eval import constants as c
@@ -44,6 +45,19 @@ def check_confirmation(
         raise NotConfirmed("the confirmation code does not match this estimate")
 
 
+def confirmation_expired(
+    created_at: Any, confirmed_at: Any, now: datetime, minutes: int = c.CONFIRMATION_MINUTES
+) -> bool:
+    """True when a run that was never confirmed is older than its code's window. A run that was
+    confirmed once continues its later batches under that confirmation."""
+    if confirmed_at is not None:
+        return False
+    made = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    if made.tzinfo is None:
+        made = made.replace(tzinfo=UTC)
+    return now - made > timedelta(minutes=minutes)
+
+
 class CostGuard:
     def __init__(
         self,
@@ -53,6 +67,7 @@ class CostGuard:
         margin: float = c.OVER_ESTIMATE_MARGIN,
         used_requests: int = 0,
         used_tokens: int = 0,
+        on_charge: Callable[[str, int, int], None] | None = None,
     ) -> None:
         self.estimated_requests = int(estimated_requests)
         self.estimated_tokens = int(estimated_tokens)
@@ -61,6 +76,9 @@ class CostGuard:
         self.tokens = int(used_tokens)
         # what this process used, by provider group (the daily limits are per group)
         self.usage: dict[str, list[int]] = {}
+        # called for EVERY charge (group, requests, tokens), before the margin is checked: this is
+        # where the run's own usage rows are written, so a crash loses at most the call in flight
+        self.on_charge = on_charge
 
     @property
     def allowed_requests(self) -> int:
@@ -70,16 +88,23 @@ class CostGuard:
     def allowed_tokens(self) -> int:
         return int(self.estimated_tokens * (1.0 + self.margin))
 
-    def charge(self, *, requests: int = 0, tokens: int = 0, who: str = "answer") -> None:
-        """Count a call (or a batch of them) for a provider group. Raises `OverEstimate` once past
-        the margin."""
+    def charge(
+        self, *, requests: int = 0, tokens: int = 0, who: str = "answer", defer: bool = False
+    ) -> None:
+        """Count a call for a provider group, at the moment it is made. Raises `OverEstimate` once
+        past the margin, unless `defer`: the system under test is being run and must not be cut in
+        the middle of a turn, so its calls are counted at once and the stop is `check()`ed at the
+        end of the turn."""
         requests, tokens = max(int(requests), 0), max(int(tokens), 0)
         self.requests += requests
         self.tokens += tokens
         row = self.usage.setdefault(who, [0, 0])
         row[0] += requests
         row[1] += tokens
-        self.check()
+        if self.on_charge is not None and (requests or tokens):
+            self.on_charge(who, requests, tokens)
+        if not defer:
+            self.check()
 
     def check(self) -> None:
         if self.requests > self.allowed_requests:
