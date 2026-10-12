@@ -1,8 +1,11 @@
 """What every route needs: the services, a database handle, the signed-in user (spec 4.1 step 1).
 
-The client address is the socket address. X-Forwarded-For is NOT trusted: anyone can send it, and
-trusting it would let an attacker pick the address the throttle sees. Phase 15 configures a
-trusted proxy on the host (its options set explicitly and tested), and only then may this change.
+The client address is the socket address, unless TRUSTED_PROXY_HOPS (default 0) says how many
+proxies stand in front of the API (Phase 15). X-Forwarded-For is never read at 0 hops: anyone can
+send it, and trusting it would let an attacker pick the address the throttle sees. With N hops
+the entry N places from the END is used, because each trusted proxy appends the address it saw;
+an entry that is not an address, or a header with fewer entries than hops, falls back to the
+socket's address. The server is started with --no-proxy-headers, so only this code reads it.
 
 The database is opened lazily, on first use. A request that is refused before it needs the
 database (no token, a bad token, a throttled login) never opens a connection, so an anonymous

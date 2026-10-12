@@ -70,6 +70,21 @@ them in a chat, a file in this folder or a ticket.
 
 ## 2. Step by step: the first deploy (Run 28)
 
+### 2.0 The helper that reads a secret (once per PowerShell window)
+
+Several commands below read a secret with `Read-Secret`. It is not a Windows command: paste this
+into the window first. It asks for the value with a hidden prompt, so it never appears on screen
+or in your command history (the same function is in `docs/OWNER_RUNS.md`, "Common setup"):
+
+```
+function Read-Secret($name) {
+  $s = Read-Host "$name (hidden)" -AsSecureString
+  $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
+  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
+}
+```
+
 ### 2.1 The database tables (from your machine, once)
 
 1. In Neon, open your main database and copy the **direct** connection string (the host does NOT
@@ -110,7 +125,8 @@ refuses the file until you do, which is the point.
    values of the "required" rows; a provider you do not have (Jina, a second embedding key) can be
    left empty.
 3. For `bfsi-frontend` fill `API_BASE_URL` with the address Render shows for `bfsi-api` (it starts
-   with `https://`). For `bfsi-api` fill `CORS_ALLOWED_ORIGIN` with the address of `bfsi-frontend`.
+   with `https://`; on Render the page refuses to start without it, and refuses an `http://`
+   address, naming the variable only). For `bfsi-api` fill `CORS_ALLOWED_ORIGIN` with the address of `bfsi-frontend`.
    Render shows both addresses only after the services exist: create them, then come back to
    **Environment** of each service, fill these two, and save (Render restarts the service).
 4. Wait for both to show **Live** (the first build takes several minutes).
@@ -127,18 +143,26 @@ sign-in page. Sign in as the admin of 2.1.
 ### 2.6 Check the client address (the proxy setting)
 
 Render puts its own proxy in front of the API. The API must count limits per real user address,
-not per Render's proxy. In the frontend, sign in as admin, or call the API directly with the
-admin's token:
+not per Render's proxy. **`render.yaml` ships with `TRUSTED_PROXY_HOPS` at 0** (the header is not
+read, everyone shares one limit: safe, only coarse) until you have looked at what Render really
+sends. Call the diagnostics route with the admin's token:
 
 ```
 curl -H "Authorization: Bearer TOKEN" https://YOUR-API.onrender.com/admin/diagnostics
 ```
 
-You should see `forwarded_entries` of 1 or more, `trusted_proxy_hops` of 1, `address_source` of
-`forwarded`, and `client_address_used` equal to **your real public address** (ask a "what is my IP"
-page). If it shows an address that is not yours, or `socket`, stop: set `TRUSTED_PROXY_HOPS`
-differently (0 to 3) and send the numbers shown to your helper. Do not open the service to users
-until this is right.
+You should see `trusted_proxy_hops` of 0, `forwarded_entries` of 1 or more, and
+`address_at_one_hop` equal to **your real public address** (ask a "what is my IP" page, from the
+same network you called from). `socket_address` is Render's proxy, not you.
+
+- If `address_at_one_hop` **is** your public address: Render's proxy writes the address it saw as
+  the last entry. In the Render dashboard, `bfsi-api`, **Environment**, set `TRUSTED_PROXY_HOPS`
+  to `1`, **Save**, wait for the restart, call the route again: `address_source` is now
+  `forwarded` and `client_address_used` is your address. Also change the value in `render.yaml`
+  (so a rebuilt blueprint keeps it) and commit that one line.
+- If it is **not** your address (it is Render's own, or an address you do not know), or
+  `forwarded_entries` is 0: leave it at 0 and send the numbers shown (never the whole address, the
+  first two groups are enough) to your helper. Do not set 1.
 
 ### 2.7 Check the memory
 
@@ -163,8 +187,14 @@ checklist (section 6). Nothing in this guide moves it for you.
    Monday to Friday. Honest limits: GitHub runs scheduled workflows on a best-effort basis (a run
    can be late or skipped), and **switches a scheduled workflow off after 60 days without any
    activity in the repository** (any commit switches it back on).
-3. After every push to `main` the CI job `post-deploy-smoke` asks `/live` for up to 12 minutes and
-   shows a red cross if the API never answers. It is an alert, not a gate.
+3. After a push to `main` has passed the CI checks, the separate workflow `After a deploy` waits
+   five minutes, then asks `/live` for up to 12 minutes and goes **red** if the API never answers.
+   It is an alert on `/live` only: it cannot tell the new build from the old one (the liveness
+   answer reveals nothing, by design), so green means "the service is up". It is a separate
+   workflow on purpose: Render waits for every check of a commit before it deploys, and a check
+   that failed while the service was down would hold the very fix.
+4. Both workflows **fail visibly** (a red run; GitHub notifies the person who last changed the
+   workflow, according to their notification settings). Neither blocks anything.
 
 ---
 
@@ -172,6 +202,12 @@ checklist (section 6). Nothing in this guide moves it for you.
 
 - Render deploys on its own **after the CI checks pass** on `main` (`autoDeployTrigger:
   checksPass`). No Render secret is stored in GitHub.
+- **This is the one gate, and it is a documented exception** to the rule that no check blocks a
+  release (spec 17.2): a failing check holds only the AUTOMATIC deploy. It never stops you.
+- **To release anyway** (a check is red and you decide to ship, or a fix must go out now): Render
+  dashboard, `bfsi-api`, **Manual Deploy**, **Deploy a specific commit**, pick the commit (or
+  **Deploy latest commit**), **Deploy**. Do the same on `bfsi-frontend` if it changed. Write why in
+  a release record (`docs/releases/`): a release that skipped a red check always gets one.
 - **Going back** (the rehearsed rollback, under 5 minutes): Render dashboard, the service,
   **Deploys**, pick the last good deploy, **Rollback**. Then ask `/live`. Details and the
   rehearsal record: `docs/runbooks/bad-deploy-rollback.md` (Run 29).
@@ -297,7 +333,7 @@ move is deliberate. Before `staff_beta`, every line must be true:
       the band.
 - [ ] Run 22 is done: the production sample is written (masked) and judged.
 - [ ] Run 25 (cassettes) and Run 27 (a short real-provider run) are done and clean.
-- [ ] No critical alert in the last 7 days; the retention task has run in the last 3 days.
+- [ ] No critical alert in the last 7 days; the retention task has run in the last 7 days.
 - [ ] The red-team set passes (Phase 16).
 - [ ] The release record for this stage exists in `docs/releases/`.
 - [ ] You have read the data-flow page (`docs/DATA_FLOW.md`) and agree with it.
@@ -360,8 +396,10 @@ Not scheduled on purpose:
   and spends the free tiers: it is a manual step, weekly, after the drift report.
 - **Load tests** are only ever run by you, with your yes.
 
-The retention task writes one `retention_sweep` row each time it runs. If no such row is three
-days old, the service raises the warning alert `retention_overdue` (the admin banner shows it).
+The retention task writes one `retention_sweep` row each time it runs. When the newest such row is
+more than seven days old, the service raises the warning alert `retention_overdue` (the admin
+banner shows it). The task runs daily, so a week of quiet means the machine was off or the task
+failed.
 
 ### 9.1 How a scheduled task gets its secrets
 

@@ -16,9 +16,9 @@ once (`docs/runbooks/key-leaked.md`); this page is for the routine.
 | Vector store key | `QDRANT_API_KEY` | yes | the shell of an ingest or a snapshot | every 180 days |
 | Cache address | `UPSTASH_REDIS_URL` | yes | the shell of the cache check | every 180 days |
 | Database addresses | `DATABASE_URL`, `EVAL_DATABASE_URL` | yes | the shell of migrations and the retention task | every 180 days (the password inside) |
-| Tracing keys | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | yes | the shell of the retention task | every 180 days |
+| Tracing keys | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | yes | only in a shell that runs the Langfuse smoke check (Run 13); the retention task does not need them | every 180 days |
 | Signing secret | `JWT_SECRET_KEY` | yes | the shell of a local API run | once a year, or on a leak (signs everyone out) |
-| Hash keys | `AUDIT_HASH_KEY`, `LANGFUSE_USER_HASH_KEY` | yes | the shell of the retention task | only on a leak (older hashes stop matching) |
+| Hash keys | `AUDIT_HASH_KEY`, `LANGFUSE_USER_HASH_KEY` | yes | `LANGFUSE_USER_HASH_KEY` only: the shell of the retention task (the only Langfuse setting it reads); `AUDIT_HASH_KEY` only a local API run | only on a leak: see "What a hash key change does" below |
 | Chat webhook | `ALERT_WEBHOOK_URL` | yes | the shell of the webhook test | every 180 days |
 
 Spec 2: the owner must also check each provider's terms of service for using several accounts [T].
@@ -39,6 +39,23 @@ Spec 2: the owner must also check each provider's terms of service for using sev
 
 A single-value secret (the Jev key, the database address, the webhook address): replace it, save,
 ask one question, then revoke the old one.
+
+## What a hash key change does
+
+Both hash keys are used to turn a name or an address into a hash that cannot be turned back. A new
+key gives a new hash for the same input, so:
+
+- **`AUDIT_HASH_KEY`:** (1) the login and registration throttle counters, which are kept under
+  hashes of addresses and usernames, **start from zero**: for the next window an attacker who was
+  being slowed down gets a fresh allowance. Rotate at a quiet time and, if you are under attack,
+  not at all until it is over. (2) The usernames in audit rows are keyed hashes: rows written
+  before the change and rows written after it **cannot be matched** to each other. (3) Nothing
+  stored in clear changes; no user is signed out.
+- **`LANGFUSE_USER_HASH_KEY`:** the hashed user and chat names sent to Langfuse change, so the
+  traces of a chat written before the change **can no longer be found by the chat's hash**: the
+  deletion of a chat's traces after the change does not reach the older ones. Run the retention
+  task once (so queued deletions go out) before you rotate it.
+- **`JWT_SECRET_KEY`:** every signed-in user is signed out (their tokens no longer verify).
 
 ## A drill (Run 31)
 

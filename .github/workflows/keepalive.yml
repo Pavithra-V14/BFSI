@@ -1,6 +1,9 @@
 name: Keep the free services awake
 
-# The uptime pinger (spec 11.2, 17.1). ALERT ONLY: a red cross never blocks anything.
+# The uptime pinger (spec 11.2, 17.1). It blocks nothing (a scheduled run is attached to no merge
+# and no release), and it FAILS VISIBLY: when a service does not answer inside the window the run
+# is red and GitHub tells the person who last changed this workflow (their notification settings
+# decide how). There is no `continue-on-error` on purpose: that would hide the failure.
 #
 # Render's free instances sleep when idle, and an always-awake service uses its free hours (about
 # 750 a month per account for ALL services together [T: verify]; two services awake all month
@@ -26,7 +29,6 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Stay inside the window (02:30 to 14:30 UTC, Monday to Friday)
         id: window

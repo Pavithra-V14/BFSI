@@ -60,7 +60,12 @@ def test_a_bad_api_address_is_refused_naming_the_variable_and_never_its_value(va
 
 def test_the_admin_machine_switch_is_ignored_on_the_host():
     assert load_settings({"ADMIN_MACHINE": "true"}).admin_machine is True
-    assert load_settings({"ADMIN_MACHINE": "true", "RENDER": "true"}).admin_machine is False
+    assert (
+        load_settings(
+            {"ADMIN_MACHINE": "true", "RENDER": "true", "API_BASE_URL": "https://api.example.test"}
+        ).admin_machine
+        is False
+    )
     assert load_settings({"ADMIN_MACHINE": "false"}).admin_machine is False
 
 
@@ -904,7 +909,12 @@ def test_the_admin_machine_switch_does_nothing_on_the_host(monkeypatch):
             monkeypatch,
             role="admin",
             username="boss",
-            env={"ADMIN_MACHINE": "true", "RENDER": "true"},
+            # on the host the API's https address is required (Phase 15)
+            env={
+                "ADMIN_MACHINE": "true",
+                "RENDER": "true",
+                "API_BASE_URL": "https://api.example.test",
+            },
         ).run(),
         "Entities",
     )
@@ -1025,3 +1035,31 @@ def test_the_question_and_the_token_are_not_logged(monkeypatch, caplog):
     assert at.session_state["fx_token"] == FAKE_TOKEN
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert FAKE_TOKEN not in logged and "private question" not in logged
+
+
+# ==== on the hosting service the API's address is required and must be https (Phase 15) ====
+HOST_API = "https://api.example.test"
+
+
+def test_on_the_host_a_missing_api_address_stops_the_start_and_names_only_the_variable():
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"RENDER": "true"})
+    assert "API_BASE_URL" in str(caught.value) and "127.0.0.1" not in str(caught.value)
+    assert "must be set" in str(caught.value), "the message says it is MISSING, not only wrong"
+    with pytest.raises(ConfigError) as blank:
+        load_settings({"RENDER": "true", "API_BASE_URL": "   "})
+    assert "must be set" in str(blank.value)
+
+
+@pytest.mark.parametrize("value", ["http://api.example.test", "http://127.0.0.1:8000"])
+def test_on_the_host_a_plain_http_address_is_refused_without_showing_it(value):
+    with pytest.raises(ConfigError) as caught:
+        load_settings({"RENDER": "true", "API_BASE_URL": value})
+    assert "API_BASE_URL" in str(caught.value) and "https://" in str(caught.value)
+    assert value not in str(caught.value)
+
+
+def test_on_the_host_an_https_address_is_accepted_and_off_the_host_the_default_stays():
+    settings = load_settings({"RENDER": "true", "API_BASE_URL": HOST_API + "/"})
+    assert settings.api_base_url == HOST_API and settings.on_host is True
+    assert load_settings({}).api_base_url == "http://127.0.0.1:8000"  # this machine: unchanged

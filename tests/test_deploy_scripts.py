@@ -35,57 +35,78 @@ QDRANT_ENV = {"QDRANT_URL": "https://q.example.test:6333", "QDRANT_API_KEY": mad
 
 
 # ================================================================================ snapshots
-class Refused(Exception):
-    """What qdrant-client raises for a 403: an exception that carries the status code."""
+class StatusError(Exception):
+    """What qdrant-client raises for an HTTP error: an exception that carries the status code."""
 
-    status_code = 403
+    def __init__(self, status_code):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+def snap(name, size=100, made="2026-10-10T00:00:00+00:00", checksum=None):
+    return SimpleNamespace(name=name, size=size, creation_time=made, checksum=checksum)
 
 
 class FakeQdrant:
-    def __init__(self, names=("a.snapshot", "b.snapshot", "c.snapshot"), refuse=False):
-        self.items = [
-            SimpleNamespace(name=n, size=100 + i, creation_time=f"2026-10-1{i}T00:00:00")
-            for i, n in enumerate(names)
-        ]
+    def __init__(self, items=None, refuse_with=None):
+        self.items = (
+            list(items)
+            if items is not None
+            else [
+                snap("a.snapshot", 101, "2026-10-10T00:00:00+00:00"),
+                snap("b.snapshot", 102, "2026-10-11T00:00:00+00:00"),
+                snap("c.snapshot", 103, "2026-10-12T00:00:00+00:00"),
+            ]
+        )
         self.created = 0
         self.deleted: list[str] = []
-        self.refuse = refuse
+        self.refuse_with = refuse_with
 
     def list_snapshots(self, collection):
         assert collection == "documents"
+        if self.refuse_with:
+            raise StatusError(self.refuse_with)
         return list(self.items)
 
     def create_snapshot(self, collection):
-        if self.refuse:
-            raise Refused("the plan does not include snapshots")
+        if self.refuse_with:
+            raise StatusError(self.refuse_with)
         self.created += 1
-        return SimpleNamespace(name="new.snapshot", size=1, creation_time="2026-10-20T00:00:00")
+        return snap("new.snapshot", 1, "2026-10-20T00:00:00+00:00")
 
     def delete_snapshot(self, collection, name):
         self.deleted.append(name)
 
 
-def run_snapshot(args, client=None, env=None, folder=None):
+def run_snapshot(args, client=None, env=None, folder=None, fetch=None):
     out = Lines()
     code = qdrant_snapshot.main(
-        args, QDRANT_ENV if env is None else env, out=out, client=client, folder=folder
+        args,
+        QDRANT_ENV if env is None else env,
+        out=out,
+        client=client,
+        folder=folder,
+        fetch=fetch,
     )
     return code, out
 
 
-def test_listing_changes_nothing_and_prints_names_sizes_times():
+def test_listing_changes_nothing_and_prints_names_sizes_times_and_whether_a_copy_is_here(tmp_path):
     client = FakeQdrant()
-    code, out = run_snapshot(["list"], client)
-    assert code == 0 and "3 snapshot(s)" in out.text and "a.snapshot" in out.text
+    (tmp_path / "b.snapshot").write_bytes(b"x" * 102)
+    code, out = run_snapshot(["list"], client, folder=tmp_path)
+    assert code == 0 and "3 snapshot(s)" in out.text
+    assert out[1].startswith("  c.snapshot")  # newest first
+    assert "b.snapshot  102 bytes" in out.text and "copy here" in out.text
     assert client.created == 0 and client.deleted == []
 
 
-def test_create_and_prune_and_download_need_the_run_flag():
+def test_create_and_prune_and_download_need_the_run_flag(tmp_path):
     client = FakeQdrant()
     for args in (["create"], ["prune", "--keep", "1"], ["download", "a.snapshot"]):
-        code, out = run_snapshot(args, client)
+        code, out = run_snapshot(args, client, folder=tmp_path)
         assert code == 0 and "add --run" in out.text
-    assert client.created == 0 and client.deleted == []
+    assert client.created == 0 and client.deleted == [] and not list(tmp_path.iterdir())
 
 
 def test_create_with_run_makes_one_snapshot():
@@ -94,19 +115,163 @@ def test_create_with_run_makes_one_snapshot():
     assert code == 0 and client.created == 1 and "created new.snapshot" in out.text
 
 
-def test_prune_keeps_the_newest_and_deletes_the_older_ones():
-    client = FakeQdrant(names=("old1", "old2", "new1", "new2"))
-    code, out = run_snapshot(["prune", "--keep", "2", "--run"], client)
-    assert code == 0 and client.deleted == ["old1", "old2"]
-    code, _ = run_snapshot(["prune", "--keep", "0", "--run"], FakeQdrant())  # never keeps zero
-    assert code == 0
+# ---- download: a temporary name, kept only after the size (and checksum) match ---------------
+def chunks(data, size=7):
+    def fetch(name):
+        for i in range(0, len(data), size):
+            yield data[i : i + size]
+
+    return fetch
 
 
-def test_a_server_that_refuses_snapshots_says_so_and_names_the_fallback():
-    client = FakeQdrant(refuse=True)
-    code, out = run_snapshot(["create", "--run"], client)
-    assert code == qdrant_snapshot.REFUSED_EXIT == 2
+def test_a_good_download_is_renamed_only_at_the_end_and_prints_the_checksum(tmp_path):
+    import hashlib
+
+    data = b"snapshot-bytes-" * 10
+    client = FakeQdrant([snap("a.snapshot", len(data), checksum=hashlib.sha256(data).hexdigest())])
+    code, out = run_snapshot(
+        ["download", "a.snapshot", "--run"], client, folder=tmp_path, fetch=chunks(data)
+    )
+    assert code == 0 and (tmp_path / "a.snapshot").read_bytes() == data
+    assert not list(tmp_path.glob("*.part"))
+    assert hashlib.sha256(data).hexdigest()[:16] in out.text
+
+
+def test_a_truncated_download_leaves_nothing_behind(tmp_path):
+    data = b"y" * 100
+    client = FakeQdrant([snap("a.snapshot", 100)])
+    code, out = run_snapshot(
+        ["download", "a.snapshot", "--run"], client, folder=tmp_path, fetch=chunks(data[:60])
+    )
+    assert code == 1 and "size" in out.text and "nothing was kept" in out.text
+    assert not list(tmp_path.iterdir()), "neither the snapshot nor a .part file"
+
+
+def test_a_download_whose_checksum_differs_is_deleted(tmp_path):
+    data = b"z" * 50
+    client = FakeQdrant([snap("a.snapshot", 50, checksum="0" * 64)])
+    code, out = run_snapshot(
+        ["download", "a.snapshot", "--run"], client, folder=tmp_path, fetch=chunks(data)
+    )
+    assert code == 1 and "checksum" in out.text and not list(tmp_path.iterdir())
+
+
+def test_a_download_that_fails_half_way_leaves_nothing(tmp_path):
+    def broken(name):
+        yield b"abc"
+        raise ConnectionError("https://secret.example.test dropped")
+
+    client = FakeQdrant([snap("a.snapshot", 100)])
+    code, out = run_snapshot(
+        ["download", "a.snapshot", "--run"], client, folder=tmp_path, fetch=broken
+    )
+    assert code == 1 and "ConnectionError" in out.text and "secret.example" not in out.text
+    assert not list(tmp_path.iterdir())
+
+
+def test_download_takes_a_name_from_the_list_only(tmp_path):
+    client = FakeQdrant()
+    code, out = run_snapshot(
+        ["download", "../../etc/passwd", "--run"], client, folder=tmp_path, fetch=chunks(b"")
+    )
+    assert code == 1 and "no such snapshot" in out.text and not list(tmp_path.iterdir())
+
+
+# ---- prune: a reliable order, and only what is safe -----------------------------------------
+def copy_of(folder, name, size):
+    (folder / name).write_bytes(b"c" * size)
+
+
+def test_prune_deletes_only_older_snapshots_that_have_a_copy_of_the_same_size(tmp_path):
+    client = FakeQdrant(
+        [
+            snap("old1", 11, "2026-10-01T00:00:00Z"),
+            snap("old2", 12, "2026-10-02T00:00:00Z"),
+            snap("new1", 13, "2026-10-11T00:00:00Z"),
+            snap("new2", 14, "2026-10-12T00:00:00Z"),
+        ]
+    )
+    copy_of(tmp_path, "old1", 11)  # the same size: safe
+    copy_of(tmp_path, "old2", 5)  # another size: not a confirmed copy
+    code, out = run_snapshot(["prune", "--keep", "2", "--run"], client, folder=tmp_path)
+    assert code == 0 and client.deleted == ["old1"]
+    assert "kept old2: the downloaded copy has another size" in out.text
+
+
+def test_prune_keeps_a_snapshot_that_has_no_copy_at_all(tmp_path):
+    client = FakeQdrant(
+        [snap("old", 5, "2026-10-01T00:00:00Z"), snap("new", 6, "2026-10-12T00:00:00Z")]
+    )
+    code, out = run_snapshot(["prune", "--keep", "1", "--run"], client, folder=tmp_path)
+    assert code == 0 and client.deleted == [] and "kept old: no downloaded copy" in out.text
+
+
+def test_prune_never_touches_a_snapshot_whose_time_it_cannot_read(tmp_path):
+    client = FakeQdrant(
+        [
+            snap("mystery", 5, ""),
+            snap("odd", 5, "not a time"),
+            snap("new", 6, "2026-10-12T00:00:00Z"),
+        ]
+    )
+    copy_of(tmp_path, "mystery", 5)
+    copy_of(tmp_path, "odd", 5)
+    code, out = run_snapshot(["prune", "--keep", "1", "--run"], client, folder=tmp_path)
+    assert code == 0 and client.deleted == []
+    assert out.text.count("no readable creation time") == 2
+
+
+def test_prune_never_deletes_the_only_snapshot_or_the_newest_even_with_keep_zero(tmp_path):
+    only = FakeQdrant([snap("only", 5, "2026-10-12T00:00:00Z")])
+    copy_of(tmp_path, "only", 5)
+    run_snapshot(["prune", "--keep", "0", "--run"], only, folder=tmp_path)
+    assert only.deleted == []
+    two = FakeQdrant([snap("a", 5, "2026-10-01T00:00:00Z"), snap("b", 5, "2026-10-12T00:00:00Z")])
+    copy_of(tmp_path, "a", 5)
+    copy_of(tmp_path, "b", 5)
+    run_snapshot(["prune", "--keep", "0", "--run"], two, folder=tmp_path)
+    assert two.deleted == ["a"], "keep is floored at 1: the newest stays"
+
+
+def test_prune_orders_by_time_not_by_the_order_the_server_lists_them(tmp_path):
+    client = FakeQdrant(
+        [
+            snap("middle", 5, "2026-10-05T00:00:00Z"),
+            snap("newest", 5, "2026-10-12T00:00:00Z"),
+            snap("oldest", 5, "2026-10-01T00:00:00Z"),
+        ]
+    )
+    for name in ("middle", "newest", "oldest"):
+        copy_of(tmp_path, name, 5)
+    run_snapshot(["prune", "--keep", "1", "--run"], client, folder=tmp_path)
+    assert sorted(client.deleted) == ["middle", "oldest"]
+
+
+# ---- a rejected key is not "no snapshots on this plan" ---------------------------------------
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_rejected_key_is_reported_as_such_with_its_own_exit_code(status):
+    code, out = run_snapshot(["create", "--run"], FakeQdrant(refuse_with=status))
+    assert code == qdrant_snapshot.KEY_REJECTED_EXIT == 3
+    assert "key was rejected" in out.text and "QDRANT_API_KEY" in out.text
+    assert "re-ingest" not in out.text
+
+
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_a_cluster_without_snapshot_routes_names_the_fallback(status):
+    code, out = run_snapshot(["create", "--run"], FakeQdrant(refuse_with=status))
+    assert code == qdrant_snapshot.UNSUPPORTED_EXIT == 2
     assert "re-ingest from originals/" in out.text and "restore-documents.md" in out.text
+
+
+def test_a_key_error_while_downloading_is_also_a_rejected_key(tmp_path):
+    def rejected(name):
+        raise qdrant_snapshot.KeyRejected
+        yield b""  # pragma: no cover
+
+    code, out = run_snapshot(
+        ["download", "a.snapshot", "--run"], FakeQdrant(), folder=tmp_path, fetch=rejected
+    )
+    assert code == 3 and not list(tmp_path.iterdir())
 
 
 def test_an_unknown_error_prints_its_class_only():
@@ -116,13 +281,6 @@ def test_an_unknown_error_prints_its_class_only():
 
     code, out = run_snapshot(["list"], Broken())
     assert code == 1 and "RuntimeError" in out.text and "secret.example" not in out.text
-
-
-def test_download_takes_a_bare_name_only_and_an_unknown_name_is_refused(tmp_path):
-    client = FakeQdrant()
-    code, out = run_snapshot(["download", "../../etc/passwd", "--run"], client, folder=tmp_path)
-    assert code == 1 and "no such snapshot" in out.text
-    assert not list(tmp_path.iterdir())
 
 
 def test_snapshots_are_refused_on_render_and_without_the_settings():

@@ -1677,16 +1677,19 @@ It asks you to type the id.
 - **Steps:** follow `docs/DEPLOY.md` section 2.1 to 2.9 in order. The numbers to send back come
   from three of them:
   1. **2.5:** `curl https://YOUR-API.onrender.com/live` shows `{"status":"ok"}`.
-  2. **2.6, the client address:** `GET /admin/diagnostics` with the admin's token. Compare
-     `client_address_used` with your real public address from a "what is my IP" page. They must be
-     equal and `address_source` must be `forwarded`.
+  2. **2.6, the client address:** `render.yaml` ships `TRUSTED_PROXY_HOPS` at 0. `GET
+     /admin/diagnostics` with the admin's token shows `address_at_one_hop`: compare it with your
+     real public address from a "what is my IP" page. Only when they are equal, set
+     `TRUSTED_PROXY_HOPS` to `1` in Render's Environment tab (and in `render.yaml`), save, and call
+     the route again: `address_source` must now be `forwarded` and `client_address_used` your
+     address.
   3. **2.7, memory:** read `/admin/diagnostics` right after a question was asked and a sign-in
      was done in a second tab: send `memory_mb` and `peak_memory_mb`.
 - **You should see:** `/live` ok; the sign-in page; an admin who can sign in; the stage `shadow`
   on the Rollout page; the diagnostics numbers above.
-- **If a line differs:** an address that is not yours, or `socket`: stop, do not open the service,
-  and send `forwarded_entries`, `trusted_proxy_hops`, `address_source` and
-  `client_address_used`'s first two groups only. `peak_memory_mb` over about 450: `DEPLOY.md`
+- **If a line differs:** `address_at_one_hop` is not your address, or `forwarded_entries` is 0:
+  leave the setting at 0, do not open the service, and send `forwarded_entries`,
+  `trusted_proxy_hops`, `address_source` and the first two groups of `address_at_one_hop` only. `peak_memory_mb` over about 450: `DEPLOY.md`
   section 7 (lower `PASSWORD_HASH_CONCURRENCY`, then a larger instance; masking stays on).
   `refusing to start: NAME`: fix that variable.
 - **Send back:** the three outputs, and the date and time the first deploy went Live.
@@ -1734,8 +1737,9 @@ It asks you to type the id.
       uv run python scripts/qdrant_snapshot.py download SNAPSHOT_NAME --run
 
   You should see `created ...`, then the name in the list, then `saved ... in ...backups\qdrant`.
-- **Step 3. If a line says `the server refused snapshots`** (exit code 2): the plan does not
-  include them. Then the backup is a re-ingest. Do the restore test of
+- **Step 3. If a line says `the cluster does not offer snapshots`** (exit code 2): the plan does
+  not include them. Then the backup is a re-ingest. (A line `the key was rejected`, exit code 3,
+  is a different thing: check `QDRANT_API_KEY` and its access rights.) Do the restore test of
   `docs/runbooks/restore-documents.md` (one document into `documents_eval`, compare the active
   chunk counts) and fill in where `originals/` is backed up.
 - **If a line differs:** `not started: QDRANT_URL is not set`: set it in this window. A different
@@ -1796,7 +1800,7 @@ It asks you to type the id.
 - **If a line differs:** `not started: NAME is not set in this window`: the encrypted file of that
   name is missing.
 - **Send back:** the three outputs (counts and names only) and the date the tasks were created.
-  Three days later check the admin banner has no `retention_overdue`.
+  A week later check the admin banner has no `retention_overdue` (the alert waits seven days).
 - **Clear:** the encrypted files stay (they are yours); remove a task you no longer want.
 - **Real calls:** a few requests to the database, the cache and Qdrant; no model call.
 - **Safe to repeat:** yes.

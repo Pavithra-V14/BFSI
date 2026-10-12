@@ -1,0 +1,50 @@
+name: After a deploy
+
+# The look at the API after a deploy (spec 17.2, Phase 15): an ALERT ON `/live` ONLY.
+#
+# It starts only when the CI workflow has finished successfully for a push to main (a separate
+# workflow on purpose: Render waits for every check of the commit before it deploys, and a check
+# that could fail while the service is down would hold the very fix that brings it back).
+#
+# What it does: it waits five minutes (Render's build and start), then asks the API's public
+# liveness address (the repository VARIABLE RENDER_API_URL, not a secret) every 30 seconds for up
+# to 12 minutes and goes red when it never answers. It cannot tell the new build from the old one
+# (the liveness answer reveals nothing, by design): a green run means "the service is up", not
+# "the new build is up". It FAILS VISIBLY (no `continue-on-error`) and gates nothing.
+#
+# No secret is used. It never runs for a fork's pull request: the conditions below.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the liveness address until it answers
+        env:
+          API_URL: ${{ vars.RENDER_API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "RENDER_API_URL is not set as a repository variable: nothing to check yet"
+            exit 0
+          fi
+          sleep 300
+          for attempt in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${API_URL%/}/live" || true)
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "the API did not answer /live within 12 minutes of the deploy window"
+          exit 1

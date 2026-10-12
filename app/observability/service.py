@@ -33,7 +33,7 @@ def day_floor(moment: datetime) -> datetime:
 ROLLUP_SECONDS = 300.0
 TRACE_SECONDS = 60.0
 RETENTION_CHECK_SECONDS = 3_600.0  # the overdue check runs once an hour
-RETENTION_OVERDUE_DAYS = 3  # [T] no retention_sweep row for this long is a warning
+RETENTION_OVERDUE_DAYS = 7  # [T] no retention_sweep row for this long is a warning
 AUDIT_RETENTION_DAYS = 30  # the pilot value (spec 12.1); to be revisited in Phase 16
 ROLLUP_HOURLY_DAYS = 30
 

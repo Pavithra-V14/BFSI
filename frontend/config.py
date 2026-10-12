@@ -55,6 +55,14 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ConfigError("API_BASE_URL must be a web address starting with http:// or https://")
     on_host = _truthy(env.get("RENDER"))
+    if on_host:
+        # On the host the address of the API must be given and must be https: the default would
+        # point at the container itself, and a bearer token must never travel in clear. The
+        # message names the variable only, never its value.
+        if not (env.get("API_BASE_URL") or "").strip():
+            raise ConfigError("API_BASE_URL must be set on the hosting service")
+        if parts.scheme != "https":
+            raise ConfigError("API_BASE_URL must start with https:// on the hosting service")
     host = (parts.hostname or "").lower()
     return Settings(
         api_base_url=base,

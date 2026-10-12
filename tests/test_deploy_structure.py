@@ -84,11 +84,23 @@ def test_both_services_deploy_only_after_the_checks_pass_and_have_a_health_check
 
 
 def test_the_api_starts_from_the_root_and_leaves_the_proxy_header_to_our_own_code(blueprint):
-    command = service(blueprint, "bfsi-api")["startCommand"]
-    assert command.startswith("uvicorn app.api.main:create_app_from_env --factory")
-    assert "--no-proxy-headers" in command, "uvicorn must not rewrite the client address"
-    assert "--host 0.0.0.0" in command and "--port $PORT" in command
-    assert "cd " not in command and "&&" not in command
+    """The EFFECTIVE command: the parsed `startCommand` split like a shell would, not a substring
+    of the file (a comment or another service could hold the words)."""
+    import shlex
+
+    api = service(blueprint, "bfsi-api")
+    tokens = shlex.split(api["startCommand"])
+    assert tokens[:4] == ["uvicorn", "app.api.main:create_app_from_env", "--factory", "--host"]
+    assert "--no-proxy-headers" in tokens, "uvicorn must not rewrite the client address"
+    assert "--proxy-headers" not in tokens
+    assert not any(t.startswith("--forwarded-allow-ips") for t in tokens)
+    assert tokens[tokens.index("--host") + 1] == "0.0.0.0"
+    assert tokens[tokens.index("--port") + 1] == "$PORT"
+    assert "cd" not in tokens and "&&" not in tokens
+    # the same effect through the environment is not allowed to come back either
+    assert "FORWARDED_ALLOW_IPS" not in variables(api)
+    # and the frontend service has no uvicorn at all
+    assert "uvicorn" not in service(blueprint, "bfsi-frontend")["startCommand"]
 
 
 def test_the_frontend_starts_from_the_root_so_the_safety_settings_are_read(blueprint):
@@ -152,7 +164,9 @@ def test_the_api_has_what_it_cannot_start_without(blueprint):
 
 def test_the_proxy_setting_and_the_hash_concurrency_are_the_documented_values(blueprint):
     api = variables(service(blueprint, "bfsi-api"))
-    assert api["TRUSTED_PROXY_HOPS"]["value"] == "1"
+    # ships at 0 until the first deploy's check (docs/DEPLOY.md 2.6, Run 28): a wrong 1 would let
+    # a client choose the address that limits are counted for
+    assert api["TRUSTED_PROXY_HOPS"]["value"] == "0"
     assert api["PASSWORD_HASH_CONCURRENCY"]["value"] == "2"
 
 
@@ -161,10 +175,24 @@ def test_the_frontend_gets_only_the_api_address(blueprint):
 
 
 # ================================================================================ the wheel
-def test_the_spacy_model_wheel_is_pinned_by_its_sha256():
+# The SHA-256 of en_core_web_sm-3.8.0-py3-none-any.whl as computed from the release asset
+# (Phase 15). Changing the model version means a new value here, on purpose, in the same commit.
+MODEL_WHEEL_SHA256 = "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"
+MODEL_WHEEL_URL = (
+    "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/"
+    "en_core_web_sm-3.8.0-py3-none-any.whl"
+)
+
+
+def test_the_spacy_model_wheel_is_pinned_by_the_recorded_sha256():
     text = (ROOT / "requirements.txt").read_text("utf-8")
-    line = next(x for x in text.split("\n") if x.startswith("en_core_web_sm @ "))
-    assert re.search(r"\.whl#sha256=[0-9a-f]{64}$", line), line
+    lines = [x for x in text.split("\n") if x.startswith("en_core_web_sm @ ")]
+    assert lines == [f"en_core_web_sm @ {MODEL_WHEEL_URL}#sha256={MODEL_WHEEL_SHA256}"]
+
+
+def test_no_other_requirements_file_installs_the_small_model_without_the_pin():
+    for name in ("requirements-frontend.txt", "requirements-dev.txt", "requirements-eval.txt"):
+        assert "en_core_web_sm" not in (ROOT / name).read_text("utf-8"), name
 
 
 # ============================================================================== the workflows
@@ -183,32 +211,79 @@ def test_no_workflow_runs_on_pull_request_target_or_exposes_a_secret_to_a_fork()
         assert wf.get("permissions") == {"contents": "read"}, path.name
 
 
-def test_the_smoke_job_runs_only_after_a_push_to_main_has_passed_the_blocking_jobs():
-    job = workflow("ci.yml")["jobs"]["post-deploy-smoke"]
-    assert job["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert set(job["needs"]) == {"lint", "test", "secret-scan", "pip-audit"}
-    assert job["continue-on-error"] is True
+def test_the_deploy_is_renders_own_and_ci_has_no_deploy_or_smoke_job():
+    """Render waits for every check of a commit: a smoke job in CI could hold the fix."""
+    jobs = workflow("ci.yml")["jobs"]
+    assert "post-deploy-smoke" not in jobs and "deploy" not in jobs
+    assert "autoDeployTrigger: checksPass" in RENDER.read_text("utf-8")
 
 
-def test_the_smoke_job_and_the_pinger_hold_no_secret():
-    for name in ("ci.yml", "keepalive.yml"):
+def test_the_after_a_deploy_workflow_starts_only_from_a_successful_push_to_main_of_this_repo():
+    wf = workflow("post-deploy.yml")
+    trigger = triggers(wf)
+    assert set(trigger) == {"workflow_run"}
+    run = trigger["workflow_run"]
+    assert run["workflows"] == ["CI"] and run["types"] == ["completed"]
+    assert run["branches"] == ["main"]
+    condition = " ".join(wf["jobs"]["smoke"]["if"].split())
+    for part in (
+        "github.event.workflow_run.conclusion == 'success'",
+        "github.event.workflow_run.event == 'push'",
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+    ):
+        assert part in condition, part
+
+
+def test_the_pinger_and_the_check_after_a_deploy_fail_visibly_and_hold_no_secret():
+    for name in ("keepalive.yml", "post-deploy.yml"):
+        wf = workflow(name)
+        for job_name, job in wf["jobs"].items():
+            assert "continue-on-error" not in job, (name, job_name)
+            for step in job["steps"]:
+                assert "continue-on-error" not in step, (name, job_name)
         text = (WORKFLOWS / name).read_text("utf-8")
         assert "secrets." not in text.replace("Secrets and variables", ""), name
-    smoke = (WORKFLOWS / "ci.yml").read_text("utf-8")
-    assert "vars.RENDER_API_URL" in smoke
-    pinger = (WORKFLOWS / "keepalive.yml").read_text("utf-8")
-    assert "vars.RENDER_API_URL" in pinger and "vars.RENDER_FRONTEND_URL" in pinger
+        assert "vars.RENDER_API_URL" in text
+    assert "vars.RENDER_FRONTEND_URL" in (WORKFLOWS / "keepalive.yml").read_text("utf-8")
 
 
-def test_the_pinger_stays_inside_its_window_and_is_alert_only():
-    wf = workflow("keepalive.yml")
-    assert wf["jobs"]["ping"]["continue-on-error"] is True
-    text = (WORKFLOWS / "keepalive.yml").read_text("utf-8")
-    assert '"*/10 2-14 * * 1-5"' in text, "Monday to Friday, 02:00 to 14:59 UTC"
-    assert "0230" in text and "1430" in text, (
-        "the window is 02:30 to 14:30 UTC (08:00 to 20:00 IST)"
-    )
-    assert "60 days" in text and "best effort" in text
+def _window_script() -> str:
+    """The shell script of the pinger's window step, from the parsed step (not from a comment)."""
+    steps = workflow("keepalive.yml")["jobs"]["ping"]["steps"]
+    return next(s for s in steps if s.get("id") == "window")["run"]
+
+
+WINDOW_CONDITION = '[ "$day" -le 5 ] && [ "$now" -ge 0230 ] && [ "$now" -le 1430 ]'
+
+
+def test_the_pinger_window_is_the_one_in_its_shell_condition_and_its_cron():
+    script = _window_script()
+    # the condition itself, with the exact bounds: weekday 1 to 5 (`%u`), 02:30 to 14:30 UTC
+    assert "now=$(date -u +%H%M)" in script and "day=$(date -u +%u)" in script
+    assert WINDOW_CONDITION in script
+    cron = triggers(workflow("keepalive.yml"))["schedule"][0]["cron"]
+    assert cron == "*/10 2-14 * * 1-5", "every ten minutes, 02:00 to 14:59 UTC, Monday to Friday"
+    ping = next(s for s in workflow("keepalive.yml")["jobs"]["ping"]["steps"] if "if" in s)
+    assert ping["if"] == "steps.window.outputs.inside == 'yes'"
+
+
+def test_the_window_shell_condition_behaves_as_stated():
+    """Run the real condition against fake clocks (when a shell is available)."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash on this machine")
+    assert WINDOW_CONDITION in _window_script()
+    cases = {
+        ("1", "0230"): "yes", ("5", "1430"): "yes", ("3", "0900"): "yes",
+        ("1", "0229"): "no", ("1", "1431"): "no", ("6", "0900"): "no", ("7", "0900"): "no",
+    }  # fmt: skip
+    for (day, now), expected in cases.items():
+        script = f"day={day}; now={now}; if {WINDOW_CONDITION}; then echo yes; else echo no; fi"
+        done = subprocess.run([bash, "-c", script], capture_output=True, text=True, check=False)
+        assert done.stdout.strip() == expected, (day, now, done.stdout, done.stderr)
 
 
 def test_the_workflows_use_no_render_api_key_and_no_deploy_hook_address():
@@ -306,6 +381,30 @@ def test_the_guide_says_the_first_deploy_is_shadow_and_moving_on_is_a_checklist(
     assert "SHADOW mode" in text and "`staff_beta`" in text
     section = text[text.index("## 6. Moving from shadow") :]
     assert "- [ ]" in section and "baseline" in section.lower()
+
+
+def test_the_guide_documents_the_gate_exception_and_the_manual_deploy_override():
+    text = _flat(guide())
+    assert "documented exception" in text and "holds only the automatic deploy" in text
+    assert "manual deploy" in text and "deploy a specific commit" in text
+    spec = _flat((ROOT / "spec" / "build.md").read_text("utf-8"))
+    assert "documented exception to build rule 5" in spec and "manual deploy" in spec
+
+
+def test_the_guide_defines_read_secret_before_it_uses_it():
+    text = guide()
+    assert text.index("function Read-Secret($name)") < text.index('Read-Secret "DATABASE_URL"')
+
+
+def test_the_guide_has_the_step_that_moves_the_proxy_setting_from_0_to_1():
+    text = _flat(guide())
+    assert "ships with `trusted_proxy_hops` at 0" in text
+    assert "`address_at_one_hop`" in text and "to `1`" in text
+
+
+def test_the_guide_says_seven_days_for_the_retention_alert():
+    text = _flat(guide())
+    assert "more than seven days old" in text and "retention_overdue" in text
 
 
 def test_the_guide_gives_the_memory_fallback_order_and_never_turns_masking_off():

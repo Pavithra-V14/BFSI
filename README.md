@@ -1004,21 +1004,29 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
 - **`render.yaml`.** The blueprint: `bfsi-api` and `bfsi-frontend`, free plan, health checks
   `/live` and `/_stcore/health`, start commands from the repository root (so `prompts/` and
   `.streamlit/config.toml` are found), `autoDeployTrigger: checksPass` (Render deploys by itself
-  after the CI checks pass: no Render secret in GitHub). Every secret is `sync: false`: a name,
-  never a value. The region is a marked placeholder you fill in (Run 28).
+  after the CI checks pass: no Render secret in GitHub). This is the one gate and a documented
+  exception to the rule that no check blocks a release: a failing check holds only the AUTOMATIC
+  deploy, and Render's **Manual Deploy** releases any commit regardless (DEPLOY.md section 3).
+  Every secret is `sync: false`: a name, never a value. The region is a marked placeholder you
+  fill in (Run 28).
 - **The client address behind Render's proxy.** The API still reads only the socket's address
-  unless `TRUSTED_PROXY_HOPS` is set (default 0). On Render it is 1: the LAST entry of
+  unless `TRUSTED_PROXY_HOPS` is set (default 0). With N hops the entry N from the end of
   `X-Forwarded-For` is used (each trusted proxy appends what it saw; what a client wrote earlier is
   never believed). uvicorn starts with `--no-proxy-headers` so only our own code reads the header.
-  `GET /admin/diagnostics` (admin only) shows the number of header entries, the address that
-  would be used, and the process memory: Run 28 compares the address with your real public one.
-  Which header Render adds is unverified until Run 28.
+  **`render.yaml` ships 0** until Run 28 has looked at what Render really sends: `GET
+  /admin/diagnostics` (admin only) shows the number of header entries, `address_at_one_hop` and
+  the process memory; only when `address_at_one_hop` is your real public address do you set 1.
+  At 0 every user shares one per-address limit (safe, only coarse).
 - **The spaCy model wheel is pinned by SHA-256** in `requirements.txt` (`#sha256=`): pip and uv
   refuse a different file. The value was computed from one download of the release asset.
 - **The pinger** (`.github/workflows/keepalive.yml`) pings both services only inside 08:00 to 20:00
   India time on weekdays (free hours are about 750 a month for all services together [T]). GitHub's
   scheduled workflows are best effort and are switched off after 60 days without repository
-  activity. **After a deploy**, the CI job `post-deploy-smoke` (alert only) asks `/live`.
+  activity. **After a deploy**, the separate workflow `After a deploy` (`post-deploy.yml`) asks
+  `/live`: an alert on `/live` only, which cannot tell the new build from the old one. It is a
+  separate workflow so that a failure while the service is down cannot hold the fix (Render waits
+  for every check of a commit). The pinger and this check FAIL VISIBLY (a red run), and block
+  nothing.
 - **Backups.** `scripts/qdrant_snapshot.py` (list, create, download, prune; `--run` for anything
   that changes). If the free cluster refuses snapshots, the documented backup is a re-ingest from
   `originals/`, whose own backup you keep and whose restore you test once
@@ -1037,7 +1045,8 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
 - **Scheduled jobs** run on the admin machine from Windows Task Scheduler (Render's free plan has
   no cron): retention (daily), the drift report (weekly), the snapshot (weekly). The retention task
   now writes one `retention_sweep` audit row on every real run, also when it deleted nothing; the
-  service raises the warning `retention_overdue` when none is three days old. Judging the sample
+  service raises the warning `retention_overdue` when the newest is more than seven days old
+  (the task runs daily). Judging the sample
   stays manual (it needs the code of its own estimate).
 - **The first deploy is in the `shadow` stage** and stays there until the checklist of
   `DEPLOY.md` section 6 is true: moving on is a deliberate step.
@@ -1052,7 +1061,7 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
 - **Phase 16.** The post-deploy check cannot tell the new build from the old one (the liveness
   answer reveals nothing by design). The first-deploy memory number is a single measurement
   (Run 28).
-- **Phase 16.** The 90-day, 30-day and 3-day periods, the 08:00 to 20:00 window and the 80 %
+- **Phase 16.** The 90-day, 30-day and 7-day periods, the 08:00 to 20:00 window and the 80 %
   checklist items are placeholders for the baseline.
 - **Owner decision recorded.** `EVAL_*` names are not all kept off Render: `EVAL_DATABASE_URL`
   and `EVAL_SAMPLE_RATE` are set there on purpose (the masked production sample); the evaluation

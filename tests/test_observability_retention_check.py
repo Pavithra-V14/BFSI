@@ -1,4 +1,4 @@
-"""The retention task must run (Phase 15): a warning when no `retention_sweep` row is three days
+"""The retention task must run (Phase 15): a warning when no `retention_sweep` row is seven days
 old or newer. The task writes one row on every real run, also when it deleted nothing, so the row
 is the proof that the scheduled task ran; a dry run writes none."""
 
@@ -58,28 +58,34 @@ def test_a_fresh_sweep_row_means_no_warning(parts):
     assert observability.check_retention_once() is False and collector.raised == []
 
 
-def test_no_sweep_row_for_more_than_three_days_is_a_warning(parts):
+def test_a_sweep_row_two_days_old_means_no_warning_a_weekend_included(parts):
     observability, collector, db = parts
-    audit_row(db, "retention_sweep", 4)
+    audit_row(db, "retention_sweep", 4)  # Friday's run seen on Tuesday morning: still quiet
+    assert observability.check_retention_once() is False and collector.raised == []
+
+
+def test_no_sweep_row_for_more_than_seven_days_is_a_warning(parts):
+    observability, collector, db = parts
+    audit_row(db, "retention_sweep", 8)
     assert observability.check_retention_once() is True
     assert collector.raised == [("retention_overdue", alerts_module.WARNING)]
 
 
-def test_exactly_three_days_is_not_yet_overdue(parts):
+def test_exactly_seven_days_is_not_yet_overdue(parts):
     observability, collector, db = parts
-    audit_row(db, "retention_sweep", 3)
+    audit_row(db, "retention_sweep", 7)
     assert observability.check_retention_once() is False
 
 
-def test_a_new_deployment_is_not_blamed_before_three_days_have_passed(parts):
+def test_a_new_deployment_is_not_blamed_before_seven_days_have_passed(parts):
     observability, collector, db = parts
-    audit_row(db, "login", 1)  # the service is one day old and has never swept
+    audit_row(db, "login", 5)  # the service is five days old and has never swept
     assert observability.check_retention_once() is False and collector.raised == []
 
 
-def test_a_service_older_than_three_days_that_never_swept_is_a_warning(parts):
+def test_a_service_older_than_seven_days_that_never_swept_is_a_warning(parts):
     observability, collector, db = parts
-    audit_row(db, "login", 5)
+    audit_row(db, "login", 9)
     assert observability.check_retention_once() is True
     assert collector.raised[0][0] == "retention_overdue"
 
@@ -101,7 +107,7 @@ def test_a_run_that_deleted_nothing_still_writes_its_row_and_a_dry_run_does_not(
 def test_the_check_runs_in_the_background_loop():
     from app.observability.service import RETENTION_CHECK_SECONDS, RETENTION_OVERDUE_DAYS
 
-    assert RETENTION_CHECK_SECONDS == 3_600.0 and RETENTION_OVERDUE_DAYS == 3
+    assert RETENTION_CHECK_SECONDS == 3_600.0 and RETENTION_OVERDUE_DAYS == 7
 
 
 def test_the_service_runs_the_check_in_its_own_background_thread(tmp_path):

@@ -18,7 +18,7 @@
 
 ## Check
 - `/live` answers; one question is answered; the admin banner has no new critical alert.
-- The CI job `post-deploy-smoke` of the next push is green.
+- The workflow `After a deploy` of the next push is green (it only shows that `/live` answers).
 
 ## Afterwards
 Open an issue for the bad change. Do not push the same commit again until a fix is on `main`

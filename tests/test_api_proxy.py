@@ -127,7 +127,21 @@ def test_the_diagnostics_route_shows_the_entries_and_the_address_that_would_be_u
     assert set(body) == {
         "forwarded_entries", "trusted_proxy_hops", "client_address_used", "address_source",
         "socket_address", "memory_mb", "peak_memory_mb", "hash_concurrency", "on_render",
+        "address_at_one_hop", "source_at_one_hop",
     }  # fmt: skip
+
+
+def test_at_zero_hops_the_route_still_shows_what_one_hop_would_use(tmp_path):
+    """The first deploy ships at 0: the owner compares this with their real public address before
+    setting 1 (docs/DEPLOY.md 2.6)."""
+    env = Env(tmp_path, trusted_proxy_hops=0)
+    admin = admin_headers(env)
+    headers = {**admin, "X-Forwarded-For": "10.0.0.1, 198.51.100.9"}
+    body = env.client.get("/admin/diagnostics", headers=headers).json()
+    assert body["address_at_one_hop"] == "198.51.100.9" and body["source_at_one_hop"] == "forwarded"
+    assert body["client_address_used"] == SOCKET_ADDRESS and body["address_source"] == "socket"
+    bare = env.client.get("/admin/diagnostics", headers=admin).json()
+    assert bare["address_at_one_hop"] == SOCKET_ADDRESS and bare["source_at_one_hop"] == "socket"
 
 
 def test_at_zero_hops_the_diagnostics_route_says_it_would_use_the_socket_address(tmp_path):

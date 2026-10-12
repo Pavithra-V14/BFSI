@@ -75,6 +75,11 @@ def diagnostics_report(
         "trusted_proxy_hops": hops,
         "client_address_used": address,
         "address_source": source,
+        # what the address WOULD be with one trusted proxy: the check of the first deploy
+        # (docs/DEPLOY.md 2.6) compares it with the owner's real public address while the
+        # setting is still 0
+        "address_at_one_hop": client_address(request, 1)[0],
+        "source_at_one_hop": client_address(request, 1)[1],
         "socket_address": request.client.host if request.client else "unknown",
         "memory_mb": diagnostics.memory_now_mb(),
         "peak_memory_mb": diagnostics.memory_peak_mb(),

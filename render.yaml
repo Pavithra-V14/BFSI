@@ -32,8 +32,12 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.3"
+      # 0 until the first deploy has been checked: ask GET /admin/diagnostics and compare
+      # `address_at_one_hop` with your real public address (docs/DEPLOY.md 2.6). Only when they
+      # are equal, change this to "1" and save. At 0 every user shares one per-address limit
+      # (Render's proxy), which is safe, only coarse.
       - key: TRUSTED_PROXY_HOPS
-        value: "1"
+        value: "0"
       - key: PASSWORD_HASH_CONCURRENCY
         value: "2"
       # Secrets and addresses: set in Render's dashboard (sync: false). Names only here.
