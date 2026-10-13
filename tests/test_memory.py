@@ -401,11 +401,48 @@ def test_a_number_that_keeps_colliding_is_an_error_not_a_hang(db, monkeypatch):
     session = store.create_session(db, user, now=NOW)
     store.add_user_message(db, user, session, sq("the first message"), now=NOW)
     attempts = []
+    monkeypatch.setattr(store.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(store, "_next_seq", lambda d, s: attempts.append(1) or 1)
     with pytest.raises(store.SeqCollision):
         store.add_user_message(db, user, session, sq("a second message"), now=NOW)
     assert len(attempts) == store.MAX_SEQ_RETRIES
     assert db.query_one("SELECT COUNT(*) FROM messages")[0] == 1
+
+
+def test_a_writer_that_loses_the_race_waits_a_growing_random_time_before_trying_again(
+    db, monkeypatch
+):
+    """Without a pause, three free-running writers on one session could use up all their retries
+    in a row on a loaded machine. The wait is random (so the writers spread out), grows with each
+    lost race, is at most SEQ_BACKOFF_SECONDS * attempts, and there is none before the first try."""
+    user = new_user(db)
+    session = store.create_session(db, user, now=NOW)
+    store.add_user_message(db, user, session, sq("the first message"), now=NOW)
+    waits: list[float] = []
+    ranges: list[tuple[float, float]] = []
+
+    def uniform(low, high):
+        ranges.append((low, high))
+        return high / 2
+
+    monkeypatch.setattr(store.random, "uniform", uniform)
+    monkeypatch.setattr(store.time, "sleep", waits.append)
+    monkeypatch.setattr(store, "_next_seq", lambda d, s: 1)  # always the taken number
+    with pytest.raises(store.SeqCollision):
+        store.add_user_message(db, user, session, sq("a second message"), now=NOW)
+    assert len(waits) == store.MAX_SEQ_RETRIES
+    # drawn at random from 0 up to a limit that grows with each lost race
+    expected = [store.SEQ_BACKOFF_SECONDS * n for n in range(1, store.MAX_SEQ_RETRIES + 1)]
+    assert ranges == [(0, high) for high in expected]
+    assert waits == [high / 2 for high in expected]
+    assert sum(expected) < 1.0, "the worst case stays under a second"
+
+    # a write that does not collide never waits
+    waits.clear()
+    monkeypatch.undo()
+    monkeypatch.setattr(store.time, "sleep", waits.append)
+    store.add_user_message(db, user, session, sq("a third message"), now=NOW)
+    assert waits == []
 
 
 # ---- what feeds history ------------------------------------------------------------------------

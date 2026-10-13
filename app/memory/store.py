@@ -30,7 +30,9 @@ Times are written as UTC text (`utc_text`). The caller owns the clock (`now`).
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -45,6 +47,10 @@ from app.guardrails.scan import StoredAnswer, StoredQuery
 from app.memory.stored_summary import StoredSummary
 
 MAX_SEQ_RETRIES = 8
+# After a lost race a writer waits a random time up to this many seconds times the number of
+# attempts so far, so several writers on one session spread out instead of colliding again at once
+# (the free-running writers test on a loaded runner ran out of retries without it).
+SEQ_BACKOFF_SECONDS = 0.02
 TITLE_CHARACTERS = 60
 MAX_CITATIONS = 10
 MAX_CLAUSE_CHARACTERS = 40
@@ -315,7 +321,7 @@ def _add_message(
     title = " ".join(text.split())[:TITLE_CHARACTERS] if role == "user" else None
     # never backwards: a late write from a slow request must not make the chat look older
     newest = "GREATEST(last_active_at, ?)" if db.kind == "postgres" else "MAX(last_active_at, ?)"
-    for _ in range(MAX_SEQ_RETRIES):
+    for attempt in range(MAX_SEQ_RETRIES):
         seq = _next_seq(db, session_id)
         message_id = str(uuid.uuid4())
         try:
@@ -345,7 +351,9 @@ def _add_message(
                 )
         except Exception as error:
             if is_unique_violation(error):
-                continue  # another writer took this number: read a fresh one
+                # another writer took this number: wait a little, at random, then read a fresh one
+                time.sleep(random.uniform(0, SEQ_BACKOFF_SECONDS * (attempt + 1)))
+                continue
             raise
         return StoredMessage(
             message_id,
