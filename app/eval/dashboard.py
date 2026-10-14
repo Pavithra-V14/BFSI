@@ -12,7 +12,7 @@ from typing import Any
 
 from app.db.connection import Database
 from app.eval import constants as c
-from app.eval import metrics, store, variance
+from app.eval import metrics, redteam, store, variance
 
 
 def _mean(values: list[float]) -> float | None:
@@ -101,8 +101,11 @@ def overview(db: Database, environment: str) -> dict[str, Any]:
     runs = store.list_runs(db, environment=environment, limit=30)
     finished = [r for r in runs if r["status"] == c.RUN_FINISHED]
     quality = [
-        r for r in finished if r["kind"] in ("active", "full", "variance")
-    ]  # runs that have a golden score
+        r
+        for r in finished
+        if r["kind"] in ("active", "full", "variance")
+        and not redteam.is_redteam_version(r["dataset_version"])
+    ]  # runs that have a golden score; the red-team set is judged apart
     series = []
     for run in reversed(quality):
         golden = variance.run_golden_scores(db, [run["id"]])

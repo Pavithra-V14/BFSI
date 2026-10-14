@@ -30,7 +30,7 @@ MAX_HASH_CONCURRENCY = 16
 DEFAULT_JWT_EXPIRE_MINUTES = 480  # [P] 8 hours
 MAX_JWT_EXPIRE_MINUTES = 60 * 24 * 30
 DEFAULT_TOKEN_BUDGET_CUSTOMER = 50_000  # spec 5.4
-DEFAULT_TOKEN_BUDGET_STAFF = 200_000  # [T] placeholder; admin uses the staff value
+DEFAULT_TOKEN_BUDGET_STAFF = 200_000  # decided by the owner (Phase 16); admin uses it
 
 _PLACEHOLDER_START = (
     "your",

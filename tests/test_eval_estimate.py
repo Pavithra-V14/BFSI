@@ -68,7 +68,8 @@ def test_a_multi_turn_case_pays_for_every_turn(all_cases):
 def test_the_estimate_lists_every_provider_group_against_its_daily_limit(all_cases):
     estimate = est.estimate_run(active(all_cases), config())
     judge = estimate["providers"]["judge"]
-    assert judge["keys"] == 2 and judge["daily_request_limit"] == 100  # 50 a day per key
+    # two keys are in the pool, but the free allowance is counted ONCE (one account per provider)
+    assert judge["keys"] == 2 and judge["daily_request_limit"] == 50
     assert judge["requests"] == sum(
         est.case_need(x).requests.get("judge", 0) for x in active(all_cases)
     )
@@ -91,12 +92,18 @@ def test_a_run_that_cannot_fit_one_day_is_split_into_batches(all_cases):
         assert est.fits(need, limits, c.DAILY_LIMIT_SAFETY) or len(batch) == 1
 
 
-def test_more_keys_make_fewer_batches(all_cases):
+def test_more_keys_do_not_make_fewer_batches_because_free_quota_is_never_pooled(all_cases):
+    """Owner decision (Phase 16, docs/READINESS.md): one key per provider from one account. A
+    capacity plan that added up the allowances of several free accounts would plan a day that
+    the provider's terms do not allow."""
     few = est.estimate_run(active(all_cases), config())
     many = est.estimate_run(
         active(all_cases), config(eval_openrouter_keys=[KEYS + str(i) for i in range(4)])
     )
-    assert len(many["batches"]) < len(few["batches"])
+    assert many["providers"]["judge"]["keys"] == 4
+    assert many["providers"]["judge"]["daily_request_limit"] == 50
+    assert len(many["batches"]) == len(few["batches"])
+    assert est.ONE_KEY_PER_PROVIDER is True
 
 
 def test_a_run_without_the_judge_needs_no_judge_requests_and_one_batch(all_cases):
@@ -192,8 +199,9 @@ def test_a_resumed_guard_continues_from_what_was_used():
 # =============================================================================== settings ====
 def test_the_limits_read_the_pool_sizes_and_the_provider_limits():
     limits = est.daily_limits(config(groq_keys=["a" * 12, "b" * 12]))
-    assert limits.keys["answer"] == 2 and limits.requests["answer"] == 2000
-    assert limits.tokens["answer"] == 400_000 and limits.keys["jev"] == 1
+    # two keys are listed (the pool exists for rotation), one key's allowance is counted
+    assert limits.keys["answer"] == 2 and limits.requests["answer"] == 1000
+    assert limits.tokens["answer"] == 200_000 and limits.keys["jev"] == 1
 
 
 def test_a_provider_without_a_published_daily_limit_has_none():

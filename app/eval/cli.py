@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.eval import calibration, drift, store
+from app.eval import calibration, drift, redteam, store
 from app.eval import constants as c
 from app.eval.cases import (
     calibration_problems,
@@ -180,8 +180,15 @@ def cmd_migrate(args, env, out) -> int:
 
 
 def cmd_check(args, env, out) -> int:
+    from app.eval.redteam import load_redteam, redteam_problems
+
     version, cases = load_cases()
-    problems = set_problems(cases) + calibration_problems(load_calibration())
+    _rt_version, redteam = load_redteam()
+    problems = (
+        set_problems(cases)
+        + calibration_problems(load_calibration())
+        + redteam_problems(redteam, cases)
+    )
     bad_files = verify_files()
     for line in problems:
         out(f"problem: {line}")
@@ -189,6 +196,7 @@ def cmd_check(args, env, out) -> int:
         out(f"problem: the sample file of {doc} is missing or is not the listed file")
     review = [case.id for case in cases if case.review]
     out(f"dataset {version}: {len(cases)} cases, {sum(1 for x in cases if x.active)} active")
+    out(f"red-team set: {len(redteam)} cases (development and held-out halves of 20)")
     out(f"for the owner to read: all {len(review)} active cases and the calibration review items")
     return 1 if problems or bad_files else 0
 
@@ -221,14 +229,31 @@ def cmd_estimate(args, env, out, services_factory) -> int:
     try:
         version, all_cases = load_cases()
         store.sync_cases(db, all_cases)
-        cases = store.list_cases(db, status="set", active_only=args.set == "active")
-        if args.set == "variance":
-            cases = store.list_cases(db, status="set", active_only=True)
+        kind = args.set
+        if args.set in redteam.SETS:
+            # its own cases, its own dataset version (so its own confirmation code), run as a
+            # "full" run: the red-team set is judged on the held-out half only (the gate)
+            version, red = redteam.load_redteam()
+            problems = redteam.redteam_problems(red, all_cases)
+            if problems:
+                raise EvalCommandError("the red-team set is broken: " + "; ".join(problems[:3]))
+            store.sync_cases(db, red)
+            cases = redteam.select(store.list_cases(db, status="set", version=version), args.set)
+            kind = "full"
+        else:
+            # only the main set: red-team cases live in the same table under their own version
+            cases = [
+                x
+                for x in store.list_cases(
+                    db, status="set", active_only=args.set in ("active", "variance")
+                )
+                if x.dataset_version == version
+            ]
         judged = not args.no_judge
         run_id, estimate, code = prepare_run(
             db,
             cases=cases,
-            kind=args.set,
+            kind=kind,
             environment=environment,
             dataset_version=version,
             config=config,
@@ -237,7 +262,7 @@ def cmd_estimate(args, env, out, services_factory) -> int:
         )
     finally:
         db.close()
-    out(f"run {run_id} ({args.set}, {environment})")
+    out(f"run {run_id} ({args.set}, {environment}, {len(cases)} cases)")
     for line in describe(estimate):
         out(line)
     out(f"To start it, type the confirmation code: run {run_id} --confirm {code}")
@@ -554,6 +579,40 @@ def cmd_judge_samples(args, env, out, services_factory) -> int:
         db.close()
 
 
+def cmd_targets(args, env, out) -> int:
+    """Propose numeric targets from the stored baseline (three unchanged runs of the active set).
+    Reads only: no call, no write; the owner decides each number (docs/TARGETS.md)."""
+    from app.eval import targets
+
+    version, cases = load_cases()
+    categories = {case.id: case.category for case in cases}
+    db, environment = _open(args, env)
+    try:
+        view = targets.table(db, environment, version, categories)
+    finally:
+        db.close()
+    if not view["complete"]:
+        out(
+            f"{environment}: no baseline yet ({len(view['runs'])} of {c.VARIANCE_RUNS} finished "
+            'runs of the active set): every target stays "baseline"'
+        )
+    else:
+        out(f"{environment}: baseline of {len(view['runs'])} runs of dataset {version}")
+    out("target | rule | baseline | band | signed floor | proposed target | alert when")
+    for row in view["rows"]:
+
+        def shown(value):
+            return "-" if value is None else (f"{value:g}" if isinstance(value, float) else value)
+
+        out(
+            f"{row['name']} | {row['rule']} | {shown(row['baseline'])} | {shown(row['width'])} | "
+            f"{shown(row['signed_floor'])} | {shown(row['target'])} | {row['alert_when'] or '-'}"
+            + (f" | {row['note']}" if row.get("note") else "")
+        )
+    out("these are PROPOSALS: nothing was written; the owner decides each number")
+    return 0
+
+
 def cmd_drift(args, env, out) -> int:
     db, environment = _open(args, env)
     try:
@@ -645,7 +704,11 @@ def main(
     commands.add_parser("check", help="check the case set and the corpus files")
     with_db(commands.add_parser("cases-sync", help="write the case set to the database"))
     estimate = with_db(commands.add_parser("estimate", help="estimate a run (no call)"))
-    estimate.add_argument("--set", choices=["active", "full", "variance"], default="active")
+    estimate.add_argument(
+        "--set",
+        choices=["active", "full", "variance", "redteam_dev", "redteam_heldout"],
+        default="active",
+    )
     estimate.add_argument("--no-judge", action="store_true", help="score by rules only")
     run = with_db(commands.add_parser("run", help="run a confirmed run (one batch)"))
     run.add_argument("run_id")
@@ -659,6 +722,7 @@ def main(
     samples.add_argument("--limit", type=int, default=20)
     samples.add_argument("--confirm")
     with_db(commands.add_parser("drift", help="the weekly drift report (no call)"))
+    with_db(commands.add_parser("targets", help="proposed numeric targets from the baseline"))
     status = with_db(commands.add_parser("status", help="numbers of a run"))
     status.add_argument("run_id", nargs="?")
     commands.add_parser("repair", help="undo test-collection changes left by a crash")
@@ -682,6 +746,8 @@ def main(
             return cmd_judge_samples(args, env, out, services_factory)
         if args.command == "drift":
             return cmd_drift(args, env, out)
+        if args.command == "targets":
+            return cmd_targets(args, env, out)
         if args.command == "status":
             return cmd_status(args, env, out)
         return cmd_repair(args, env, out, services_factory)

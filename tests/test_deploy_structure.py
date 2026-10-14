@@ -472,9 +472,9 @@ def test_the_release_record_template_has_the_three_things_the_spec_names():
     assert "Approved by" in text
 
 
-def test_the_owner_runs_list_runs_28_to_34_as_pending():
+def test_the_owner_runs_list_runs_28_to_39_as_pending():
     text = (DOCS / "OWNER_RUNS.md").read_text("utf-8")
-    for number in range(28, 35):
+    for number in range(28, 40):
         assert re.search(rf"^\| {number} \|.*PENDING", text, re.M), number
         assert re.search(rf"^## Run {number}\. .*PENDING", text, re.M), number
 
@@ -680,7 +680,14 @@ def test_every_command_and_flag_the_docs_show_exists():
     from app.memory import retention
     from app.observability import scan
     from app.vector import documents
-    from scripts import cost_projection, key_inventory, qdrant_snapshot, release_record
+    from scripts import (
+        cost_dry_run_compare,
+        cost_projection,
+        key_inventory,
+        prelaunch_gate,
+        qdrant_snapshot,
+        release_record,
+    )
 
     def helped(call, *argv) -> str | None:
         """The --help text of a parser, or None when the parser refused the words."""
@@ -709,6 +716,8 @@ def test_every_command_and_flag_the_docs_show_exists():
         r"scripts/cost_projection\.py": (False, lambda sub: helped(cost_projection.main)),
         r"scripts/key_inventory\.py": (False, lambda sub: helped(key_inventory.main)),
         r"scripts/release_record\.py": (False, lambda sub: helped(release_record.main)),
+        r"scripts/prelaunch_gate\.py": (False, lambda sub: helped(prelaunch_gate.main)),
+        r"scripts/cost_dry_run_compare\.py": (False, lambda sub: helped(cost_dry_run_compare.main)),
     }
     files = [
         DOCS / "DEPLOY.md",

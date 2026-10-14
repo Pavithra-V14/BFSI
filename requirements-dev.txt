@@ -15,3 +15,6 @@ Pillow==12.3.0
 # Phase 11: the Streamlit frontend's tests (AppTest) run the real library. Same pin as
 # requirements-frontend.txt, which is what the frontend service installs.
 streamlit==1.65.0
+# Phase 16: the static security scan (spec 17.6). Alert only in CI; accepted findings are in
+# .bandit-baseline.json and explained in docs/SECURITY_SCAN.md. Never on Render.
+bandit==1.9.4

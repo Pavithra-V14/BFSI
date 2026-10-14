@@ -18,6 +18,7 @@ Write it in two or three plain sentences: what, and why.
 - The variance band (about two standard deviations):
 - Inside the band or outside, and which categories moved:
 - Guardrail table and the red-team set (pass or fail):
+- Pre-launch gate report attached (`scripts/prelaunch_gate.py --write`; file name):
 
 ## Risks and what to watch after the release
 ## How to go back

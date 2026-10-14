@@ -97,6 +97,25 @@ jobs:
       - name: Audit runtime and development packages
         run: uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt -r requirements-dev.txt
 
+  # Static security scan (spec 17.6, Phase 16). ALERT ONLY, like the coverage and evaluation
+  # jobs: `continue-on-error` means a red cross never blocks a merge or a release (build rule 5).
+  # `.bandit-baseline.json` holds the findings the owner accepted, with no code quoted
+  # (docs/SECURITY_SCAN.md says why each kind is accepted); scripts/bandit_check.py compares the
+  # scan with it, and a NEW finding is what turns the job red.
+  bandit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Scan the application code for new findings
+        run: |
+          uvx --from bandit==1.9.4 bandit -r app scripts load frontend -q -f json -o bandit_now.json || true
+          uv run --no-project python scripts/bandit_check.py bandit_now.json
+
   # Deploy (spec 17.2, Phase 15). There is no deploy job here. Render deploys by itself when this
   # workflow's checks pass (`autoDeployTrigger: checksPass` in render.yaml), so NOTHING in GitHub
   # holds a Render secret and a pull request from a fork cannot reach one. This is the one place

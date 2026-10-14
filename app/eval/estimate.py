@@ -109,6 +109,12 @@ def case_need(case: Case, *, judged: bool = True) -> Need:
     return need
 
 
+# Owner decision (Phase 16, docs/READINESS.md "Terms of service"): one key per provider, from one
+# account. A capacity plan must not assume pooled free keys, so a provider's daily limit is counted
+# ONCE however many keys the pool holds (the pool is for rotation overlap and paid plans).
+ONE_KEY_PER_PROVIDER = True
+
+
 @dataclass(frozen=True)
 class DailyLimits:
     """Per provider group: requests and tokens a day, from the key pool's own limits (None: the
@@ -125,6 +131,8 @@ def daily_limits(config: Any) -> DailyLimits:
 
     def per_day(provider: str, keys: int) -> tuple[int | None, int | None]:
         lim = limits[provider]
+        if ONE_KEY_PER_PROVIDER:
+            keys = min(keys, 1)  # free allowances of several accounts are never added up
         rpd = lim.rpd * keys if getattr(lim, "rpd", None) else None
         tpd = lim.tpd * keys if getattr(lim, "tpd", None) else None
         return rpd, tpd

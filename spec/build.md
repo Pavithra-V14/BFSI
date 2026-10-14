@@ -74,7 +74,7 @@ This document is a complete, self-contained specification. A team (or an AI codi
 - **Separate eval keys** on top of the production keys. Eval keys are never installed on Render.
 - Jev has its own dedicated OpenRouter key.
 - Two Google embedding keys.
-- The owner must check each provider's terms of service for using several accounts [T].
+- The owner must check each provider's terms of service for using several accounts [T]. **[P] Decision (Phase 16):** one key per provider, from one account the owner owns. The key pool is not used to pool free quota across accounts; a second key is only for the overlap of a rotation or a paid plan, and a capacity plan, estimate or load test counts one key's free limits per provider (`docs/READINESS.md`). The Gemini key denial of Phase 12 / Run 28 is the reason. This overrides the "up to four keys from different accounts" wording above as a way to add free capacity.
 
 ## 3. Architecture overview
 
@@ -521,6 +521,8 @@ The DPDP Act 2023 applies to personal data; RBI, IRDAI and SEBI rules depend on 
 - Calibration: **30 items** are hand-labelled to measure judge agreement. The project's AI assistant labels them; expert review of a sample is recommended [T].
 - A thumbs-down or refused answer can be added to the set from the review queue.
 
+- **[P] Red-team set (Phase 16).** About 40 adversarial cases (injection, role escalation, out-of-domain and jailbreak phrasings, PII in the question) in their own file, split into **20 development** and **20 held-out** cases, with no real data and the 60-case set untouched. They run through the same estimate, confirmation code and runner as any evaluation run, under their own dataset version, and stay out of the golden-score series. The pre-launch gate is judged on the held-out half only, against a pass threshold the owner records; any PII leak, cross-role leak or prompt leak is an alert whatever the pass rate.
+
 ### 15.3 Frameworks
 - **RAGAS** for RAG metrics; **DeepEval** for the edge-case suite and custom checks (such as numeric faithfulness); a **light custom scorer** for live production (cheap checks and Jev verdicts), with full RAGAS scoring in local batches.
 - Their model calls go through the gateway via a custom LLM wrapper (key pools, limiter, Jev).
@@ -635,6 +637,10 @@ One page each, with exact steps: all keys down; wrong answer reported; document 
 ### 17.6 Pre-launch gate
 Production-readiness score of at least 70/100 with no category below 12/20; a load test passed; a security scan with no open critical or high findings; the red-team set passing; a rollback drill; a cost projection compared with a dry run; the evaluation set and variance band established; the access-control audit; a named business owner.
 
+**[P] As built (Phase 16).** Alert only (build rule 5): `scripts/prelaunch_gate.py` prints PASS, FAIL or NO EVIDENCE for each of the nine items and exits 0; its report is attached to the release record. It reads `docs/READINESS.md` and `docs/prelaunch_evidence.json`. The score has five categories of 20 points (answer quality, safety and guardrails, reliability and performance, security and access control, operations and delivery); **a line with no valid cited evidence (run id, file, test, page or date) scores 0**, the scoring is conservative and is re-scored by a second review. The security scan is pip-audit of every requirements file, a static scan (bandit, alert only in CI, with an accepted-findings baseline) and the secret scan. The access-control audit for the pilot is the route-role matrix test plus the role-isolation run on the real collection; **an independent second review is required before any real customer data**.
+
+**[P] Numeric targets (Phase 16).** Four rules, recorded per target in `docs/TARGETS.md`: a regression floor (baseline mean minus the variance band), a ceiling for latency p95 and cost per query (baseline plus 20 %), an absolute floor the owner signs for the safety-critical measures (citation validity, faithfulness, refusal correctness, access isolation) independent of the baseline, and a zero rule (PII leak, cross-role leak, prompt leak, stale answer: any non-zero is an alert). `python -m app.eval targets` proposes numbers from the baseline and writes nothing.
+
 ## 18. Cost
 
 - Free tiers only during the pilot; real spend is expected to be $0.
@@ -695,9 +701,9 @@ Each phase depends only on earlier phases. The sections each phase covers are in
 ## 23. Open items before launch
 
 - ~~Meaning of the 10-character minimum~~ and ~~what counts as "only when relevant" for the disclaimer~~: decided in Phase 6 (4.1 step 2.1, 9.5); the numbers and the disclaimer text stay [T] for the Phase 16 baseline.
-- Queries per day and the monthly budget ceiling; the staff token budget.
-- Review-queue overdue limit and shadow-mode length.
-- Terms-of-service review for several accounts per provider; Upstash, Render and Jev limits and prices.
+- Queries per day and the monthly budget ceiling: **to be named by the owner** (recorded as such). Decided (Phase 16): the staff token budget is 200,000.
+- Decided (Phase 16): review-queue overdue limit 2 working days; shadow-mode length two weeks.
+- Terms-of-service review provider by provider (one key per provider from one account is the decision, 2); Upstash, Render and Jev limits and prices.
 - Names for the owner roles (placeholders are used).
 - Which OpenRouter model is the judge.
 - Langfuse retention on the chosen plan.

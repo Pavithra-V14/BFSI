@@ -1,0 +1,4 @@
+{
+  "_note": "Absolute floors the owner has signed for the safety-critical measures (docs/TARGETS.md). A number without signed_by and date is not a sign-off and is ignored. None are signed yet: every floor stays unset until the owner signs it.",
+  "absolute_floors": {}
+}

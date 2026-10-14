@@ -14,11 +14,12 @@
    - **Every answer provider** fails: users correctly see "temporarily unavailable". Do NOT switch
      on the offline mock answer in production (`GATEWAY_ENABLE_MOCK` is never set on Render).
 3. If the cause is OUR limit (the free tier's daily limit, which resets at 00:00 UTC for most
-   providers [T: check each provider's page]):
-   add another account's key. Render dashboard, `bfsi-api`, **Environment**, edit the provider's
-   list (`GROQ_API_KEYS`, `GEMINI_API_KEYS`, `OPENROUTER_API_KEYS`; at most four, comma
-   separated), append the new key after a comma, **Save**. Keep the old keys. Render restarts the
-   service (about a minute).
+   providers [T: check each provider's page]): **do not add another account's key.** The rule
+   (`docs/READINESS.md`, terms of service) is one key per provider from one account you own, and
+   the pool is not to be used to add up free quota. Options, in this order: wait for the reset;
+   switch the provider's plan on that same account (a paid plan has its own limits); tell the
+   users it is a known limit. A second key is added only to **replace** a key (an overlap, see
+   `docs/KEY_ROTATION.md`), never to add allowance.
 4. If both embedding keys fail: `GEMINI_EMBEDDING_KEY_A` and `GEMINI_EMBEDDING_KEY_B` each
    hold **one** key (they are not lists, you cannot append). A is the primary and B the failover,
    each from its own Google account. Put a new key into the one that is empty or limited

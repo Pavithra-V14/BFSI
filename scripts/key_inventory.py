@@ -39,6 +39,13 @@ EVALUATION_KEYS: dict[str, str] = {
     "EVAL_GEMINI_API_KEYS": "evaluation: Gemini",
     "EVAL_OPENROUTER_API_KEYS": "evaluation: OpenRouter and the judge",
 }
+# provider -> the settings that may hold its keys (the one-key-per-provider note counts these)
+PROVIDERS: dict[str, tuple[str, ...]] = {
+    "Groq": ("GROQ_API_KEYS",),
+    "Gemini (answers)": ("GEMINI_API_KEYS",),
+    "OpenRouter": ("OPENROUTER_API_KEYS",),
+    "Gemini (embeddings)": ("GEMINI_EMBEDDING_KEY_A", "GEMINI_EMBEDDING_KEY_B"),
+}
 OTHER_SECRETS: dict[str, str] = {
     "JWT_SECRET_KEY": "signs sign-in tokens",
     "AUDIT_HASH_KEY": "keys the hashes of addresses and names",
@@ -77,6 +84,22 @@ def main(
     clashes = {mark: names for mark, names in seen.items() if len(names) > 1}
     for mark, names in sorted(clashes.items()):
         out(f"WARNING: the same key ({mark}) is in {', '.join(names)}")
+    # Owner decision (Phase 16, docs/READINESS.md "Terms of service"): one key per provider, from
+    # one account. More than one distinct key is only for the overlap of a rotation. A note, not
+    # an error: the exit code is for a key that appears twice.
+    for provider, names in PROVIDERS.items():
+        distinct = {
+            key
+            for name in names
+            for key in (part.strip() for part in (env.get(name) or "").split(","))
+            if key
+        }
+        if len(distinct) > 1:
+            out(
+                f"NOTE: {provider} holds {len(distinct)} different keys; the rule is one key per "
+                "provider from one account (docs/READINESS.md). Keep a second one only while a "
+                "rotation overlaps, and do not count it as extra free quota."
+            )
     if not args.all and any((env.get(n) or "").strip() for n in EVALUATION_KEYS):
         out("note: evaluation keys are set in this window; they must never be set on Render")
     return 1 if clashes else 0

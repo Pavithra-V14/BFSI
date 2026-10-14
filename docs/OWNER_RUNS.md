@@ -99,6 +99,11 @@ never set.)
 | 32 | The database connection count on the deployed service, against the plan's limit | Phase 15 | PENDING (after Run 28) |
 | 33 | The scheduled tasks on this machine: retention, drift, snapshot (Windows Task Scheduler) | Phase 15 | PENDING |
 | 34 | Migration 0010 and the withdrawn-document record: a delete in the test collection records the id, moves the PDF and a restore finds nothing left | Phase 15 | PENDING (needs your yes: it changes `documents_eval`) |
+| 35 | The red-team set: development half, then the held-out half (its own estimate and code each) | Phase 16 | PENDING (needs your yes: real evaluation keys) |
+| 36 | The security scan: pip-audit of all five requirements files, the bandit baseline, gitleaks | Phase 16 | PENDING |
+| 37 | Numeric targets from the baseline: `app.eval targets`, then the absolute floors you sign | Phase 16 | PENDING (after Run 21) |
+| 38 | The cost projection against a dry run | Phase 16 | PENDING (after Run 27 or Run 21) |
+| 39 | The pre-launch gate and the readiness score, with the second review | Phase 16 | PENDING (after Runs 35 to 38) |
 
 **Pending migrations, in order:** 0005 (Run 8), 0006 to 0008 (Run 16), 0009 (Run 18) and **0010
 `withdrawn_documents` (Phase 15 round 3)**. The runner applies every pending file in order, so
@@ -1966,6 +1971,150 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
 - **Real calls:** a handful of Qdrant requests and one embedding call (the ingest).
 - **Safe to repeat:** with a new throw-away id each time (an id stays withdrawn).
 
+## Run 35. The red-team set (needs your yes: real evaluation keys): PENDING
+
+- **Verifies:** that the system holds against the 40 adversarial cases of
+  `app/eval/data/redteam.json`: injection, role escalation, out-of-domain and jailbreak phrasings,
+  and PII in the question. Two halves of 20: **development** (to find and fix weaknesses) and
+  **held-out** (the only half the pre-launch gate is judged on).
+- **Before it:** Run 19 (the test collection and its documents), Run 20 (calibration) and Run 21
+  (the baseline, so that a red-team result has something to be read against). The 60-case set is
+  not touched.
+- **Needs (names only):** the evaluation keys of Run 20 and the settings of Run 19, in this
+  window only. A red-team run is a normal evaluation run: it shows an estimate first and starts
+  only with its own confirmation code.
+- **Step 1. Check the file (no call):**
+
+      uv run python -m app.eval check
+
+  You should see `red-team set: 40 cases (development and held-out halves of 20)` and no
+  `problem:` line.
+- **Step 2. The development half.**
+
+      uv run python -m app.eval estimate --set redteam_dev
+
+  You should see `run RUN_ID (redteam_dev, local, 20 cases)`, the estimate, and the line
+  `To start it, type the confirmation code: run RUN_ID --confirm CODE`. Your decision is yes or
+  no; then `uv run python -m app.eval run RUN_ID --confirm CODE`.
+- **Step 3. Read the development result, fix what it shows, and only then the held-out half.**
+  Fixing against the development half is the point of it. **A fix to the system and a change to
+  a red-team case are never made in the same week** (spec 15.1).
+- **Step 4. The held-out half, once, after the fixes:**
+
+      uv run python -m app.eval estimate --set redteam_heldout
+
+  then `run RUN_ID --confirm CODE` as above. Do not fix against this half and run it again the
+  same day: that turns it into a second development half. The pass threshold is YOUR number,
+  written in `docs/prelaunch_evidence.json` (`red_team.threshold`) before you look at the result.
+- **You should see:** per case a pass or fail; any `pii_leak`, cross-role leak or `prompt_leak` is
+  an alert whatever the pass rate (the zero rules of `docs/TARGETS.md`).
+- **If a line differs:** `the red-team set is broken: ...` names the rule (a duplicated question,
+  a wrong half, a case outside the sample documents): send it, do not edit the file yourself in
+  the same week as a system change.
+- **Send back:** both run ids, the number of cases passed in each half, and which cases failed
+  (their ids only; the answers are in the evaluation database).
+- **Clear:** unset the evaluation keys.
+- **Real calls:** about the number the estimate shows (the free-tier limits of ONE key per
+  provider, `docs/READINESS.md`); split over days if it does not fit one.
+- **Safe to repeat:** the development half yes (a new estimate and code each time); the held-out
+  half only as a final check, not as a tuning loop.
+
+## Run 36. The security scan: PENDING
+
+- **Verifies:** spec 17.6 "no open critical or high findings". `docs/SECURITY_SCAN.md` says what
+  each tool covers and why each accepted finding kind is accepted.
+- **Before it:** nothing. No key, no service: it reads the repository and the package index.
+- **Step 1. Audit the files CI does not audit (on your machine):**
+
+      uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt -r requirements-dev.txt
+      uvx --from pip-audit==2.10.1 pip-audit -r requirements-frontend.txt
+      uvx --from pip-audit==2.10.1 pip-audit -r requirements-ingest.txt
+      uvx --from pip-audit==2.10.1 pip-audit -r requirements-eval.txt
+
+  You should see `No known vulnerabilities found` for each, apart from the skipped wheel
+  `en-core-web-sm` (not on PyPI). The two accepted advisories of the eval file are listed in
+  `docs/SECURITY_SCAN.md`; anything else is OPEN until you decide.
+- **Step 2. The static scan against the accepted baseline:**
+
+      uvx bandit==1.9.4 -r app scripts load frontend -q -f json -o bandit_now.json
+      uv run python scripts/bandit_check.py bandit_now.json
+
+  You should see `N finding(s) in the scan, N accepted, 0 new` and exit code 0 (bandit itself
+  exits 1 when it finds anything; that is expected). A new finding is printed with its file and
+  line: read it, then fix it, or accept it by rebuilding the baseline on purpose (the commands are
+  in `docs/SECURITY_SCAN.md`). Delete `bandit_now.json` afterwards.
+- **Step 3. Secrets (Run 24):** `gitleaks git --redact --no-banner --verbose`.
+- **Send back:** the three outputs' last lines and the counts of open critical and high findings.
+  Record them in `docs/prelaunch_evidence.json` (`security_scan`: `scans` with the three names,
+  `critical_open`, `high_open`, and an `evidence` citation such as `date:YYYY-MM-DD`).
+- **Real calls:** requests to the package index only.
+- **Safe to repeat:** yes.
+
+## Run 37. Numeric targets from the baseline (after Run 21): PENDING
+
+- **Verifies:** that the baseline turns into the targets of `docs/TARGETS.md` by the four rules
+  you approved, and that no number is set without a measurement.
+- **Before it:** Run 21 (three unchanged runs of the active set: the variance band).
+- **Step 1. Read the proposals (no call, writes nothing):**
+
+      uv run python -m app.eval targets
+
+  You should see `baseline of 3 runs of dataset 2026-10-v1`, then one line per target with its
+  rule, the baseline, the band, the signed floor, the **proposed** target and when it alerts.
+  Without three finished runs it says `no baseline yet` and every target stays "baseline".
+- **Step 2. Sign the absolute floors.** For citation validity, numeric faithfulness,
+  faithfulness, refusal correctness and access isolation, choose a number independent of the
+  baseline and add it to `app/eval/data/targets_signed.json` with your name and the date:
+  `{"absolute_floors": {"citation_validity": {"floor": 0.95, "signed_by": "NAME", "date":
+  "YYYY-MM-DD"}}}` (the 0.95 is only the shape). A number without a name and a date is ignored.
+- **Step 3. Record each decision** in the status column of `docs/TARGETS.md`, and the starting
+  values of its section C that the baseline replaced.
+- **Send back:** the output of step 1 (numbers only).
+- **Real calls:** none. **Safe to repeat:** yes.
+
+## Run 38. The cost projection against a dry run: PENDING
+
+- **Verifies:** spec 17.6 "a cost projection compared with a dry run".
+- **Before it:** Run 21 or Run 27: you need a MEASURED tokens-per-query (the `tokens_per_query`
+  line of Run 37, or the report of the real load run).
+- **Step 1.**
+
+      uv run python scripts/cost_dry_run_compare.py --queries-per-day 100 --measured-tokens-per-query MEASURED
+
+  You should see the projected and the measured tokens per query, the ratio, and whether it is
+  within the 25 % margin. Outside it, the placeholder sizes of `app/eval/estimate.py` are
+  replaced by the measured ones (a code change, with a release record).
+- **Step 2.** Record the ratio in `docs/prelaunch_evidence.json` (`cost_projection.ratio`) with
+  an `evidence` citation. The queries per day stays "to be named by the owner" until you name it.
+- **Real calls:** none. **Safe to repeat:** yes.
+
+## Run 39. The pre-launch gate and the readiness score: PENDING
+
+- **Verifies:** the nine items of spec 17.6, in one report, and the stage checklists of spec 19.
+- **Before it:** Runs 21, 26, 29 and 35 to 38 as far as you have done them. The gate is honest
+  about what is missing: it prints NO EVIDENCE for it.
+- **Step 1. Fill in what you have.** After each run write its result in
+  `docs/prelaunch_evidence.json` (`status` pass or fail, a citation, the numbers the item
+  needs) and score the lines of `docs/READINESS.md` **with a citation each**; a line with no
+  citation scores 0. Score conservatively.
+- **Step 2. The report (no call):**
+
+      uv run python scripts/prelaunch_gate.py --write
+
+  You should see PASS, FAIL or NO EVIDENCE for each of the nine items with the reason, `Alert
+  only: nothing is blocked by this report`, and `saved YYYY-MM-DD-prelaunch-gate.md`. Attach that
+  file to the release record. The exit code is 0 whatever it says.
+- **Step 3. A stage checklist:**
+
+      uv run python scripts/prelaunch_gate.py --stage staff_beta
+
+  (and `--stage open`). Moving the stage is still your deliberate step in the admin page.
+- **Step 4. The second review.** A second reviewer reads each cited item and re-scores
+  `docs/READINESS.md`; fill in the "Second review" line. **An independent second review is also
+  required before any real customer data** (`docs/ACCESS_CONTROL_AUDIT.md`).
+- **Send back:** the saved report (it holds names and numbers only).
+- **Real calls:** none. **Safe to repeat:** yes.
+
 ---
 
 # C. Added by later phases
@@ -1983,6 +2132,7 @@ Known candidates, not yet written (the phase that creates the code writes the ru
 - Phase 11 (Streamlit): written above (Run 17).
 - Phase 12 (observability): written above (Run 18).
 - Phase 13 (evaluation): written above (Runs 19 to 23; the ones with real keys need your yes).
-- Phase 16 (baseline): the targets are set from Run 21's numbers and the pre-launch gate.
+- Phase 16 (baseline): written above (Runs 35 to 39): the red-team set, the security scan,
+  the targets from Run 21's numbers, the cost comparison and the pre-launch gate.
 - Phase 14 (load tests): the load run, with the free-tier limits it may hit.
 - Phase 15 (deployment): the Render deploy steps and the proxy-header test.

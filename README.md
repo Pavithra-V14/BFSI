@@ -5,7 +5,7 @@ services and insurance (BFSI) policy and regulatory documents. Every answer is
 grounded in the documents and cites clauses. Customers, staff and admins see
 different documents.
 
-Current phase: Phase 14 closed; Phase 15 (deployment) closed in code (50250cd, 2948c6b), round 3 "docs and restore hardening" built and awaiting the owner's "commit"; Runs 19 to 34 are pending with the owner (next is Phase 16)
+Current phase: Phase 16 (baseline, targets, pre-launch gate) built, awaiting the owner's runs (35 to 39) and approval; it is not closed until the runs and the decisions they need have happened. Phases 1 to 15 are closed in code; Runs 19 to 39 are pending with the owner
 
 ## Where things are
 - `spec/` : the full specification (`build.md`), two diagrams and three
@@ -1103,6 +1103,59 @@ Nothing here was deployed by Claude: it is the files and the guide for YOU to de
 - **Owner decision recorded.** `EVAL_*` names are not all kept off Render: `EVAL_DATABASE_URL`
   and `EVAL_SAMPLE_RATE` are set there on purpose (the masked production sample); the evaluation
   keys, the judge model and the test collection names never are.
+
+## Baseline, targets and the pre-launch gate (Phase 16)
+Phase 16 is mostly measurement, so what is built here is the tooling that turns your runs into
+targets and into one honest report. **Nothing was measured by Claude**: the numbers come from
+your Runs 20 to 22 and 35 to 38, and until they exist every target stays "baseline" and the gate
+says NO EVIDENCE. All of it is **alert only** (build rule 5): nothing blocks a merge, a release
+or a stage change.
+
+- **Targets** (`docs/TARGETS.md`, `uv run python -m app.eval targets`). Four rules: a
+  **regression floor** (baseline mean minus the variance band), a **ceiling** for latency p95
+  and tokens per query (baseline plus 20 %), an **absolute floor** you sign for the
+  safety-critical measures (citation validity, faithfulness, refusal correctness, access
+  isolation), independent of the baseline, and a **zero rule** (PII leak, cross-role leak, prompt
+  leak, stale answer: any non-zero is an alert). The command prints proposals and writes
+  nothing; a signed floor lives in `app/eval/data/targets_signed.json` with a name and a date.
+- **The red-team set** (`app/eval/data/redteam.json`): 40 adversarial cases, 20 development and
+  20 held-out, separate from the 60-case set. `python -m app.eval estimate --set redteam_dev` or
+  `--set redteam_heldout` gives each its own estimate and code. **The gate is judged on the
+  held-out half only.** No real data.
+- **The readiness score** (`docs/READINESS.md`): five categories of 20 points; **a line with no
+  cited evidence scores 0**; the scoring is conservative and is re-scored by a second review.
+  Terms of service: one key per provider from one account; the key pool is not for pooling free
+  quota, and capacity plans (`app/eval/estimate.py`, `ONE_KEY_PER_PROVIDER`) count one key.
+- **The gate and the stage checklists** (`scripts/prelaunch_gate.py`, `--stage staff_beta` or
+  `open`): PASS, FAIL or NO EVIDENCE for each of the nine items of spec 17.6, from the readiness
+  page and `docs/prelaunch_evidence.json`. `--write` saves the report for the release record.
+- **Cost against a dry run** (`scripts/cost_dry_run_compare.py`).
+- **Access-control audit** (`docs/ACCESS_CONTROL_AUDIT.md`, `tests/test_access_control_matrix.py`):
+  every route is asked four ways (no token, customer, staff, admin) and compared with a table; a
+  new route has to be decided. **An independent second review is required before any real
+  customer data.**
+- **Security scan** (`docs/SECURITY_SCAN.md`): pip-audit of all five requirements files (CI does
+  two), bandit (new, alert only in CI, with `.bandit-baseline.json`), gitleaks. One finding was
+  fixed rather than accepted: literal direction-control characters in `frontend/render.py`
+  (`tests/test_source_hygiene.py` keeps them out).
+- **Decided values** recorded in the spec: staff token budget 200,000, review overdue limit
+  2 working days, shadow period two weeks. **To be named by the owner:** queries per day, the
+  monthly budget ceiling, the business owner.
+
+**Known limitations (recorded in Phase 16)**
+- **Phase 16 runs.** Until Run 21 exists there is no baseline and no band; every target is
+  "baseline" and the gate has nothing to judge. The pass threshold of the held-out half and the
+  absolute floors are yours to set; the tools never invent them.
+- **Phase 16 runs.** A run id in the evidence file is checked by its shape only (the run lives in
+  your evaluation database); a file, test or page citation is checked to exist.
+- **Later.** The red-team cases test what an attacker types; they are not a penetration test.
+  Indirect injection through a document is covered by the ingestion scan and its own tests, and
+  by one case in each half.
+- **Later.** The route matrix tests the answer to a token; it does not test rate limits or
+  token budgets (their own tests do).
+- **Later.** The bandit baseline accepts the f-string SQL findings because every value is a bound
+  parameter; a future query that puts a value into the text would be a NEW finding of the same
+  kind and could hide among the accepted ones. Read a new B608 with that in mind.
 
 ## Rules in plain words
 - Tests and evaluations never touch production data.

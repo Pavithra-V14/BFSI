@@ -21,7 +21,10 @@ once (`docs/runbooks/key-leaked.md`); this page is for the routine.
 | Hash keys | `AUDIT_HASH_KEY`, `LANGFUSE_USER_HASH_KEY` | yes | `LANGFUSE_USER_HASH_KEY` only: the shell of the retention task (the only Langfuse setting it reads); `AUDIT_HASH_KEY` only a local API run | only on a leak: see "What a hash key change does" below |
 | Chat webhook | `ALERT_WEBHOOK_URL` | yes | the shell of the webhook test | every 180 days |
 
-Spec 2: the owner must also check each provider's terms of service for using several accounts [T].
+Spec 2: the owner must also check each provider's terms of service [T]. **Decision (Phase 16):
+one key per provider, from one account the owner owns.** A list holds a second key only
+while a rotation overlaps; free quota of several accounts is never added up (`docs/READINESS.md`,
+"Terms of service"; `scripts/key_inventory.py` prints a NOTE when a provider holds two keys).
 
 ## The order for a list of keys (a save restarts the service)
 

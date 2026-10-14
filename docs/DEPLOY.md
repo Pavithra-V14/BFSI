@@ -52,7 +52,7 @@ current limits on Render's pricing page before you rely on them.
 | A Neon project (Postgres) | neon.tech | already made for the main database; make a second small database for evaluation |
 | A Qdrant Cloud cluster | cloud.qdrant.io | already made |
 | An Upstash Redis database | upstash.com | already made |
-| Provider keys | Groq, Google AI Studio, OpenRouter, Cohere, Jina | up to four per answer provider |
+| Provider keys | Groq, Google AI Studio, OpenRouter, Cohere, Jina | **one key per provider, from one account you own** (`docs/READINESS.md`, terms of service) |
 | A Langfuse project | langfuse.com | keys and your region's address |
 | A chat webhook address | your team's chat (Slack, Teams or Discord) | for alerts |
 
@@ -341,9 +341,9 @@ if you want to change the default. A variable left out, or left empty, uses its 
 
 | Variable | Where the value comes from | Secret? | In render.yaml? | Needed? |
 |---|---|---|---|---|
-| `GROQ_API_KEYS` | your Groq accounts (console), up to four, comma separated | yes | yes | required |
-| `GEMINI_API_KEYS` | your Google AI Studio accounts, up to four | yes | yes | at least one provider key |
-| `OPENROUTER_API_KEYS` | your OpenRouter accounts, up to four | yes | yes | at least one provider key |
+| `GROQ_API_KEYS` | your Groq account (console): one key; a second only while a rotation overlaps | yes | yes | required |
+| `GEMINI_API_KEYS` | your Google AI Studio account: one key (see the rule above) | yes | yes | at least one provider key |
+| `OPENROUTER_API_KEYS` | your OpenRouter account: one key (see the rule above) | yes | yes | at least one provider key |
 | `JEV_OPENROUTER_API_KEY` | its own OpenRouter key | yes | yes | optional |
 | `GEMINI_EMBEDDING_KEY_A` | a Google account (embeddings) | yes | yes | required |
 | `GEMINI_EMBEDDING_KEY_B` | a second, different Google account | yes | yes | optional |

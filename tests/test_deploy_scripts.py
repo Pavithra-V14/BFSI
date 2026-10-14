@@ -1013,3 +1013,21 @@ def test_a_title_must_be_one_line_and_a_since_must_be_a_commit_id(tmp_path, monk
     )
     assert code == 1 and "commit id" in out.text
     assert not list(folder.glob("2026-*.md"))
+
+
+def test_the_inventory_notes_more_than_one_key_per_provider_but_does_not_fail():
+    one = made_up()
+    quiet = Lines()
+    assert (
+        key_inventory.main([], {"GROQ_API_KEYS": one, "COHERE_API_KEY": made_up()}, out=quiet) == 0
+    )
+    assert "NOTE" not in quiet.text
+    several = Lines()
+    env = {"GROQ_API_KEYS": f"{made_up()},{made_up()}", "GEMINI_EMBEDDING_KEY_A": made_up(),
+           "GEMINI_EMBEDDING_KEY_B": made_up()}  # fmt: skip
+    assert key_inventory.main([], env, out=several) == 0, "a note is not an error"
+    assert "NOTE: Groq holds 2 different keys" in several.text
+    assert "NOTE: Gemini (embeddings) holds 2 different keys" in several.text
+    same = Lines()
+    key_inventory.main([], {"GROQ_API_KEYS": f"{one},{one}"}, out=same)
+    assert "NOTE" not in same.text, "the same key twice is one key (it is a warning of its own)"
