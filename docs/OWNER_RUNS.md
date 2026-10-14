@@ -1842,7 +1842,7 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   | Pick | Setting | How the drill goes |
   |---|---|---|
   | 1 | `GROQ_API_KEYS` (a list, up to four) | add the new key after a comma, save, check, revoke the old one at Groq, remove it from the list, save |
-  | 2 | `GEMINI_EMBEDDING_KEY_B` (a single value, the failover) | replace it, save, check, revoke the old one |
+  | 2 | `GEMINI_EMBEDDING_KEY_B` (a single value, a rotation overlap of the same account) | replace it, save, check, revoke the old one |
   | 3 | `GEMINI_API_KEYS` or `OPENROUTER_API_KEYS` (lists) | as pick 1 |
 
   `GEMINI_EMBEDDING_KEY_B` is optional: if its count is 0, use pick 1. Do **not** drill with
@@ -2006,13 +2006,17 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   then `run RUN_ID --confirm CODE` as above. Do not fix against this half and run it again the
   same day: that turns it into a second development half. The pass threshold is YOUR number,
   written in `docs/prelaunch_evidence.json` (`red_team.threshold`) before you look at the result.
-- **You should see:** per case a pass or fail; any `pii_leak`, cross-role leak or `prompt_leak` is
-  an alert whatever the pass rate (the zero rules of `docs/TARGETS.md`).
+- **You should see:** the development half case by case; the held-out half as a count (the
+  admin page shows `failed_held_out_count` and hides the ids). Any `pii_leak`, cross-role
+  leak or `prompt_leak` is an alert whatever the pass rate (the zero rules of
+  `docs/TARGETS.md`).
 - **If a line differs:** `the red-team set is broken: ...` names the rule (a duplicated question,
   a wrong half, a case outside the sample documents): send it, do not edit the file yourself in
   the same week as a system change.
-- **Send back:** both run ids, the number of cases passed in each half, and which cases failed
-  (their ids only; the answers are in the evaluation database).
+- **Send back:** both run ids; for the development half the number passed and the ids of the
+  cases that failed; for the **held-out half the number passed and nothing else**: no case
+  id, no answer, no wording. The admin page and `docs/TARGETS.md` show held-out failures as
+  a count only, so that nobody tunes against that half by accident.
 - **Clear:** unset the evaluation keys.
 - **Real calls:** about the number the estimate shows (the free-tier limits of ONE key per
   provider, `docs/READINESS.md`); split over days if it does not fit one.
@@ -2043,7 +2047,14 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   exits 1 when it finds anything; that is expected). A new finding is printed with its file and
   line: read it, then fix it, or accept it by rebuilding the baseline on purpose (the commands are
   in `docs/SECURITY_SCAN.md`). Delete `bandit_now.json` afterwards.
-- **Step 3. Secrets (Run 24):** `gitleaks git --redact --no-banner --verbose`.
+- **Step 3. Every place SQL text is built from parts (no service):**
+
+      uv run python scripts/sql_sites.py --check
+
+  You should see `32 site(s) found, 32 reviewed, 0 new`. A new site is printed with its file
+  and line: read it, and add it to `docs/sql_sites.json` only if it puts nothing but a name, a
+  run of placeholders or a fixed fragment into the text.
+- **Step 4. Secrets (Run 24):** `gitleaks git --redact --no-banner --verbose`.
 - **Send back:** the three outputs' last lines and the counts of open critical and high findings.
   Record them in `docs/prelaunch_evidence.json` (`security_scan`: `scans` with the three names,
   `critical_open`, `high_open`, and an `evidence` citation such as `date:YYYY-MM-DD`).
@@ -2094,9 +2105,13 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
 - **Before it:** Runs 21, 26, 29 and 35 to 38 as far as you have done them. The gate is honest
   about what is missing: it prints NO EVIDENCE for it.
 - **Step 1. Fill in what you have.** After each run write its result in
-  `docs/prelaunch_evidence.json` (`status` pass or fail, a citation, the numbers the item
-  needs) and score the lines of `docs/READINESS.md` **with a citation each**; a line with no
-  citation scores 0. Score conservatively.
+  `docs/prelaunch_evidence.json` (`status` pass or fail, **`date`: the day you checked it
+  (YYYY-MM-DD)**, a citation, the numbers the item needs) and score the lines of
+  `docs/READINESS.md` **with a citation each**, and write the day on its `Scored on` line; a
+  line with no citation scores 0. Score conservatively. A record older than 30 days is
+  `STALE` (7 days for the two stage items that say "last 7 days"): check it again and
+  re-record it. The file is typed by you: the gate refuses an empty or inconsistent claim,
+  it cannot prove a true one.
 - **Step 2. The report (no call):**
 
       uv run python scripts/prelaunch_gate.py --write

@@ -29,8 +29,8 @@ PRODUCTION_KEYS: dict[str, str] = {
     "GEMINI_API_KEYS": "Gemini answers, triage and image captions",
     "OPENROUTER_API_KEYS": "OpenRouter answers and triage",
     "JEV_OPENROUTER_API_KEY": "Jev decisions (its own key)",
-    "GEMINI_EMBEDDING_KEY_A": "embeddings, first account",
-    "GEMINI_EMBEDDING_KEY_B": "embeddings, second account",
+    "GEMINI_EMBEDDING_KEY_A": "embeddings, the key in use",
+    "GEMINI_EMBEDDING_KEY_B": "embeddings, rotation overlap (same account)",
     "COHERE_API_KEY": "rerank (Cohere)",
     "JINA_API_KEY": "rerank (Jina)",
 }
@@ -97,8 +97,9 @@ def main(
         if len(distinct) > 1:
             out(
                 f"NOTE: {provider} holds {len(distinct)} different keys; the rule is one key per "
-                "provider from one account (docs/READINESS.md). Keep a second one only while a "
-                "rotation overlaps, and do not count it as extra free quota."
+                "provider from one account (docs/READINESS.md). A second key is a rotation "
+                "overlap only (the same account: its quota is per project, so it adds no "
+                "capacity); remove it when the rotation is done."
             )
     if not args.all and any((env.get(n) or "").strip() for n in EVALUATION_KEYS):
         out("note: evaluation keys are set in this window; they must never be set on Render")

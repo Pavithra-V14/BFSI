@@ -78,6 +78,20 @@ def check_citation(text: str, root: Path = ROOT) -> Citation:
     return Citation(token, False, "not a run:, file:, test:, doc: or date: citation")
 
 
+_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def parse_date(text: str) -> date | None:
+    """A strict ISO date `YYYY-MM-DD` (a real calendar day), or None."""
+    found = _ISO.match(str(text).strip())
+    if not found:
+        return None
+    try:
+        return date(int(found.group(1)), int(found.group(2)), int(found.group(3)))
+    except ValueError:
+        return None
+
+
 def split_citations(cell: str) -> list[str]:
     """The tokens of an evidence cell: separated by commas, semicolons or spaces."""
     return [t for t in re.split(r"[,;\s]+", cell.replace("`", "")) if t]

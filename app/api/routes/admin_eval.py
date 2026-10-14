@@ -139,7 +139,13 @@ def make_estimate(
     local = store.open_db(store.sqlite_url(access.local_path))
     try:
         store.sync_cases(local, cases_all)
-        cases = store.list_cases(local, status="set", active_only=body.run_set != "full")
+        # only the main set: the red-team cases share this table under their own dataset
+        # version and are never part of a main run (Phase 16, docs/TARGETS.md)
+        cases = [
+            x
+            for x in store.list_cases(local, status="set", active_only=body.run_set != "full")
+            if x.dataset_version == version
+        ]
         run_id, estimate, code = prepare_run(
             local,
             cases=cases,

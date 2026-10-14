@@ -73,8 +73,8 @@ key gives a new hash for the same input, so:
 Once, before launch: rotate ONE key you have a spare for, following the order above, and write
 down how long it took and what surprised you. Which one: `docs/OWNER_RUNS.md` Run 31 has the
 choice (a key of a list such as `GROQ_API_KEYS` is the usual one; `GEMINI_EMBEDDING_KEY_B` is a
-safe single value when it is in use: key A is the primary and B only a failover; it is optional,
-so it may be empty).
+single value that exists only as a rotation overlap of the same account, so it may well be
+empty).
 
 ## The log
 

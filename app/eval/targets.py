@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,6 +165,17 @@ def load_signed(path: Path = SIGNED_PATH) -> dict[str, Any]:
     return floors if isinstance(floors, dict) else {}
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_iso_date(text: Any) -> bool:
+    if not isinstance(text, str) or not _ISO_DATE.match(text):
+        return False
+    from app.prelaunch.evidence import parse_date
+
+    return parse_date(text) is not None
+
+
 def _signed_floor(signed: Mapping[str, Any], name: str) -> float | None:
     entry = signed.get(name)
     if not isinstance(entry, dict):
@@ -171,18 +183,23 @@ def _signed_floor(signed: Mapping[str, Any], name: str) -> float | None:
     value = entry.get("floor")
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if not (entry.get("signed_by") and entry.get("date")):
-        return None  # a number without a name and a date is not a sign-off
+    signer = entry.get("signed_by")
+    if not (isinstance(signer, str) and signer.strip() and _is_iso_date(entry.get("date"))):
+        return None  # a number without a name and an ISO date is not a sign-off
+    if not 0.0 <= float(value) <= 1.0:
+        return None  # every absolute floor is a share of cases: from 0 to 1
     return float(value)
 
 
 def propose(
     target: Target, combined: Mapping[str, Mapping[str, Any]], signed: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """The proposed target of one measure, by its rule. Never invents a number: with no baseline
-    the answer is 'baseline'."""
+    """The proposed target of one measure, by its rule. Never invents a number: with no baseline,
+    with a metric measured in fewer than all three runs, or with a band that makes the floor
+    meaningless, the answer is "baseline" and a note says why."""
     row = combined.get(target.metric) or {}
     mean = row.get("mean")
+    runs = int(row.get("runs") or 0)
     band = row.get("band") or {}
     result: dict[str, Any] = {
         "name": target.name,
@@ -190,6 +207,7 @@ def propose(
         "source": target.source,
         "baseline": mean,
         "width": band.get("width"),
+        "runs": runs,
         "signed_floor": None,
         "target": "baseline",
         "alert_when": "",
@@ -199,37 +217,46 @@ def propose(
         result["target"] = 0.0
         result["alert_when"] = "any value above 0"
         return result
-    if mean is None:
-        result["note"] = "no baseline yet"
-        if target.rule == ABSOLUTE:
-            floor = _signed_floor(signed, target.name)
-            result["signed_floor"] = floor
-            if floor is not None:
-                result["target"] = floor
-                result["alert_when"] = f"below {floor:g}"
+    floor = _signed_floor(signed, target.name) if target.rule == ABSOLUTE else None
+    result["signed_floor"] = floor
+
+    def only_the_signed_floor(note: str) -> dict[str, Any]:
+        result["note"] = note
+        if floor is not None:  # a signed floor is independent of the baseline
+            result["target"] = floor
+            result["alert_when"] = f"below {floor:g}"
         return result
+
+    if mean is None:
+        return only_the_signed_floor("no baseline yet")
+    if runs < c.VARIANCE_RUNS:
+        return only_the_signed_floor(f"measured in {runs} of {c.VARIANCE_RUNS} runs: no proposal")
     if target.rule == CEILING:
+        if mean <= 0:
+            result["note"] = "no usable target (the baseline is 0)"
+            return result
         result["target"] = round(mean * (1 + CEILING_MARGIN), 6)
         result["alert_when"] = f"above {result['target']:g}"
         return result
     width = band.get("width")
-    regression = None if width is None else round(mean - width, 6)
+    if width is None:
+        return only_the_signed_floor(
+            "no variance band yet (three unchanged runs of the active set)"
+        )
+    if width > mean:
+        # a floor of mean minus width would be negative and could never alert: say so, no clamp
+        return only_the_signed_floor("no usable target (band larger than the mean)")
+    regression = round(mean - width, 6)
     if target.rule == REGRESSION:
-        if regression is None:
-            result["note"] = "no variance band yet (three unchanged runs of the active set)"
-            return result
         result["target"] = regression
         result["alert_when"] = f"below {regression:g}"
         return result
     # ABSOLUTE: the higher of the regression floor and the owner's signed floor
-    floor = _signed_floor(signed, target.name)
-    result["signed_floor"] = floor
     candidates = [v for v in (regression, floor) if v is not None]
     if floor is None:
         result["note"] = "no signed absolute floor yet: the owner signs one"
-    if candidates:
-        result["target"] = max(candidates)
-        result["alert_when"] = f"below {max(candidates):g}"
+    result["target"] = max(candidates)
+    result["alert_when"] = f"below {max(candidates):g}"
     return result
 
 

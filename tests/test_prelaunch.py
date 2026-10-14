@@ -6,7 +6,7 @@ citation is a FAIL, nothing here blocks anything, and nothing is invented while 
 made."""
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -17,10 +17,12 @@ from scripts import cost_dry_run_compare, prelaunch_gate
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 RUN = "run:" + "a1b2c3d4e5f6"
+TODAY = date(2026, 10, 20)
+FRESH = "2026-10-15"
 
 
 def entry(**fields):
-    base = {"status": "pass", "evidence": RUN}
+    base = {"status": "pass", "evidence": RUN, "date": FRESH}
     base.update(fields)
     return base
 
@@ -47,7 +49,7 @@ def passing_evidence():
 
 
 def verdicts(ev, root=ROOT):
-    return {v.key: v for v in gate.gate(ev, root)}
+    return {v.key: v for v in gate.gate(ev, root, today=TODAY)}
 
 
 # ---- citations -------------------------------------------------------------------------------
@@ -116,7 +118,7 @@ def full_page(score="0", evidence_cell=""):
     ):
         rows = [f"| {prefix}{i} | line | 5 | {score} | {evidence_cell} | x |" for i in range(1, 5)]
         cats.append((name, rows))
-    return page(cats)
+    return page(cats) + "\n- **Scored on:** " + FRESH + "\n"
 
 
 def test_the_shipped_page_is_well_formed_and_scores_zero_until_evidence_exists():
@@ -210,7 +212,7 @@ def test_the_page_says_it_is_conservative_and_re_scored_and_holds_the_terms_sect
 
 # ---- the nine items --------------------------------------------------------------------------
 def test_with_nothing_recorded_no_item_passes_and_none_is_invented():
-    result = gate.gate({})
+    result = gate.gate({}, today=TODAY)
     assert [v.key for v in result] == [k for k, _ in gate.GATE_ITEMS] and len(result) == 9
     assert all(v.verdict != gate.PASS for v in result)
     assert all(v.verdict == gate.NONE for v in result), "nothing recorded is NO EVIDENCE"
@@ -229,7 +231,7 @@ def test_the_shipped_evidence_file_records_nothing():
 def test_every_item_passes_when_recorded_with_evidence_and_the_numbers_hold(tmp_path):
     readiness_file = tmp_path / "READINESS.md"
     readiness_file.write_text(full_page("5", "file:docs/TARGETS.md"), "utf-8")
-    result = gate.gate(passing_evidence(), ROOT, readiness_file)
+    result = gate.gate(passing_evidence(), ROOT, readiness_file, today=TODAY)
     assert [v.verdict for v in result] == [gate.PASS] * 9, [(v.key, v.reason) for v in result]
 
 
@@ -268,7 +270,11 @@ def test_a_recorded_failure_is_a_fail():
         ("rollback_drill", {"seconds": None}, "not a number"),
         ("cost_projection", {"ratio": 1.4}, "25 %"),
         ("cost_projection", {"ratio": 0.7}, "25 %"),
-        ("variance_band", {"runs": [f"run:{'a' * 8}", f"run:{'b' * 8}"]}, "3 unchanged runs"),
+        (
+            "variance_band",
+            {"runs": [f"run:{'a' * 8}", f"run:{'b' * 8}"]},
+            "2 distinct valid run ids",
+        ),
         ("access_control", {"evidence": RUN}, "route-matrix test"),
         ("access_control", {"evidence": "test:tests/test_access_control_matrix.py::"
                             "test_every_route_answers_each_kind_of_caller_as_the_table_says"},
@@ -304,11 +310,11 @@ def test_a_placeholder_business_owner_is_no_evidence_not_a_pass():
 def test_the_readiness_item_follows_the_page(tmp_path):
     file = tmp_path / "r.md"
     file.write_text(full_page("0", ""), "utf-8")
-    assert gate.judge_readiness(ROOT, file)[0] == gate.NONE
+    assert gate.judge_readiness(ROOT, file, today=TODAY)[0] == gate.NONE
     file.write_text(full_page("5", "file:docs/TARGETS.md"), "utf-8")
-    assert gate.judge_readiness(ROOT, file)[0] == gate.PASS
+    assert gate.judge_readiness(ROOT, file, today=TODAY)[0] == gate.PASS
     file.write_text("# nothing here", "utf-8")
-    assert gate.judge_readiness(ROOT, file)[0] == gate.FAIL
+    assert gate.judge_readiness(ROOT, file, today=TODAY)[0] == gate.FAIL
     assert gate.judge_readiness(ROOT, tmp_path / "missing.md")[0] == gate.FAIL
 
 
@@ -323,26 +329,30 @@ def stage_evidence():
 
 def test_a_stage_checklist_lists_its_items_and_the_red_team_item_follows_the_gate():
     ev = stage_evidence()
-    result = {v.key: v for v in gate.stage_checklist("staff_beta", ev)}
+    result = {v.key: v for v in gate.stage_checklist("staff_beta", ev, today=TODAY)}
     assert set(result) == {k for k, _ in gate.STAGES["staff_beta"]}
     assert result["red_team"].verdict == gate.PASS  # from gate_items.red_team
     assert result["baseline_and_band"].verdict == gate.NONE
     ev["gate_items"]["red_team"]["held_out_pass_rate"] = 0.2
-    assert {v.key: v for v in gate.stage_checklist("staff_beta", ev)}[
+    assert {v.key: v for v in gate.stage_checklist("staff_beta", ev, today=TODAY)}[
         "red_team"
     ].verdict == gate.FAIL
 
 
 def test_open_needs_every_staff_beta_item_again_and_its_own():
     ev = stage_evidence()
-    result = {v.key: v for v in gate.stage_checklist("open", ev)}
+    result = {v.key: v for v in gate.stage_checklist("open", ev, today=TODAY)}
     assert result["staff_beta_complete"].verdict == gate.NONE
     for key in ev["stage_checks"]["staff_beta"]:
-        ev["stage_checks"]["staff_beta"][key] = {"status": "pass", "evidence": "date:2026-10-20"}
-    result = {v.key: v for v in gate.stage_checklist("open", ev)}
+        ev["stage_checks"]["staff_beta"][key] = {
+            "status": "pass",
+            "evidence": "date:2026-10-20",
+            "date": FRESH,
+        }
+    result = {v.key: v for v in gate.stage_checklist("open", ev, today=TODAY)}
     assert result["staff_beta_complete"].verdict == gate.PASS
     ev["stage_checks"]["staff_beta"]["retention_task"] = {"status": "fail", "evidence": ""}
-    result = {v.key: v for v in gate.stage_checklist("open", ev)}
+    result = {v.key: v for v in gate.stage_checklist("open", ev, today=TODAY)}
     assert result["staff_beta_complete"].verdict == gate.FAIL
 
 
@@ -445,3 +455,253 @@ def test_bandit_is_a_pinned_dev_package_and_never_on_a_service():
     assert re.search(r"^bandit==\d+\.\d+\.\d+$", dev, re.M)
     for name in ("requirements.txt", "requirements-frontend.txt"):
         assert "bandit" not in (ROOT / name).read_text("utf-8"), "never on a service"
+
+
+# ---- round 2: dates, staleness, distinct runs, unreadable file, exclusive write ---------------
+def days_ago(n):
+    from datetime import timedelta
+
+    return (TODAY - timedelta(days=n)).isoformat()
+
+
+def test_a_pass_without_a_date_or_with_a_bad_or_future_date_is_a_fail():
+    for bad in (None, "", "yesterday", "2026-13-40", "20/10/2026", "2026-10-21"):
+        ev = passing_evidence()
+        if bad is None:
+            del ev["gate_items"]["load_test"]["date"]
+        else:
+            ev["gate_items"]["load_test"]["date"] = bad
+        result = verdicts(ev)["load_test"]
+        assert result.verdict == gate.FAIL, (bad, result.reason)
+        assert "date" in result.reason
+
+
+def test_a_gate_item_goes_stale_after_thirty_days_not_before():
+    ev = passing_evidence()
+    ev["gate_items"]["load_test"]["date"] = days_ago(30)
+    assert verdicts(ev)["load_test"].verdict == gate.PASS
+    ev["gate_items"]["load_test"]["date"] = days_ago(31)
+    stale = verdicts(ev)["load_test"]
+    assert stale.verdict == gate.STALE and "31 days ago" in stale.reason
+    assert stale.verdict != gate.PASS
+
+
+def test_the_seven_day_stage_items_go_stale_after_seven_days_the_others_after_thirty():
+    ev = stage_evidence()
+    for key in ("no_critical_alert", "retention_task", "data_flow_read"):
+        ev["stage_checks"]["staff_beta"][key] = {
+            "status": "pass",
+            "evidence": "date:2026-10-10",
+            "date": days_ago(8),
+        }
+    result = {v.key: v for v in gate.stage_checklist("staff_beta", ev, today=TODAY)}
+    assert result["no_critical_alert"].verdict == gate.STALE
+    assert result["retention_task"].verdict == gate.STALE
+    assert result["data_flow_read"].verdict == gate.PASS, "a one-off check lasts 30 days"
+    ev["stage_checks"]["staff_beta"]["retention_task"]["date"] = days_ago(7)
+    result = {v.key: v for v in gate.stage_checklist("staff_beta", ev, today=TODAY)}
+    assert result["retention_task"].verdict == gate.PASS
+
+
+def test_a_stale_staff_beta_item_stops_open_from_passing():
+    ev = stage_evidence()
+    for key in ev["stage_checks"]["staff_beta"]:
+        ev["stage_checks"]["staff_beta"][key] = {
+            "status": "pass",
+            "evidence": "date:2026-10-10",
+            "date": FRESH,
+        }
+    ev["stage_checks"]["staff_beta"]["retention_task"]["date"] = days_ago(9)
+    result = {v.key: v for v in gate.stage_checklist("open", ev, today=TODAY)}
+    assert result["staff_beta_complete"].verdict == gate.FAIL
+
+
+def test_the_readiness_page_needs_a_date_and_goes_stale_too(tmp_path):
+    good = full_page("5", "file:docs/TARGETS.md")
+    file = tmp_path / "r.md"
+    file.write_text(good, "utf-8")
+    assert gate.judge_readiness(ROOT, file, today=TODAY)[0] == gate.PASS
+    file.write_text(good.replace(FRESH, days_ago(31)), "utf-8")
+    assert gate.judge_readiness(ROOT, file, today=TODAY)[0] == gate.STALE
+    file.write_text(good.split("- **Scored on:**")[0], "utf-8")
+    verdict, why = gate.judge_readiness(ROOT, file, today=TODAY)
+    assert verdict == gate.FAIL and "Scored on" in why
+    file.write_text(good.replace(FRESH, "2026-10-21"), "utf-8")
+    assert "future" in gate.judge_readiness(ROOT, file, today=TODAY)[1]
+
+
+def test_a_line_that_claims_points_without_a_valid_citation_makes_the_item_fail_naming_it(tmp_path):
+    rows = [
+        "| AQ1 | line | 5 | 5 | see the report | x |",
+        "| AQ2 | line | 5 | 5 | file:docs/TARGETS.md | x |",
+        "| AQ3 | line | 5 | 0 | | x |",
+        "| AQ4 | line | 5 | 0 | | x |",
+    ]
+    cats = [("Answer quality", rows)] + [
+        (n, [f"| {p}{i} | line | 5 | 0 | | x |" for i in range(1, 5)])
+        for n, p in (("B", "SG"), ("C", "RP"), ("D", "SA"), ("E", "OD"))
+    ]
+    file = tmp_path / "r.md"
+    file.write_text(page(cats), "utf-8")
+    verdict, why = gate.judge_readiness(ROOT, file, today=TODAY)
+    assert verdict == gate.FAIL
+    assert "1 line(s) claim a score without a valid citation" in why and "AQ1" in why
+
+
+def test_the_same_run_id_three_times_is_not_three_runs():
+    ev = passing_evidence()
+    same = "run:" + "a" * 8
+    ev["gate_items"]["variance_band"]["runs"] = [same, same, same.upper()]
+    result = verdicts(ev)["variance_band"]
+    assert result.verdict == gate.FAIL and "1 distinct valid run ids" in result.reason
+    ev["gate_items"]["variance_band"]["runs"] = [same, "run:" + "b" * 8, "run:" + "c" * 8]
+    assert verdicts(ev)["variance_band"].verdict == gate.PASS
+
+
+def test_a_missing_or_corrupt_evidence_file_says_unreadable_not_just_no_evidence(tmp_path):
+    missing, why = gate.load_evidence_checked(tmp_path / "nope.json")
+    assert missing == {} and why == "evidence file unreadable: the file is missing"
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", "utf-8")
+    assert "not valid JSON" in gate.load_evidence_checked(broken)[1]
+    listy = tmp_path / "list.json"
+    listy.write_text("[1, 2]", "utf-8")
+    assert "not a JSON object" in gate.load_evidence_checked(listy)[1]
+    result = gate.gate({}, today=TODAY, unreadable=why)
+    assert all(v.verdict == gate.NONE for v in result)
+    assert all(why in v.reason for v in result if v.key != "readiness")
+    out = Lines()
+    prelaunch_gate.main([], out=out, evidence={})
+    assert "WARNING" not in out.text
+
+
+def test_the_output_says_what_the_report_cannot_prove_every_time():
+    out = Lines()
+    prelaunch_gate.main([], out=out, evidence={})
+    assert "self-attested" in out.text
+    assert "file: or doc: citation proves the file exists" in out.text
+    assert "run: id is checked by its shape only" in out.text
+    stage = Lines()
+    prelaunch_gate.main(["--stage", "staff_beta"], out=stage, evidence={})
+    assert "self-attested" in stage.text
+
+
+def test_the_summary_line_counts_stale_apart_from_fail_and_no_evidence():
+    ev = passing_evidence()
+    ev["gate_items"]["load_test"]["date"] = days_ago(40)
+    ev["gate_items"]["rollback_drill"]["seconds"] = 999
+    text = gate.render(gate.gate(ev, today=TODAY), "t")
+    assert "1 STALE" in text and "FAIL" in text and "NO EVIDENCE" in text
+
+
+def test_the_script_opens_the_report_for_exclusive_creation(tmp_path, monkeypatch):
+    """Even if the file appears between the check and the write, it is not overwritten."""
+    when = datetime(2026, 10, 20, tzinfo=UTC)
+    target = tmp_path / "2026-10-20-prelaunch-gate.md"
+    target.write_text("an earlier report", "utf-8")
+    real = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: False if self == target else real(self))
+    out = Lines()
+    prelaunch_gate.main(["--write"], out=out, evidence={}, folder=tmp_path, now=when)
+    assert "nothing was overwritten" in out.text
+    assert target.read_text("utf-8") == "an earlier report"
+
+
+# ---- round 2: the docs are checked against the code, not only for phrases -----------------------
+def _table_rows(text, heading):
+    """The rows (cells) of the first markdown table after a heading."""
+    section = text[text.index(heading) :]
+    rows = []
+    for line in section.split("\n")[1:]:
+        if line.startswith("|---"):
+            continue
+        if line.startswith("|"):
+            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+        elif rows:
+            break
+    return rows
+
+
+def test_every_target_of_the_page_has_the_rule_the_code_gives_it():
+    from app.eval import targets
+
+    page = (DOCS / "TARGETS.md").read_text("utf-8")
+    rows = _table_rows(page, "## A. Targets the baseline sets")
+    shown = {r[0].lower().replace("-", " "): r[1].lower() for r in rows[1:]}
+    word = {
+        targets.REGRESSION: "regression floor",
+        targets.CEILING: "ceiling",
+        targets.ABSOLUTE: "absolute floor",
+        targets.ZERO: "zero rule",
+    }
+    assert len(shown) == len(targets.TARGETS)
+    for target in targets.TARGETS:
+        name = target.name.removesuffix("_ms").replace("_", " ")
+        found = [rule for label, rule in shown.items() if label.startswith(name.split(" rate")[0])]
+        assert found, target.name
+        assert word[target.rule] in found[0], (target.name, found[0], target.rule)
+
+
+def test_the_page_names_the_two_halves_the_threshold_and_the_ceiling_of_the_code():
+    from app.eval import redteam, targets
+
+    page = (DOCS / "TARGETS.md").read_text("utf-8")
+    assert f"**{redteam.HALF} development**" in page and f"**{redteam.HALF} held-out**" in page
+    assert f"baseline plus {int(targets.CEILING_MARGIN * 100)} %" in page
+    assert f"plus {int(targets.CEILING_MARGIN * 100)} %" in page
+    assert redteam.DEV_PREFIX in page and redteam.HELD_PREFIX in page
+
+
+def test_the_readiness_page_has_the_categories_and_points_the_code_expects():
+    text = (DOCS / "READINESS.md").read_text("utf-8")
+    report = readiness.parse(text)
+    assert report.well_formed and len(report.categories) == readiness.CATEGORY_COUNT
+    assert [c.name.split(" (")[0] for c in report.categories] == [
+        "Answer quality",
+        "Safety and guardrails",
+        "Reliability and performance",
+        "Security and access control",
+        "Operations and delivery",
+    ]
+    assert all(c.maximum == readiness.CATEGORY_MAX for c in report.categories)
+    # every line names where its evidence comes from, and none is already scored
+    for category in report.categories:
+        for line in category.lines:
+            assert line.claimed == 0 and line.evidence == "", line.id
+    assert str(readiness.PASS_TOTAL) in text and str(readiness.PASS_CATEGORY) in text
+
+
+def test_the_terms_of_service_section_matches_what_the_estimate_and_the_inventory_do():
+    from app.eval import estimate
+    from scripts import key_inventory
+
+    assert estimate.ONE_KEY_PER_PROVIDER is True
+    limits = estimate.daily_limits(
+        __import__("tests.test_eval_estimate", fromlist=["config"]).config(
+            groq_keys=["a" * 12, "b" * 12, "c" * 12]
+        )
+    )
+    one_key = estimate.daily_limits(
+        __import__("tests.test_eval_estimate", fromlist=["config"]).config(groq_keys=["a" * 12])
+    )
+    assert limits.requests["answer"] == one_key.requests["answer"], "three keys, one key's limit"
+    out = Lines()
+    key_inventory.main([], {"GROQ_API_KEYS": "a" * 20 + "," + "b" * 20}, out=out)
+    assert "NOTE: Groq holds 2 different keys" in out.text
+    text = (DOCS / "READINESS.md").read_text("utf-8")
+    assert "ONE_KEY_PER_PROVIDER" in text
+
+
+def test_the_key_b_wording_is_a_rotation_overlap_everywhere_and_nowhere_a_second_account():
+    for rel in ("docs/DEPLOY.md", "docs/KEY_ROTATION.md", "docs/runbooks/all-keys-down.md",
+                "docs/OWNER_RUNS.md", ".env.example", "scripts/key_inventory.py"):  # fmt: skip
+        text = (ROOT / rel).read_text("utf-8")
+        for line in text.split("\n"):
+            if (
+                "EMBEDDING_KEY_B" in line
+                or "embedding" in line.lower()
+                and "account" in line.lower()
+            ):
+                low = line.lower()
+                assert "second account" not in low and "different account" not in low, (rel, line)
+                assert "failover" not in low or "overlap" in low or "tried" in low, (rel, line)

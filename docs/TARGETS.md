@@ -20,9 +20,14 @@ All of it is alerts only (build rule 5): no target blocks a merge or a release.
 
 `uv run python -m app.eval targets` (add `--production` for the cloud database) reads the three
 baseline runs and prints, for each target below, the baseline, the band, the signed floor and the
-**proposed** target. It writes nothing. The owner records each decision in the table below; an
+**proposed** target. It writes nothing. A target stays "baseline", with the reason printed, when
+a metric was measured in fewer than all three runs (`measured in N of 3 runs: no proposal`),
+when the band is larger than the mean (`no usable target (band larger than the mean)`: a floor
+below zero could never alert, so it is not clamped to a made-up number) or when a ceiling's
+baseline is 0. The owner records each decision in the table below; an
 absolute floor is signed by adding it, with name and date, to
-`app/eval/data/targets_signed.json` (a number without a name and a date is ignored).
+`app/eval/data/targets_signed.json` (a number outside 0 to 1, or without a name and an ISO
+date `YYYY-MM-DD`, is ignored).
 
 ## A. Targets the baseline sets (from the evaluation runs)
 
@@ -59,6 +64,13 @@ absolute floor is signed by adding it, with name and date, to
   `docs/prelaunch_evidence.json` (`red_team.threshold`); the gate does not invent one. Any
   PII leak or cross-role leak in either half is a zero-rule alert whatever the pass rate.
 - A fix to the system and a change to a red-team case are never made in the same week (spec 15.1).
+- **Held-out results are shown as a count only**: the admin page hides the ids of failed
+  `rt-held-` cases (development ids are shown), and the run instructions ask for the count.
+  Looking at which held-out case failed and then fixing for it turns that half into a second
+  development half; if that happens, say so and the half is replaced with new cases.
+- **A limit of the no-shared-question rule**: questions are compared after lower-casing and
+  folding punctuation and spaces. A reworded near-duplicate (one word added, a synonym) is
+  not caught by the code; the second review reads the two halves for it.
 
 ## C. Starting values to confirm or replace at the baseline (the Phase 16 list)
 

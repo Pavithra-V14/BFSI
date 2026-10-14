@@ -346,7 +346,7 @@ if you want to change the default. A variable left out, or left empty, uses its 
 | `OPENROUTER_API_KEYS` | your OpenRouter account: one key (see the rule above) | yes | yes | at least one provider key |
 | `JEV_OPENROUTER_API_KEY` | its own OpenRouter key | yes | yes | optional |
 | `GEMINI_EMBEDDING_KEY_A` | a Google account (embeddings) | yes | yes | required |
-| `GEMINI_EMBEDDING_KEY_B` | a second, different Google account | yes | yes | optional |
+| `GEMINI_EMBEDDING_KEY_B` | a second key from the SAME account, only for the overlap of a rotation (quota is per project, so it adds no capacity) | yes | yes | optional |
 | `COHERE_API_KEY` | Cohere dashboard | yes | yes | optional |
 | `JINA_API_KEY` | Jina dashboard | yes | yes | optional |
 | `QDRANT_URL` | Qdrant Cloud cluster page | yes | yes | required |

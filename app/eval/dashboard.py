@@ -50,9 +50,15 @@ def run_detail(db: Database, run_id: str) -> dict[str, Any] | None:
     per_case = defaultdict(dict)
     for row in results:
         per_case[row["case_id"]][row["metric"]] = row["score"]
-    summary["failed_cases"] = sorted(
-        cid for cid, scores in per_case.items() if scores.get("case_pass") == 0.0
-    )
+    failed = sorted(cid for cid, scores in per_case.items() if scores.get("case_pass") == 0.0)
+    # The held-out half of the red-team set is for the gate only: its results are shown as a count,
+    # never as case ids, so nobody tunes against it by accident. Development ids are shown.
+    shown = [cid for cid in failed if not cid.startswith(redteam.HELD_PREFIX)]
+    summary["failed_cases"] = shown
+    hidden = len(failed) - len(shown)
+    if hidden or run["dataset_version"].startswith(redteam.VERSION_PREFIX):
+        summary["failed_held_out_count"] = hidden
+        summary["held_out_ids_hidden"] = True
     return {"run": _public_run(run), "summary": summary}
 
 
@@ -149,7 +155,9 @@ def overview(db: Database, environment: str) -> dict[str, Any]:
 
 
 def cases_overview(db: Database) -> dict[str, Any]:
-    cases = store.list_cases(db, status="set")
+    # the red-team set has its own count: the 60-case set's totals are not inflated by it
+    every = store.list_cases(db, status="set")
+    cases = [x for x in every if not redteam.is_redteam_version(x.dataset_version)]
     candidates = store.list_cases(db, status="candidate")
     by_category: Counter[str] = Counter(case.category for case in cases)
     active: Counter[str] = Counter(case.category for case in cases if case.active)
@@ -159,5 +167,8 @@ def cases_overview(db: Database) -> dict[str, Any]:
         "by_category": dict(sorted(by_category.items())),
         "active_by_category": dict(sorted(active.items())),
         "candidates": len(candidates),
-        "dataset_versions": store.dataset_versions(db),
+        "redteam_cases": len(every) - len(cases),
+        "dataset_versions": [
+            v for v in store.dataset_versions(db) if not redteam.is_redteam_version(v)
+        ],
     }

@@ -94,7 +94,7 @@ def test_without_a_baseline_every_target_stays_baseline_never_a_number():
 
 
 def test_a_missing_band_leaves_a_regression_floor_unset():
-    stats = {"case_pass": {"mean": 0.85, "band": {"width": None}, "runs": 2}}
+    stats = {"case_pass": {"mean": 0.85, "band": {"width": None}, "runs": 3}}
     row = one("golden_score", stats)
     assert row["target"] == "baseline" and "no variance band" in row["note"]
 
@@ -217,3 +217,79 @@ def test_the_shipped_signed_file_holds_no_floor_yet():
     data = json.loads(targets.SIGNED_PATH.read_text("utf-8"))
     assert data["absolute_floors"] == {}, "a floor is added only when the owner signs it"
     assert cli.redteam is not None
+
+
+# ---- round 2: edge cases ---------------------------------------------------------------------
+def test_a_band_larger_than_the_mean_is_no_usable_target_and_is_not_clamped():
+    row = one("golden_score", combined(case_pass=(0.05, 0.10)))
+    assert row["target"] == "baseline"
+    assert row["note"] == "no usable target (band larger than the mean)"
+    assert row["alert_when"] == ""
+    assert targets.judge(row, 0.0) == "no_target"
+    equal = one("golden_score", combined(case_pass=(0.10, 0.10)))
+    assert equal["target"] == 0.0, "a band equal to the mean gives a floor of exactly 0"
+
+
+def test_a_big_band_still_leaves_a_signed_absolute_floor_in_force():
+    signed = {"faithfulness": {"floor": 0.9, "signed_by": "the owner", "date": "2026-10-20"}}
+    row = one("faithfulness", combined(faithfulness=(0.05, 0.2)), signed)
+    assert row["target"] == pytest.approx(0.9) and "band larger than the mean" in row["note"]
+
+
+def test_a_metric_measured_in_fewer_than_three_runs_gets_no_proposal_and_says_how_many():
+    stats = {"case_pass": {"mean": 0.85, "band": {"width": 0.04}, "runs": 2}}
+    row = one("golden_score", stats)
+    assert row["target"] == "baseline" and row["note"] == "measured in 2 of 3 runs: no proposal"
+    stats["case_pass"]["runs"] = 1
+    assert "measured in 1 of 3 runs" in one("golden_score", stats)["note"]
+    stats["case_pass"]["runs"] = 3
+    assert one("golden_score", stats)["target"] == pytest.approx(0.81)
+    # a ceiling and an absolute floor follow the same rule
+    ceiling = {"latency_p95_ms": {"mean": 5000.0, "band": {"width": None}, "runs": 2}}
+    assert one("latency_p95_ms", ceiling)["target"] == "baseline"
+
+
+def test_a_signed_floor_survives_a_baseline_measured_in_too_few_runs():
+    signed = {"citation_validity": {"floor": 0.95, "signed_by": "the owner", "date": "2026-10-20"}}
+    stats = {"citation_accuracy_code": {"mean": 0.99, "band": {"width": 0.01}, "runs": 1}}
+    row = one("citation_validity", stats, signed)
+    assert row["target"] == 0.95 and "measured in 1 of 3 runs" in row["note"]
+
+
+def test_a_ceiling_with_a_zero_baseline_is_no_usable_target():
+    stats = {"latency_p95_ms": {"mean": 0.0, "band": {"width": 0.0}, "runs": 3}}
+    row = one("latency_p95_ms", stats)
+    assert row["target"] == "baseline" and "the baseline is 0" in row["note"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"floor": 1.5, "signed_by": "the owner", "date": "2026-10-20"},
+        {"floor": -0.1, "signed_by": "the owner", "date": "2026-10-20"},
+        {"floor": 5, "signed_by": "the owner", "date": "2026-10-20"},
+        {"floor": 0.9, "signed_by": "the owner", "date": "today"},
+        {"floor": 0.9, "signed_by": "the owner", "date": "20/10/2026"},
+        {"floor": 0.9, "signed_by": "the owner", "date": "2026-13-45"},
+        {"floor": 0.9, "signed_by": "  ", "date": "2026-10-20"},
+        {"floor": 0.9, "signed_by": 7, "date": "2026-10-20"},
+    ],
+)
+def test_a_signed_floor_outside_zero_to_one_or_without_an_iso_date_is_ignored(entry):
+    row = one("faithfulness", combined(faithfulness=(0.9, 0.04)), {"faithfulness": entry})
+    assert row["signed_floor"] is None
+
+
+@pytest.mark.parametrize("floor", [0, 0.0, 0.5, 1, 1.0])
+def test_a_signed_floor_at_the_ends_of_the_range_is_accepted(floor):
+    entry = {"floor": floor, "signed_by": "the owner", "date": "2026-10-20"}
+    row = one("faithfulness", combined(faithfulness=(0.9, 0.04)), {"faithfulness": entry})
+    assert row["signed_floor"] == float(floor)
+
+
+def test_the_proposals_are_never_applied_the_command_writes_nothing(workdir, tmp_path):  # noqa: F811
+    before = targets.SIGNED_PATH.read_bytes()
+    run_cli(["migrate", *db_args(workdir)])
+    run_cli(["targets", *db_args(workdir)])
+    assert targets.SIGNED_PATH.read_bytes() == before
+    assert not list(workdir.rglob("*.md")) and not list(workdir.rglob("targets*.json"))

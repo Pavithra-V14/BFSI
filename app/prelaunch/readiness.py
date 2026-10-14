@@ -31,6 +31,7 @@ PASS_CATEGORY = 12
 _HEADING = re.compile(r"^##\s+Category:\s+(.+?)\s*$")
 _ID = re.compile(r"^[A-Z]{2}\d{1,2}$")
 _SECOND = re.compile(r"^\s*-\s*\*\*Second review:\*\*\s*(.*)$", re.M)
+_SCORED_ON = re.compile(r"^\s*-\s*\*\*Scored on:\*\*\s*(.*)$", re.M)
 
 
 @dataclass
@@ -132,6 +133,14 @@ def parse(text: str, root: Path = ROOT) -> Readiness:
 
 def load(path: Path = READINESS_PATH, root: Path = ROOT) -> Readiness:
     return parse(path.read_text("utf-8"), root)
+
+
+def scored_on(text: str):
+    """The date on the 'Scored on' line (a strict ISO date), None when missing or not a date."""
+    from app.prelaunch.evidence import parse_date
+
+    found = _SCORED_ON.search(text)
+    return parse_date(found.group(1)) if found else None
 
 
 def second_review(text: str) -> str | None:

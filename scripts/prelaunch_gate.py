@@ -38,22 +38,30 @@ def main(
     parser.add_argument("--stage", choices=sorted(gate.STAGES), help="a stage checklist instead")
     parser.add_argument("--write", action="store_true", help="save the report in docs/releases/")
     args = parser.parse_args(argv)
+    unreadable = None
+    if evidence is None:
+        evidence, unreadable = gate.load_evidence_checked()
+    today = now.date() if now is not None else None
     if args.stage:
-        verdicts = gate.stage_checklist(args.stage, evidence)
+        verdicts = gate.stage_checklist(args.stage, evidence, today=today, unreadable=unreadable)
         title = f"Stage checklist: {args.stage}"
         slug = f"stage-{args.stage}"
     else:
-        verdicts = gate.gate(evidence)
+        verdicts = gate.gate(evidence, today=today, unreadable=unreadable)
         title = "Pre-launch gate (spec 17.6)"
         slug = "prelaunch-gate"
-    out(gate.render(verdicts, title).rstrip("\n"))
+    out(gate.render(verdicts, title, note=unreadable).rstrip("\n"))
     if args.write:
         moment = now or datetime.now(UTC)
         target = (folder or ROOT / "docs" / "releases") / f"{moment:%Y-%m-%d}-{slug}.md"
-        if target.exists():
+        text = gate.render(verdicts, title, markdown=True, note=unreadable)
+        try:
+            # exclusive creation: an existing report is never overwritten, even in a race
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+        except FileExistsError:
             out(f"already there: {target.name}; nothing was overwritten")
             return 0
-        target.write_text(gate.render(verdicts, title, markdown=True), "utf-8")
         out(f"saved {target.name}: attach it to the release record")
     return 0
 

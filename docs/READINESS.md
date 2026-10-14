@@ -69,9 +69,22 @@ reads it and says PASS, FAIL or NO EVIDENCE. It never blocks anything (build rul
 | OD4 | The cost projection was compared with a dry run and is within 25 % | 4 | 0 | | `scripts/cost_dry_run_compare.py` |
 | OD5 | A named business owner exists and the release record is written | 4 | 0 | | `docs/releases/` |
 
+## What the gate can and cannot tell you
+
+- **The evidence is self-attested.** `docs/prelaunch_evidence.json` and this page are typed by
+  a person. The gate refuses an empty, undated, stale or inconsistent claim; it cannot tell a
+  true record from a hand-edited one. A `file:` or `doc:` citation proves that the file exists,
+  not what it says; a `run:` id is checked by its shape only (the run is in your database). The
+  second review is where the claims are actually checked.
+- **Records go stale.** Every `pass` carries a date; after 30 days (7 for the stage items
+  that say "last 7 days") it shows STALE and has to be re-checked.
+- **A line that claims points without a valid citation** scores 0 and makes the readiness
+  item FAIL, with the line ids named.
+
 ## Totals and review
 
 - **First-pass total:** computed by `uv run python scripts/prelaunch_gate.py` from the tables above.
+- **Scored on:** (the day you last scored the tables, YYYY-MM-DD; after 30 days the gate says STALE)
 - **Second review:** not done
 - **Reviewer, date, re-scored total:** (to be filled in by the second reviewer)
 

@@ -1,30 +1,117 @@
 {
-  "_note": "What the owner recorded after each run (docs/READINESS.md explains the form). status is none, pass or fail. A pass needs a valid citation in evidence: run:<hex id>, file:<path>, test:<path>::<name>, doc:<path> or date:YYYY-MM-DD. Nothing here is filled in until the run has happened.",
+  "_note": "What the owner recorded after each run (docs/READINESS.md explains the form). status is none, pass or fail. A pass needs: a valid citation in evidence (run:<hex id>, file:<path>, test:<path>::<name>, doc:<path> or date:YYYY-MM-DD) AND a date (YYYY-MM-DD, the day it was checked). A pass goes STALE after 30 days (7 for no_critical_alert and retention_task). This file is typed by a person: it is self-attested and the gate cannot prove a record true. Nothing is filled in until the run has happened.",
   "gate_items": {
-    "load_test": {"status": "none", "evidence": "", "note": "Run 26 report; Run 27 if real providers were used"},
-    "security_scan": {"status": "none", "evidence": "", "scans": [], "critical_open": null, "high_open": null},
-    "red_team": {"status": "none", "evidence": "", "held_out_cases": null, "held_out_pass_rate": null, "threshold": null},
-    "rollback_drill": {"status": "none", "evidence": "", "seconds": null},
-    "cost_projection": {"status": "none", "evidence": "", "ratio": null},
-    "variance_band": {"status": "none", "evidence": "", "runs": []},
-    "access_control": {"status": "none", "evidence": ""},
-    "business_owner": {"status": "none", "evidence": "", "name": "to be named by the owner"}
+    "load_test": {
+      "status": "none",
+      "evidence": "",
+      "note": "Run 26 report; Run 27 if real providers were used",
+      "date": null
+    },
+    "security_scan": {
+      "status": "none",
+      "evidence": "",
+      "scans": [],
+      "critical_open": null,
+      "high_open": null,
+      "date": null
+    },
+    "red_team": {
+      "status": "none",
+      "evidence": "",
+      "held_out_cases": null,
+      "held_out_pass_rate": null,
+      "threshold": null,
+      "date": null
+    },
+    "rollback_drill": {
+      "status": "none",
+      "evidence": "",
+      "seconds": null,
+      "date": null
+    },
+    "cost_projection": {
+      "status": "none",
+      "evidence": "",
+      "ratio": null,
+      "date": null
+    },
+    "variance_band": {
+      "status": "none",
+      "evidence": "",
+      "runs": [],
+      "date": null
+    },
+    "access_control": {
+      "status": "none",
+      "evidence": "",
+      "date": null
+    },
+    "business_owner": {
+      "status": "none",
+      "evidence": "",
+      "name": "to be named by the owner",
+      "date": null
+    }
   },
   "stage_checks": {
     "staff_beta": {
-      "baseline_and_band": {"status": "none", "evidence": ""},
-      "production_sample": {"status": "none", "evidence": ""},
-      "recorded_and_real_run": {"status": "none", "evidence": ""},
-      "no_critical_alert": {"status": "none", "evidence": ""},
-      "retention_task": {"status": "none", "evidence": ""},
-      "release_record": {"status": "none", "evidence": ""},
-      "data_flow_read": {"status": "none", "evidence": ""},
-      "shadow_period": {"status": "none", "evidence": ""}
+      "baseline_and_band": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "production_sample": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "recorded_and_real_run": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "no_critical_alert": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "retention_task": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "release_record": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "data_flow_read": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "shadow_period": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      }
     },
     "open": {
-      "data_terms": {"status": "none", "evidence": ""},
-      "second_review": {"status": "none", "evidence": ""},
-      "paid_or_zero_retention": {"status": "none", "evidence": ""}
+      "data_terms": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "second_review": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      },
+      "paid_or_zero_retention": {
+        "status": "none",
+        "evidence": "",
+        "date": null
+      }
     }
   }
 }

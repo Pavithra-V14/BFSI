@@ -524,3 +524,73 @@ def test_a_candidate_is_not_written_when_the_masker_is_not_ready(env_and_access,
     assert reply.json()["evaluation_candidate"] == "failed"
     assert reply.json()["status"] == "labelled"
     assert candidates_in(paths[1]) == []
+
+
+def test_the_admin_page_never_puts_red_team_cases_into_a_main_estimate(env_and_access, admin):
+    """The red-team cases share the case table under their own dataset version. After a red-team
+    estimate has synced them, a 'full', 'active' or 'variance' estimate from the page still
+    holds only the main set (Phase 16, the held-out half is for the gate only)."""
+    from app.eval import redteam
+
+    env, access, _starter = env_and_access
+    local = store.open_db(store.sqlite_url(access.local_path))
+    _version, red = redteam.load_redteam()
+    store.sync_cases(local, red)  # what `estimate --set redteam_*` does on the command line
+    assert len(store.list_cases(local, status="set")) == 40
+    local.close()
+    for which, expected in (("full", 60), ("active", 20), ("variance", 20)):
+        body = post(
+            env, admin, "/admin/evaluation/estimates", {"set": which, "judged": False}
+        ).json()
+        assert body["estimate"]["cases"] == expected, which
+        db = store.open_db(store.sqlite_url(access.local_path))
+        try:
+            ids = [i["case_id"] for i in store.get_items(db, body["run_id"])]
+            assert not any(i.startswith("rt-") for i in ids), which
+            assert store.get_run(db, body["run_id"])["dataset_version"] == "2026-10-v1"
+        finally:
+            db.close()
+
+
+def test_the_dashboard_shows_held_out_failures_as_a_count_and_development_ones_by_id(
+    env_and_access, admin
+):
+    from app.eval import redteam
+
+    env, access, _starter = env_and_access
+    db = store.open_db(store.sqlite_url(access.local_path))
+    _version, red = redteam.load_redteam()
+    store.sync_cases(db, red)
+    ids = [x.id for x in red if x.id.startswith("rt-held-")][:3] + [
+        x.id for x in red if x.id.startswith("rt-dev-")
+    ][:2]
+    run_id = store.create_run(
+        db, environment="local", kind="full", dataset_version="redteam-1", system_version={},
+        estimate={}, estimate_code="x", case_ids=ids, batches=1, created_by="test",
+    )  # fmt: skip
+    for case_id in ids:
+        store.save_item(db, run_id, case_id, status="done", answer_kind="answer")
+        store.save_result(db, run_id, case_id, "case_pass", score=0.0, decider="code")
+    store.update_run(db, run_id, status=c.RUN_FINISHED)
+    db.close()
+    summary = get(env, admin, f"/admin/evaluation/runs/{run_id}", environment="local").json()
+    summary = summary["summary"]
+    assert summary["held_out_ids_hidden"] is True and summary["failed_held_out_count"] == 3
+    assert all(i.startswith("rt-dev-") for i in summary["failed_cases"])
+    assert len(summary["failed_cases"]) == 2
+    assert not any("rt-held-" in str(v) for v in summary.values())
+
+
+def test_the_dashboard_case_totals_leave_the_red_team_cases_out(env_and_access, admin):
+    from app.eval import redteam
+
+    env, access, _starter = env_and_access
+    db = store.open_db(store.sqlite_url(access.local_path))
+    store.sync_cases(db, load_cases()[1])
+    store.sync_cases(db, redteam.load_redteam()[1])
+    db.close()
+    cases = get(env, admin, "/admin/evaluation/overview", environment="local").json()["cases"]
+    assert cases["total"] == 60 and cases["active"] == 20
+    assert cases["redteam_cases"] == 40
+    assert "redteam-1" not in cases["dataset_versions"]
+    assert sum(cases["by_category"].values()) == 60

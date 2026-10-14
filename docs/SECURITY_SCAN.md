@@ -41,6 +41,31 @@ machine and on CI's Linux. Rebuild the baseline deliberately, never to silence a
 The script stops on a finding of a rule that has no written reason, and it never accepts a HIGH
 finding. Delete `bandit_raw.json` afterwards (it quotes code).
 
+**A limit of the comparison.** Findings are matched by (file, rule, severity, confidence,
+text) and **counted**. If an accepted finding in a file is removed and a different one of
+the same rule and text appears in the same file, the counts are equal and the new one is not
+reported. For B608 this is closed by the reviewed list below (`scripts/sql_sites.py`,
+`tests/test_sql_sites.py`); for the other rules it is a known limitation: read the diff of
+any file that holds accepted findings of the same rule.
+
+## Every B608 site (docs/sql_sites.json)
+
+bandit's B608 is accepted as a class only because each site puts nothing but a name, a run
+of `?` placeholders or a fixed fragment into the SQL text, with every value a bound
+parameter. `docs/sql_sites.json` lists all 32 sites with file, line, the source line, the
+expressions that are interpolated and what each one is (reviewed by hand on 2026-10-14).
+`uv run python scripts/sql_sites.py` prints them and `--check` exits 1 for a site that is
+not in the list; `tests/test_sql_sites.py` fails the same way. The kinds:
+
+| What is interpolated | Sites | Why it cannot carry a value |
+|---|---|---|
+| a column list (`_COLUMNS`, `_SESSION_COLUMNS`, `_RUN_COLUMNS`) | a module constant |
+| a run of placeholders (`marks`) or the placeholder itself (`p`) | built from a count or the database kind |
+| a WHERE clause (`clause`, `where`) | joined from fixed fragments; values are parameters |
+| the migrations table (`TABLE`) | a module constant |
+| a lock suffix (`lock`, `suffix`), `starting`, `newest`, `day` | a fixed fragment chosen by a flag or the database kind |
+| field names (`sets`) and `table` / `where` of the retention count | names checked against an allow-list, or literals of the three callers |
+
 What is in it, and why each kind is accepted:
 
 | Rule | What bandit says | Why it is accepted |

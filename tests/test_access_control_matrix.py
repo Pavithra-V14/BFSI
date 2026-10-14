@@ -209,3 +209,50 @@ def test_a_table_entry_for_a_route_that_is_gone_is_found(env):
 def test_a_public_route_that_demands_a_token_is_found(env):
     matrix = {**MATRIX, ("GET", "/auth/me"): PUBLIC}
     assert any("public, but a visitor without a token was refused" in p for p in audit(env, matrix))
+
+
+def test_a_route_that_refuses_everyone_for_an_unrelated_reason_is_found(env):
+    """A route that always answers 401 would look "protected" to a visitor check alone: the
+    admin must be let in, so the audit sees that it is broken, not guarded."""
+    from fastapi import HTTPException
+
+    @env.app.get("/admin/always-401")
+    def always_401():
+        raise HTTPException(status_code=401, detail="no")
+
+    env.app.openapi_schema = None
+    matrix = {**MATRIX, ("GET", "/admin/always-401"): ADMIN}
+    found = audit(env, matrix)
+    assert any(
+        "GET /admin/always-401: admin only, but a customer got 401, not 403" in p for p in found
+    )
+    assert any("GET /admin/always-401: an admin was refused (401)" in p for p in found)
+
+
+def test_a_route_that_answers_403_to_everyone_is_found_as_a_refused_admin(env):
+    from fastapi import HTTPException
+
+    @env.app.get("/admin/always-403")
+    def always_403():
+        raise HTTPException(status_code=403, detail="no")
+
+    env.app.openapi_schema = None
+    matrix = {**MATRIX, ("GET", "/admin/always-403"): ADMIN}
+    found = audit(env, matrix)
+    assert any(
+        "GET /admin/always-403: needs sign-in, but no token gave 403, not 401" in p for p in found
+    )
+    assert any("GET /admin/always-403: an admin was refused (403)" in p for p in found)
+
+
+def test_every_route_is_visible_to_the_audit_the_schema_hides_none(env):
+    """`include_in_schema=False` would hide a route from the table check; none may do so."""
+    import ast
+    from pathlib import Path
+
+    for path in sorted((Path(__file__).resolve().parents[1] / "app" / "api").rglob("*.py")):
+        tree = ast.parse(path.read_text("utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.keyword) and node.arg == "include_in_schema":
+                assert getattr(node.value, "value", None) is not False, path.name
+    assert len(app_routes(env)) == len(MATRIX)

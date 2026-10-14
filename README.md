@@ -1142,6 +1142,14 @@ or a stage change.
   2 working days, shadow period two weeks. **To be named by the owner:** queries per day, the
   monthly budget ceiling, the business owner.
 
+- **Round 2 (hardening).** Every recorded pass carries a date and goes **STALE** after 30 days (7
+  for the two stage items that say "last 7 days"); a missing or unreadable evidence file says so;
+  the report prints, every time, that the evidence is self-attested. Held-out red-team failures are
+  shown as a count, never as ids. The admin page's estimate never includes red-team cases. A band
+  larger than the mean is "no usable target", never a clamped number. Every B608 site is listed in
+  `docs/sql_sites.json` and a new one fails `tests/test_sql_sites.py` until it is read.
+  `GEMINI_EMBEDDING_KEY_B` is a rotation overlap of the same account, not a second account.
+
 **Known limitations (recorded in Phase 16)**
 - **Phase 16 runs.** Until Run 21 exists there is no baseline and no band; every target is
   "baseline" and the gate has nothing to judge. The pass threshold of the held-out half and the
@@ -1151,6 +1159,13 @@ or a stage change.
 - **Later.** The red-team cases test what an attacker types; they are not a penetration test.
   Indirect injection through a document is covered by the ingestion scan and its own tests, and
   by one case in each half.
+- **Phase 16 runs.** The evidence file and the readiness page are typed by a person: the gate
+  refuses an empty, undated, stale or inconsistent claim and cannot prove a true one; the second
+  review is where claims are checked. A `file:` citation proves existence only.
+- **Later.** The no-shared-question rule folds case, punctuation and spaces; a reworded
+  near-duplicate between the halves is for the second review to catch.
+- **Later.** The static-scan comparison counts findings per file and rule; a swapped finding of
+  the same rule and text in the same file is not reported (B608 is closed by the site list).
 - **Later.** The route matrix tests the answer to a token; it does not test rate limits or
   token budgets (their own tests do).
 - **Later.** The bandit baseline accepts the f-string SQL findings because every value is a bound

@@ -21,8 +21,9 @@
    users it is a known limit. A second key is added only to **replace** a key (an overlap, see
    `docs/KEY_ROTATION.md`), never to add allowance.
 4. If both embedding keys fail: `GEMINI_EMBEDDING_KEY_A` and `GEMINI_EMBEDDING_KEY_B` each
-   hold **one** key (they are not lists, you cannot append). A is the primary and B the failover,
-   each from its own Google account. Put a new key into the one that is empty or limited
+   hold **one** key (they are not lists, you cannot append). A is the key in use; B, when it is
+   set, is a second key of the SAME account kept for a rotation overlap (quota is per
+   project, so B adds no capacity). If A is revoked or blocked, put a new key into it
    (**Environment**, edit, **Save**); to replace a working one follow `docs/KEY_ROTATION.md`.
 5. Tell the users it is a known issue (your usual channel) if it lasts more than 30 minutes.
 

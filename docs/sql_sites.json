@@ -1,0 +1,400 @@
+{
+ "_note": "Every place SQL text is built from parts (bandit B608), reviewed by hand on 2026-10-14. Each puts only a name, a placeholder run or a fixed fragment into the text; every value is a bound parameter. A new site is not accepted until it is read and added here (tests/test_sql_sites.py).",
+ "sites": [
+  {
+   "file": "app/accounts/users.py",
+   "line": 116,
+   "source": "row = db.query_one(f\"SELECT {_COLUMNS} FROM users WHERE id = ?\", (user_id,))",
+   "interpolated": [
+    "_COLUMNS"
+   ],
+   "what": [
+    "_COLUMNS: a module constant: the column names of one table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/accounts/users.py",
+   "line": 122,
+   "source": "f\"SELECT {_COLUMNS} FROM users WHERE username = ?\", (normalise_username(username),)",
+   "interpolated": [
+    "_COLUMNS"
+   ],
+   "what": [
+    "_COLUMNS: a module constant: the column names of one table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/accounts/users.py",
+   "line": 208,
+   "source": "f\"SELECT {_COLUMNS} FROM users ORDER BY created_at, id LIMIT ? OFFSET ?\",",
+   "interpolated": [
+    "_COLUMNS"
+   ],
+   "what": [
+    "_COLUMNS: a module constant: the column names of one table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/api/routes/admin_dashboards.py",
+   "line": 133,
+   "source": "\"SELECT action, target, created_at FROM audit_log \"",
+   "interpolated": [
+    "marks"
+   ],
+   "what": [
+    "marks: a run of `?` placeholders, one per value, built from the count of the values; the values themselves are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/chats.py",
+   "line": 52,
+   "source": "f\"UPDATE review_queue SET details = {p} \"",
+   "interpolated": [
+    "p",
+    "p",
+    "p"
+   ],
+   "what": [
+    "p: the placeholder (`?` or `%s`) of this connection's database kind"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/chats.py",
+   "line": 74,
+   "source": "cursor = connection.execute(f\"DELETE FROM sessions WHERE id = {p}\", (session_id,))",
+   "interpolated": [
+    "p"
+   ],
+   "what": [
+    "p: the placeholder (`?` or `%s`) of this connection's database kind"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/entities.py",
+   "line": 51,
+   "source": "total = db.query_one(f\"SELECT COUNT(*) FROM allowlist_entities{clause}\", tuple(params))",
+   "interpolated": [
+    "clause"
+   ],
+   "what": [
+    "clause: a WHERE clause joined from fixed fragments such as `status = ?`; the values are bound parameters appended separately"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/entities.py",
+   "line": 53,
+   "source": "\"SELECT id, doc_id, text, entity_type, status, approved_by, approved_at, access_role \"",
+   "interpolated": [
+    "clause"
+   ],
+   "what": [
+    "clause: a WHERE clause joined from fixed fragments such as `status = ?`; the values are bound parameters appended separately"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/migrate.py",
+   "line": 48,
+   "source": "f\"INSERT INTO {TABLE} (version, filename, checksum, applied_at) VALUES ({{}}, {{}}, {{}}, {{}})\"",
+   "interpolated": [
+    "TABLE"
+   ],
+   "what": [
+    "TABLE: the module constant name of the migrations table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/migrate.py",
+   "line": 150,
+   "source": "rows = self.conn.execute(f\"SELECT version, filename, checksum FROM {TABLE}\").fetchall()",
+   "interpolated": [
+    "TABLE"
+   ],
+   "what": [
+    "TABLE: the module constant name of the migrations table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/migrate.py",
+   "line": 159,
+   "source": "f\"SELECT 1 FROM {TABLE} WHERE version = ?\", (migration.version,)",
+   "interpolated": [
+    "TABLE"
+   ],
+   "what": [
+    "TABLE: the module constant name of the migrations table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/migrate.py",
+   "line": 198,
+   "source": "rows = self.conn.execute(f\"SELECT version, filename, checksum FROM {TABLE}\").fetchall()",
+   "interpolated": [
+    "TABLE"
+   ],
+   "what": [
+    "TABLE: the module constant name of the migrations table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/migrate.py",
+   "line": 209,
+   "source": "f\"SELECT 1 FROM {TABLE} WHERE version = %s\", (migration.version,)",
+   "interpolated": [
+    "TABLE"
+   ],
+   "what": [
+    "TABLE: the module constant name of the migrations table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/review_queue.py",
+   "line": 114,
+   "source": "total = db.query_one(f\"SELECT COUNT(*) FROM review_queue{clause}\", tuple(params))",
+   "interpolated": [
+    "clause"
+   ],
+   "what": [
+    "clause: a WHERE clause joined from fixed fragments such as `status = ?`; the values are bound parameters appended separately"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/review_queue.py",
+   "line": 116,
+   "source": "f\"SELECT {_COLUMNS} FROM review_queue{clause} \"",
+   "interpolated": [
+    "_COLUMNS",
+    "clause"
+   ],
+   "what": [
+    "_COLUMNS: a module constant: the column names of one table",
+    "clause: a WHERE clause joined from fixed fragments such as `status = ?`; the values are bound parameters appended separately"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/db/review_queue.py",
+   "line": 141,
+   "source": "row = db.query_one(f\"SELECT {_COLUMNS} FROM review_queue WHERE id = ?\", (item_id,))",
+   "interpolated": [
+    "_COLUMNS"
+   ],
+   "what": [
+    "_COLUMNS: a module constant: the column names of one table"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/eval/store.py",
+   "line": 223,
+   "source": "row = db.query_one(f\"SELECT {_RUN_COLUMNS} FROM eval_runs WHERE id = ?\", (run_id,))",
+   "interpolated": [
+    "_RUN_COLUMNS"
+   ],
+   "what": [
+    "_RUN_COLUMNS: a module constant: the column names of eval_runs"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/eval/store.py",
+   "line": 228,
+   "source": "sql = f\"SELECT {_RUN_COLUMNS} FROM eval_runs\"",
+   "interpolated": [
+    "_RUN_COLUMNS"
+   ],
+   "what": [
+    "_RUN_COLUMNS: a module constant: the column names of eval_runs"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/eval/store.py",
+   "line": 255,
+   "source": "db.execute(f\"UPDATE eval_runs SET {sets} WHERE id = ?\", (*values, run_id))",
+   "interpolated": [
+    "sets"
+   ],
+   "what": [
+    "sets: `name = ?` pairs whose names were checked against an allow-list of eval_runs columns just before; the values are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/eval/store.py",
+   "line": 277,
+   "source": "\"UPDATE eval_runs SET status = ?, started_at = ?, heartbeat_at = ? WHERE id = ? AND (\"",
+   "interpolated": [
+    "starting"
+   ],
+   "what": [
+    "starting: a fixed SQL fragment or the empty string, chosen by a boolean"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/guardrails/allowlist.py",
+   "line": 55,
+   "source": "\"SELECT text, doc_id FROM allowlist_entities \"",
+   "interpolated": [
+    "marks"
+   ],
+   "what": [
+    "marks: a run of `?` placeholders, one per value, built from the count of the values; the values themselves are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/retention.py",
+   "line": 70,
+   "source": "f\"SELECT COUNT(*) FROM messages WHERE session_id IN ({marks})\", tuple(batch)",
+   "interpolated": [
+    "marks"
+   ],
+   "what": [
+    "marks: a run of `?` placeholders, one per value, built from the count of the values; the values themselves are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/retention.py",
+   "line": 98,
+   "source": "f\"SELECT 1 FROM sessions WHERE id = ? AND last_active_at < ?{lock}\",",
+   "interpolated": [
+    "lock"
+   ],
+   "what": [
+    "lock: the fixed text ` FOR UPDATE` on Postgres or the empty string"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/retention.py",
+   "line": 148,
+   "source": "row = db.query_one(f\"SELECT COUNT(*) FROM {table} WHERE {where}\", (limit,))",
+   "interpolated": [
+    "table",
+    "where"
+   ],
+   "what": [
+    "table: a table name passed as a literal by each of the three callers in the same function",
+    "where: a fixed SQL fragment chosen by a condition (or a literal passed by the caller); the values are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 162,
+   "source": "f\"SELECT {_SESSION_COLUMNS} FROM sessions WHERE id = ? AND user_id = ?{suffix}\",",
+   "interpolated": [
+    "_SESSION_COLUMNS",
+    "suffix"
+   ],
+   "what": [
+    "_SESSION_COLUMNS: a module constant: the column names of sessions",
+    "suffix: the fixed text ` FOR UPDATE` on Postgres or the empty string"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 187,
+   "source": "f\"SELECT {_SESSION_COLUMNS} FROM sessions WHERE user_id = ? \"",
+   "interpolated": [
+    "_SESSION_COLUMNS"
+   ],
+   "what": [
+    "_SESSION_COLUMNS: a module constant: the column names of sessions"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 202,
+   "source": "f\"SELECT {_SESSION_COLUMNS} FROM sessions WHERE user_id = ? \"",
+   "interpolated": [
+    "_SESSION_COLUMNS"
+   ],
+   "what": [
+    "_SESSION_COLUMNS: a module constant: the column names of sessions"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 256,
+   "source": "f\"SELECT {_SESSION_COLUMNS} FROM sessions WHERE id = ? AND user_id = ?\",",
+   "interpolated": [
+    "_SESSION_COLUMNS"
+   ],
+   "what": [
+    "_SESSION_COLUMNS: a module constant: the column names of sessions"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 348,
+   "source": "f\"UPDATE sessions SET last_active_at = {newest}, \"",
+   "interpolated": [
+    "newest"
+   ],
+   "what": [
+    "newest: the fixed SQL expression `GREATEST(last_active_at, ?)` or `MAX(last_active_at, ?)` chosen by the database kind"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 492,
+   "source": "\"SELECT source_removed FROM messages \"",
+   "interpolated": [
+    "marks",
+    "lock"
+   ],
+   "what": [
+    "lock: the fixed text ` FOR UPDATE` on Postgres or the empty string",
+    "marks: a run of `?` placeholders, one per value, built from the count of the values; the values themselves are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/memory/store.py",
+   "line": 507,
+   "source": "\"UPDATE sessions SET summary_text = ?, summary_upto_message_id = ? \"",
+   "interpolated": [
+    "where"
+   ],
+   "what": [
+    "where: a fixed SQL fragment chosen by a condition (or a literal passed by the caller); the values are bound parameters"
+   ],
+   "reviewed": "2026-10-14"
+  },
+  {
+   "file": "app/observability/metrics.py",
+   "line": 362,
+   "source": "f\"SELECT {day}, role, metric, SUM(value) \"",
+   "interpolated": [
+    "day",
+    "day"
+   ],
+   "what": [
+    "day: the fixed per-database SQL expression that gives the UTC day (`_utc_day_expression`)"
+   ],
+   "reviewed": "2026-10-14"
+  }
+ ]
+}
