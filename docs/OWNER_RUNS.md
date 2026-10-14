@@ -63,47 +63,56 @@ never set.)
 
 ## The runs at a glance
 
-| # | Run | Verifies | Status |
-|---|---|---|---|
-| 1 | Apply migrations 0001 to 0003 | Phase 3 | DONE |
-| 2 | Create the Qdrant `documents` collection (`--ensure`) | Phase 3 | DONE |
-| 3 | Upstash counters and corpus-version check | Phase 3 | DONE 2026-10-06 |
-| 4 | Make the two keys, apply migration 0004 | Phase 4 | DONE |
-| 5 | Create the first admin | Phase 4 | DONE |
-| 6 | Run the API locally and check it | Phase 4 | DONE |
-| 7 | Real-Qdrant check on a throw-away collection | Phase 5 | DONE |
-| 8 | Apply migration 0005 | Phase 7 | PENDING (stays pending until you tell me it is applied) |
-| 9 | Gateway smoke test with real keys | Phase 2 | PENDING |
-| 10 | Phase 5 real ingest (steps a to h, and i: the staff-only copy) | Phase 5 | PENDING |
-| 11 | The IsEmpty filter on real chunks | Phases 3 and 5 | PENDING |
-| 12 | Pipeline smoke, one real question per role (12b: the role-isolation test) | Phase 8 | PENDING |
-| 13 | Pipeline smoke with Langfuse | Phase 8 | PENDING |
-| 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | PENDING |
-| 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | PENDING |
-| 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | PENDING |
-| 17 | Look at every screen of the Streamlit frontend, with the API running | Phase 11 | PENDING |
-| 18 | Observability: migration 0009, the webhook, the log scan, trace deletion on real Langfuse, the purge and the dashboards | Phase 12 | PENDING |
-| 19 | Evaluation set-up: the check, the local evaluation database, the test collection `documents_eval` and the three sample documents in it | Phase 13 | PENDING |
-| 20 | Evaluation calibration: the judge model, the 30 labelled items, which metrics Jev may decide | Phase 13 | PENDING (needs your yes: real keys) |
-| 21 | The first baseline run and the variance band (the active set, then three runs) | Phase 13 | PENDING (needs your yes: real keys) |
-| 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | PENDING (needs your yes: real keys) |
-| 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | PENDING |
-| 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | PENDING (then repeat before every push) |
-| 25 | Record the provider cassettes: five real calls, one per provider (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) | Phase 14 | PENDING (needs your yes: real keys) |
-| 26 | Stubbed-model load test on this machine (users step up from 10; no key) | Phase 14 | PENDING |
-| 27 | Real-provider load test, short, on this machine: local SQLite, test collection read only, estimate and a single-use ticket first | Phase 14 | PENDING (needs your yes: real keys) |
-| 28 | First deploy to Render (DEPLOY.md section 2): services, client address check, memory check, shadow stage | Phase 15 | PENDING (needs your yes: real keys and accounts) |
-| 29 | The rollback drill: back to the last good build in under 5 minutes, with a stopwatch | Phase 15 | PENDING (after Run 28) |
-| 30 | Qdrant snapshot, download, and a restore of the download into a throw-away collection (`documents_restore_test`); the re-ingest from originals/ is the tested route | Phase 15 | PENDING |
-| 31 | A key rotation drill on one key you have a spare for | Phase 15 | PENDING (after Run 28) |
-| 32 | The database connection count on the deployed service, against the plan's limit | Phase 15 | PENDING (after Run 28) |
-| 33 | The scheduled tasks on this machine: retention, drift, snapshot (Windows Task Scheduler) | Phase 15 | PENDING |
-| 34 | Migration 0010 and the withdrawn-document record: a delete in the test collection records the id, moves the PDF and a restore finds nothing left | Phase 15 | PENDING (needs your yes: it changes `documents_eval`) |
-| 35 | The red-team set: development half, then the held-out half (its own estimate and code each) | Phase 16 | PENDING (needs your yes: real evaluation keys) |
-| 36 | The security scan: pip-audit of all five requirements files, the bandit baseline, gitleaks | Phase 16 | PENDING |
-| 37 | Numeric targets from the baseline: `app.eval targets`, then the absolute floors you sign | Phase 16 | PENDING (after Run 21) |
-| 38 | The cost projection against a dry run | Phase 16 | PENDING (after Run 27 or Run 21) |
-| 39 | The pre-launch gate and the readiness score, with the second review | Phase 16 | PENDING (after Runs 35 to 38) |
+| # | Run | Verifies | Status | Order (step, and what comes first) | Needs your explicit yes |
+|---|---|---|---|---|---|
+| 1 | Apply migrations 0001 to 0003 | Phase 3 | done (date not recorded) | done | no |
+| 2 | Create the Qdrant `documents` collection (`--ensure`) | Phase 3 | done (date not recorded) | done | no |
+| 3 | Upstash counters and corpus-version check | Phase 3 | done 2026-10-06 | done | no |
+| 4 | Make the two keys, apply migration 0004 | Phase 4 | done (date not recorded) | done | no |
+| 5 | Create the first admin | Phase 4 | done (date not recorded) | done | no |
+| 6 | Run the API locally and check it | Phase 4 | done (date not recorded) | done | no |
+| 7 | Real-Qdrant check on a throw-away collection | Phase 5 | done (date not recorded) | done | no |
+| 8 | Apply migration 0005 | Phase 7 | pending: owner to confirm | step 1: after nothing (needs Runs 1 to 7) | no (you run it yourself; it may use free-tier calls) |
+| 9 | Gateway smoke test with real keys | Phase 2 | pending: owner to confirm | step 2: after Run 8; needs the keys of Run 4 | no (you run it yourself; it may use free-tier calls) |
+| 10 | Phase 5 real ingest (steps a to h, and i: the staff-only copy) | Phase 5 | pending: owner to confirm | step 3: after Run 9; Run 8 | no (you run it yourself; it may use free-tier calls) |
+| 11 | The IsEmpty filter on real chunks | Phases 3 and 5 | pending: owner to confirm | step 4: after Run 10 | no (you run it yourself; it may use free-tier calls) |
+| 12 | Pipeline smoke, one real question per role (12b: the role-isolation test) | Phase 8 | pending: owner to confirm | step 5: after Runs 10 and 11 (12b only after step (i) of Run 10) | no (you run it yourself; it may use free-tier calls) |
+| 13 | Pipeline smoke with Langfuse | Phase 8 | pending: owner to confirm | step 6: after Run 12 | no (you run it yourself; it may use free-tier calls) |
+| 14 | Real-Upstash check of the cache code (`cache_check.py`) | Phase 9 | pending: owner to confirm | step 7: after Run 8 (a real Upstash address) | no (you run it yourself; it may use free-tier calls) |
+| 15 | Refresh sparse vectors (only needed after a tokenizer change) | Phase 9 | pending: owner to confirm | step 8: after only after a tokenizer change: skip otherwise | no (you run it yourself; it may use free-tier calls) |
+| 16 | Local end-to-end chat through the API (migrations 0006 and 0007, shadow mode, sessions, feedback) | Phase 10 | pending: owner to confirm | step 9: after Runs 8 and 10 (migrations 0006 to 0008 are applied inside it) | no (you run it yourself; it may use free-tier calls) |
+| 17 | Look at every screen of the Streamlit frontend, with the API running | Phase 11 | pending: owner to confirm | step 10: after Run 16 (the API running) | no (you run it yourself; it may use free-tier calls) |
+| 18 | Observability: migration 0009, the webhook, the log scan, trace deletion on real Langfuse, the purge and the dashboards | Phase 12 | pending: owner to confirm | step 11: after Run 16 (migration 0009 is applied inside it) | no (you run it yourself; it may use free-tier calls) |
+| 19 | Evaluation set-up: the check, the local evaluation database, the test collection `documents_eval` and the three sample documents in it | Phase 13 | pending: owner to confirm | step 13: after Run 10 (the sample documents) and a local evaluation database | no (you run it yourself; it may use free-tier calls) |
+| 20 | Evaluation calibration: the judge model, the 30 labelled items, which metrics Jev may decide | Phase 13 | pending: owner to confirm | step 14: after Run 19; needs the evaluation keys | yes: real evaluation keys |
+| 21 | The first baseline run and the variance band (the active set, then three runs) | Phase 13 | pending: owner to confirm | step 15: after Run 20 | yes: real evaluation keys |
+| 22 | The production sample: the evaluation database in the cloud, the 5 % sample, judging it, the weekly drift report, the purge | Phase 13 | pending: owner to confirm | step 16: after Runs 21 and 18 (migration 0009); the cloud evaluation database | yes: real evaluation keys |
+| 23 | The Evaluation page and the "Run eval" button, and the review queue's "add to evaluation set" | Phase 13 | pending: owner to confirm | step 17: after Runs 16 and 19 | no (you run it yourself; it may use free-tier calls) |
+| 24 | Secret scan on this machine before a push (the same scan as CI) | Phase 1 (CI), settings added in Phase 13 | pending: owner to confirm | step 12: after nothing; repeat before every push | no (you run it yourself; it may use free-tier calls) |
+| 25 | Record the provider cassettes: five real calls, one per provider (Cohere, Jina, Jev, Gemini embeddings, OpenRouter) | Phase 14 | pending: owner to confirm | step 18: after nothing else; needs five provider keys | yes: real provider keys (5 calls) |
+| 26 | Stubbed-model load test on this machine (users step up from 10; no key) | Phase 14 | pending: owner to confirm | step 19: after nothing (no key, no cloud address) | no (you run it yourself; it may use free-tier calls) |
+| 27 | Real-provider load test, short, on this machine: local SQLite, test collection read only, estimate and a single-use ticket first | Phase 14 | pending: owner to confirm | step 20: after Runs 26 and 16; the `documents_eval` collection of Run 19 | yes: real provider keys, free-tier quota |
+| 28 | First deploy to Render (DEPLOY.md section 2): services, client address check, memory check, shadow stage | Phase 15 | pending: owner to confirm | step 26: after Runs 1 to 3, 10 and 24 (migrations 0004 to 0010 are applied by DEPLOY.md 2.1) | yes: real keys and accounts, a public service |
+| 29 | The rollback drill: back to the last good build in under 5 minutes, with a stopwatch | Phase 15 | pending: owner to confirm | step 27: after Run 28 | no (you run it yourself; it may use free-tier calls) |
+| 30 | Qdrant snapshot, download, and a restore of the download into a throw-away collection (`documents_restore_test`); the re-ingest from originals/ is the tested route | Phase 15 | pending: owner to confirm | step 28: after Runs 2 and 10 | no (you run it yourself; it may use free-tier calls) |
+| 31 | A key rotation drill on one key you have a spare for | Phase 15 | pending: owner to confirm | step 29: after Run 28 | no (you run it yourself; it may use free-tier calls) |
+| 32 | The database connection count on the deployed service, against the plan's limit | Phase 15 | pending: owner to confirm | step 30: after Run 28 | no (you run it yourself; it may use free-tier calls) |
+| 33 | The scheduled tasks on this machine: retention, drift, snapshot (Windows Task Scheduler) | Phase 15 | pending: owner to confirm | step 31: after Runs 22 and 30; the encrypted files of DEPLOY.md 9.1 | no (you run it yourself; it may use free-tier calls) |
+| 34 | Migration 0010 and the withdrawn-document record: a delete in the test collection records the id, moves the PDF and a restore finds nothing left | Phase 15 | pending: owner to confirm | step 21: after Run 19; migration 0010 on the local file | yes: it changes `documents_eval` |
+| 35 | The red-team set: development half, then the held-out half (its own estimate and code each) | Phase 16 | pending: owner to confirm | step 22: after Runs 19, 20 and 21 | yes: real evaluation keys |
+| 36 | The security scan: pip-audit of all five requirements files, the bandit baseline, gitleaks | Phase 16 | pending: owner to confirm | step 23: after nothing | no (you run it yourself; it may use free-tier calls) |
+| 37 | Numeric targets from the baseline: `app.eval targets`, then the absolute floors you sign | Phase 16 | pending: owner to confirm | step 24: after Run 21 | no (you run it yourself; it may use free-tier calls) |
+| 38 | The cost projection against a dry run | Phase 16 | pending: owner to confirm | step 25: after Run 21 or Run 27 | no (you run it yourself; it may use free-tier calls) |
+| 39 | The pre-launch gate and the readiness score, with the second review | Phase 16 | pending: owner to confirm | step 32: after Runs 35 to 38 (and 21, 26, 29 as far as done) | no (you run it yourself; it may use free-tier calls) |
+
+How to read the table. **Status** is "done" with the date, or "pending: owner to confirm": until
+you tell me which runs you have done, every run from 8 onward is shown as pending and nothing is
+guessed. **Order** is the step number in the sequence the runs can be done in, and what has to come
+first (the "Before it" line of the run has the detail). Several runs can be done in either order
+where nothing is listed between them. **Needs your explicit yes** is "yes" for a run that spends
+real provider quota in a way that must be agreed first (an evaluation, a load or a deploy), or that
+changes a test collection; the others you run yourself, in your own window, and Claude never runs
+any of them.
 
 **Pending migrations, in order:** 0005 (Run 8), 0006 to 0008 (Run 16), 0009 (Run 18) and **0010
 `withdrawn_documents` (Phase 15 round 3)**. The runner applies every pending file in order, so

@@ -475,7 +475,7 @@ def test_the_release_record_template_has_the_three_things_the_spec_names():
 def test_the_owner_runs_list_runs_28_to_39_as_pending():
     text = (DOCS / "OWNER_RUNS.md").read_text("utf-8")
     for number in range(28, 40):
-        assert re.search(rf"^\| {number} \|.*PENDING", text, re.M), number
+        assert re.search(rf"^\| {number} \|.*pending", text, re.M | re.I), number
         assert re.search(rf"^## Run {number}\. .*PENDING", text, re.M), number
 
 
