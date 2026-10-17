@@ -415,7 +415,12 @@ def _delete(args, env, services_factory, confirm, out, err) -> int:
         "cited it, records the id as withdrawn (a restore must never bring it back) and moves "
         "its original PDFs to originals/_withdrawn/."
     )
-    if confirm(f"Type the document id ({args.doc_id}) to confirm: ").strip() != args.doc_id:
+    # `--confirm-id` is the same typed confirmation, given up front: the admin page asks for the id
+    # in its own box and starts this command with no keyboard to answer a prompt.
+    given = args.confirm_id if args.confirm_id is not None else None
+    if given is None:
+        given = confirm(f"Type the document id ({args.doc_id}) to confirm: ")
+    if given.strip() != args.doc_id:
         out("not confirmed; nothing was deleted")
         return 1
     services = services_factory(env, "cache")
@@ -602,6 +607,11 @@ def main(
         "delete", parents=[common], help="remove a document everywhere (asks to confirm)"
     )
     delete.add_argument("--doc-id", required=True)
+    delete.add_argument(
+        "--confirm-id",
+        metavar="DOC_ID",
+        help="the document id again, to confirm without the prompt (the admin page uses this)",
+    )
     delete.add_argument(
         "--even-if-not-stored",
         action="store_true",

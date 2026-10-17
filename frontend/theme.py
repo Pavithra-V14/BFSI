@@ -170,9 +170,55 @@ select:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
 """
 
 
-def stylesheet(theme: str) -> str:
+# Streamlit's own widgets take their colours from its theme (the browser's setting, or the viewer's
+# own choice), and no Python call changes that. When the viewer picks the OTHER theme with the
+# sidebar switch, these rules repaint the parts that matter with the same tokens, so the page does
+# not end up half dark. They are added only then. A data table draws itself on a canvas, so it is
+# inverted instead. [P] The selectors follow Streamlit's markup: Run 45 looks at both themes.
+_NATIVE_RULES = """
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+.stApp [data-testid="stMarkdownContainer"] p, .stApp [data-testid="stWidgetLabel"] p,
+.stApp [data-testid="stCheckbox"] label, .stApp [data-testid="stToggle"] label,
+.stApp [data-testid="stRadio"] label, .stApp [data-testid="stMetricValue"],
+.stApp [data-testid="stMetricLabel"] { color: var(--fx-text); }
+.stApp [data-testid="stHeader"] { background: var(--fx-bg); }
+.stApp [data-baseweb="input"], .stApp [data-baseweb="base-input"], .stApp [data-baseweb="textarea"],
+.stApp [data-baseweb="select"] > div {
+  background: var(--fx-surface) !important; border-color: var(--fx-border) !important;
+}
+.stApp input, .stApp textarea, .stApp [data-baseweb="select"] div {
+  color: var(--fx-text) !important; -webkit-text-fill-color: var(--fx-text);
+}
+.stApp .stButton > button, .stApp .stDownloadButton > button {
+  background: var(--fx-surface); color: var(--fx-text); border: 1px solid var(--fx-border);
+}
+.stApp .stButton > button:disabled { opacity: .5; }
+.stApp [data-testid="stExpander"] { background: var(--fx-surface); border-color: var(--fx-border); }
+.stApp [data-testid="stExpander"] summary, .stApp [data-testid="stExpander"] summary p {
+  color: var(--fx-text);
+}
+.stApp pre, .stApp code {
+  background: var(--fx-surface) !important; color: var(--fx-text) !important;
+}
+.stApp [data-testid="stDataFrame"], .stApp [data-testid="stTable"] {
+  filter: invert(1) hue-rotate(180deg);
+}
+[data-baseweb="popover"], [data-baseweb="popover"] [role="listbox"], [data-baseweb="menu"] {
+  background: var(--fx-surface) !important; color: var(--fx-text) !important;
+}
+[data-baseweb="popover"] li { color: var(--fx-text) !important; }
+"""
+
+
+def stylesheet(theme: str, native: str | None = None) -> str:
+    """The sheet for `theme`. `native` is the theme Streamlit itself is showing: when it is a
+    different one, the rules for Streamlit's own widgets are added (see `_NATIVE_RULES`)."""
     rules = _RULES.replace("__FONT__", FONT_STACK).replace("__MONO__", MONO_STACK)
-    return f":root {{ {_variables(theme)} }}\n{rules}"
+    extra = _NATIVE_RULES if native is not None and native != theme else ""
+    return f":root {{ {_variables(theme)} }}\n{rules}{extra}"
+
+
+DARK_KEY = "fx_dark_mode"  # the sidebar switch; unset until the viewer has been shown it
 
 
 def current_theme() -> str:
@@ -184,6 +230,18 @@ def current_theme() -> str:
     return "dark" if kind == "dark" else "light"
 
 
+def chosen_theme() -> str:
+    """The theme the page is drawn in: what the sidebar switch says, or Streamlit's own theme
+    until the switch has been used."""
+    value = st.session_state.get(DARK_KEY)
+    if value is None:
+        return current_theme()
+    return "dark" if value else "light"
+
+
 def apply() -> None:
     """Put the stylesheet on the page. Static text built from constants only."""
-    st.markdown(f"<style>{stylesheet(current_theme())}</style>", unsafe_allow_html=True)
+    st.markdown(
+        f"<style>{stylesheet(chosen_theme(), native=current_theme())}</style>",
+        unsafe_allow_html=True,
+    )

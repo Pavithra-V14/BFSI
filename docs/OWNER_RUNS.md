@@ -104,6 +104,12 @@ never set.)
 | 37 | Numeric targets from the baseline: `app.eval targets`, then the absolute floors you sign | Phase 16 | pending: owner to confirm | step 24: after Run 21 | no (you run it yourself; it may use free-tier calls) |
 | 38 | The cost projection against a dry run | Phase 16 | pending: owner to confirm | step 25: after Run 21 or Run 27 | no (you run it yourself; it may use free-tier calls) |
 | 39 | The pre-launch gate and the readiness score, with the second review | Phase 16 | pending: owner to confirm | step 32: after Runs 35 to 38 (and 21, 26, 29 as far as done) | no (you run it yourself; it may use free-tier calls) |
+| 40 | One conversation per chat (the chat keeps its id even when a save is late) | Change round 1, step 1 | pending: owner to confirm | after Run 16 | no (you run it yourself; it may use free-tier calls) |
+| 41 | The key panel: migration 0011, calls today and calls left per key | Change round 1, step 2 | pending: owner to confirm | after Run 40 | no (you run it yourself; it may use free-tier calls) |
+| 42 | Alert reasons on the Alerts screen | Change round 1, step 3 | pending: owner to confirm | after Run 41 | no (you run it yourself; it may use free-tier calls) |
+| 43 | The Delete button of the Documents screen, on a throw-away document | Change round 1, step 4 | pending: owner to confirm | after Run 42 and Run 8 to 12 | no (you run it yourself; it may use free-tier calls) |
+| 44 | The purge of all data: a dry run, then (only when you mean it) the real one | Change round 1, step 6 | pending: owner to confirm | after Run 43 | no (you run it yourself; the real purge cannot be undone) |
+| 45 | The Dark mode switch: look at both themes on every screen | Change round 1, step 7 | pending: owner to confirm | after Run 17 | no (you run it yourself) |
 
 How to read the table. **Status** is "done" with the date, or "pending: owner to confirm": until
 you tell me which runs you have done, every run from 8 onward is shown as pending and nothing is
@@ -817,9 +823,11 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
 
 ## Run 13. Pipeline smoke with Langfuse
 
-- **Verifies:** Phase 8 (the Langfuse sink sends span records only, and a failure never touches
-  an answer).
-- **Before it:** Run 12 (the pipeline answers) and a Langfuse project (below).
+- **Verifies:** Phase 8 and Change round 1 step 5 (the Langfuse sink sends the trace of a request
+  through the Langfuse SDK, with the input, output and metadata of every stage; only masked or
+  public text is in it; and a failure never touches an answer).
+- **Before it:** Run 12 (the pipeline answers) and a Langfuse project (below). Install the
+  new package first (the SDK is pinned in `requirements.txt`): `uv pip install -r requirements.txt`.
 - **Create the Langfuse project and keys (once):**
   1. Sign in at your Langfuse cloud account (the free "Hobby" plan is enough) in a browser.
   2. Create an organisation if asked, then a project, for example `bfsi-rag`.
@@ -855,29 +863,41 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
     empty in this window.
   - `langfuse FAILED error=SinkConfigError`: a variable is a placeholder, too short, the host is
     not https, or the user hash key equals or is built from another key. Fix it and run again.
-  - `langfuse FAILED error=ConnectError` or `error=ReadTimeout`: the host or the network is
-    wrong. `error=LangfuseRejected`: Langfuse answered but refused the events: send this line,
-    it is the first real check of the payload format (the path, event and field names were
-    written from the documentation and could not be tested offline).
-  - `langfuse FAILED error=Timeout`: nothing was sent within 20 s.
+  - `langfuse FAILED error=ExportFailed` (or a class name such as `ConnectionError`): the SDK
+    could not deliver the trace: the host, the network or a key is wrong. Check the host (your
+    region's address) and the two keys; send this line if it stays.
+  - `langfuse FAILED error=Timeout`: nothing was handed over within 20 s.
+  - `ModuleNotFoundError: langfuse`: run `uv pip install -r requirements.txt` first.
 - **Check in the Langfuse web page** (Project, Tracing):
-  1. One new trace appears, with one observation per stage (names such as `triage`, `retrieve`,
-     `rerank`, `generate`) and, for the model calls, a model name and token counts.
-  2. Open the trace and each observation. The input, output and metadata must hold only: stage
-     names, timings, decider, model, key fingerprint, token counts, costs, flags, prompt hashes,
-     the corpus version, and error type names.
-  3. **There must be no question text, no answer text, no chunk text, no history, no username or
-     email anywhere**: look at Input, Output, Metadata, Tags, and the trace's User and Session
-     fields (those hold long hex hashes, not names). Search the trace for a word of your
-     question: it must not be found.
+  1. One new trace named `query` appears, with one observation per stage (`authenticate`,
+     `local_scan`, `triage`, `embed`, `retrieve`, `rerank`, `generate` ...), each drawn with its
+     own start and end time (the waterfall is the real one). The model calls show a model name and
+     token counts; `generate` also shows the cost; `prompt_synthesis` sits inside `generate`.
+  2. Open the trace. **Input** is the question and **Output** the answer, both the MASKED stored
+     copies (a name you typed shows as `[PERSON]`). Open the three stages that matter:
+     - `retrieve`: Input = the question and the search settings (filters, `rrf_k`, the roles
+       allowed to see); Output = the chunks found, with ids, documents, clauses and scores.
+     - `rerank`: Output = each passage with its text, its rerank score and whether the answer
+       used it (`kept_for_the_answer`).
+     - `generate`: Input = the instructions, the documents and the question as ONE user message;
+       Output = the answer; with the token counts and the model. `prompt_synthesis` inside it shows
+       which documents went into the prompt and says the history is `none`.
+  3. **There must be NO raw question, no name or number you typed, no rewritten question, no chat
+     history or summary, no username or e-mail anywhere**: look at Input, Output, Metadata, Tags,
+     and the trace's User and Session fields (long hex hashes, not names). Ask a second question
+     in the same chat that needs the first one's history: its trace must not contain the first
+     question's words.
+  4. To see the old, text-free behaviour, set `LANGFUSE_SEND_TEXT=false` in the window and run
+     again: Input and Output are then empty on every observation, with the metadata still there.
 - **Send back:** `SENT` (or the failure's error name), and for the Langfuse page only: the
-  number of observations, whether Input/Output are empty, and "no question or answer text
-  found" yes or no. Never a screenshot that shows the keys page.
+  number of observations, whether Input and Output are filled on `retrieve`, `rerank` and
+  `generate`, and "no raw question, name or history found" yes or no. Never a screenshot that shows
+  the keys page.
 - **Clear:** the variables in this window. The Langfuse keys stay in your password manager;
   revoke them on the API Keys page if they ever leak.
-- **Real calls:** the same ~4 model calls as one question in Run 12, plus 1 call to Langfuse (a
-  batch of events). Free tier: the Hobby plan has a monthly event cap that one trace does not
-  approach.
+- **Real calls:** the same ~4 model calls as one question in Run 12, plus one delivery to Langfuse
+  (about 20 spans). Free tier: the Hobby plan has a monthly cap on units that a trace of this
+  size does not approach.
 - **Safe to repeat:** yes; each run adds one trace.
 
 ## Run 14. Real-Upstash check of the cache code
@@ -1363,6 +1383,16 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   family than Groq `gpt-oss`, Gemini and Gemma (not any OpenAI, Google or Gemma-family model;
   for example a Llama, Qwen or Mistral model). The gateway refuses to start otherwise.
   Set the keys with `Read-Secret`; `EVAL_JUDGE_MODEL` is a name and can be typed.
+- **One call first (optional, 1 request of the key's daily allowance):** to check only that the
+  judge key and model work, before the whole run:
+
+      uv run python scripts/judge_smoke.py --run
+
+  It makes ONE tiny call through the judge path of an evaluation run (the `eval_openrouter` key
+  pool and `EVAL_JUDGE_MODEL`) and prints the status, the model that answered, the key's short
+  fingerprint, the token counts and the time; never the key. `EVAL_OPENROUTER_API_KEYS` and
+  `EVAL_JUDGE_MODEL` must be set in this window (or listed in your own settings file, which the
+  script reads for those names only, as `gateway_smoke.py` does).
 - **Step 1. The estimate (no call):**
 
       uv run python -m app.eval calibrate
@@ -2137,6 +2167,207 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   `docs/READINESS.md`; fill in the "Second review" line. **An independent second review is also
   required before any real customer data** (`docs/ACCESS_CONTROL_AUDIT.md`).
 - **Send back:** the saved report (it holds names and numbers only).
+- **Real calls:** none. **Safe to repeat:** yes.
+
+## Run 40. One conversation per chat (Change round 1, step 1): PENDING
+
+- **Verifies:** that a first question gets its conversation id before it is saved, so the next
+  question joins the same chat even if the save is slow or fails (before this, every question
+  could start a new chat: 13 chats for 15 questions in the daily table of 2026-10-12).
+- **Before it:** Run 16 (the API and the frontend run locally against your own Neon database).
+- **Needs:** the settings of Run 16, in the same window. No new variable.
+- **Step 1.** Start the API and the frontend as in Run 16. Sign in as a customer and click
+  **New chat** once.
+- **Step 2.** Ask three questions one after the other, in the same window, without clicking
+  anything else (for example: a question about a waiting period, a follow-up "and for accidents?",
+  and a third about premiums).
+- **You should see:** all three questions and answers stay on the screen in one conversation, and
+  the left column "My chats" lists exactly **one** new chat. Click **New chat** and ask one more
+  question: now "My chats" lists two chats.
+- **If it differs:** more chats than "New chat" clicks means the id is still lost. Send back the
+  number of chats and the number of questions, and the line `persist_queued` if it shows in the
+  Alerts screen (an event name and a count; no text).
+- **Send back:** chats listed, questions asked, whether `persist_queued` appeared.
+- **How to clear:** close the windows. The test chats can be deleted in "My chats".
+- **Real calls:** about 4 answers (a few free-tier model calls each). **Safe to repeat:** yes.
+
+## Run 41. The key panel: migration 0011, calls today and calls left per key: PENDING
+
+- **Verifies:** that the gateway counts every provider call on the key that made it, that the
+  counts survive a restart, and that the admin Dashboards screen shows the number of keys, the
+  calls and tokens made today, and the calls left of the daily limit, for each key.
+- **Before it:** Run 40, and the migrations up to 0010 applied (Runs 1 to 8 and later).
+- **Needs:** `DATABASE_URL` (the direct Neon address, `sslmode=require`) in the window.
+- **Step 1. Apply migration 0011 (adds one small table, `key_usage_daily`):**
+
+      uv run python -m app.db.migrate --dry-run
+      uv run python -m app.db.migrate
+
+  You should see `0011_key_usage_daily.sql` as pending, then applied. It holds a day, a pool name,
+  a fingerprint (eight characters of a hash) and two counts; no key and no text.
+- **Step 2. Check how your key variables are read (no call, prints counts and fingerprints):**
+
+      uv run python scripts/key_inventory.py
+
+  A variable written as `key1 , key2, key3` must show three keys. Note the fingerprints: the
+  dashboard uses the same names.
+- **Step 3.** Start the API with your usual settings, sign in as an admin, ask two questions in a
+  chat, then open **Dashboards, Key pools**.
+- **You should see:** the metric "Keys in all pools"; a table per provider (state, keys, cooling
+  down, calls today, tokens today, daily calls per key, daily tokens per key); and a table "Each
+  key, today" with one row per key: its position, fingerprint, calls today, calls left today,
+  tokens today and tokens left today. The two questions show as a few calls on the answer
+  providers and on Jev, embedding and rerank. "not set" means that provider has no configured
+  daily limit.
+- **Step 4. The counts survive a restart.** Wait five minutes (the counts are saved every five
+  minutes), stop the API with Ctrl+C (it saves once more), start it again and open the panel: the
+  calls made before the restart are still there.
+- **If it differs:** all counts stay at 0 after questions: send back the provider names and the
+  `observability_failed` count of the Alerts screen. A fingerprint that does not match
+  `key_inventory.py`: send both lists (fingerprints only).
+- **Send back:** the output of step 1 and 2 (counts and fingerprints only), and for step 3 the
+  numbers of one provider row.
+- **How to clear:** close the window. The table can be left as it is: it holds a few rows a day.
+- **Real calls:** about 2 questions. **Safe to repeat:** yes.
+
+## Run 42. Alert reasons on the Alerts screen (Change round 1, step 3): PENDING
+
+- **Verifies:** that every alert and event on the Alerts screen has a "View reason" box with a
+  fixed plain-words text (what it means, what to do), and that the reason codes seen are class
+  names only (never a message, an address or a key).
+- **Before it:** Run 18 (the Alerts screen works).
+- **Needs:** the settings of Run 16. No new variable.
+- **Step 1.** Start the API and the frontend, sign in as an admin, open **Alerts**.
+- **You should see:** under "Alerts of the last 24 hours" a column "what it means" and, below the
+  table, one "View reason: NAME" box per alert; under "Events seen by this running service" a
+  column "reason codes" and one box per event. Open one box: "What it means", "What to do", and
+  for an event "Reason codes seen" (for example `TimeoutError (3)`).
+- **Check a known one:** if `retention_overdue` is shown, its box must say that the clean-up task
+  has not run and name the command; run `uv run python -m app.memory.retention --dry-run` as it
+  says (it only lists what it would delete).
+- **If it differs:** a box that says "No further description has been written for it": send back
+  the event's name (a code names it; no text). A reason that contains an address, a key or a
+  sentence you did not expect: stop and send back the box's title only.
+- **Send back:** the number of alerts and events shown and whether each had a box.
+- **Real calls:** none. **Safe to repeat:** yes.
+
+## Run 43. The Delete button of the Documents screen (Change round 1, step 4): PENDING
+
+- **Verifies:** that the Delete button beside a document runs the delete command on your machine,
+  after you type the document id, with the same safeguards as the command in your terminal.
+- **Before it:** the Run 8 to 12 ingest steps work. The drill uses a **throw-away id**, never a
+  real one: **a delete records the id as withdrawn for good**, so a restore cannot bring it back.
+  Use `rehearsal-button-1`, then `rehearsal-button-2` the next time.
+- **Needs:** the settings of Run 16 plus `QDRANT_URL`, `QDRANT_API_KEY` and the embedding keys
+  for the ingest (as in Run 12); the frontend started with `ADMIN_MACHINE=true`; the API started
+  from this same window (the button runs the command with this window's settings).
+- **Step 1. Ingest a throw-away copy of a sample (a command, as always):**
+
+      uv run python -m app.ingest ingest spec/samples/company/insurance_flexi_commercial_property.pdf `
+        --doc-id rehearsal-button-1 --doc-type policy --access-role customer --product-line insurance
+
+  You should see its chunks counted and indexed.
+- **Step 2.** Open **Documents** in the frontend. You should see a row for `rehearsal-button-1`
+  with its access role, active chunks and a **Delete** button beside it. The other documents have
+  one too: do not press those.
+- **Step 3.** Press **Delete** on `rehearsal-button-1`. A red box asks "Delete this document?".
+  The button **Delete permanently** is grey. Type `rehearsal-button` (wrong): it stays grey.
+  Type the whole id: it turns on. Pick a reason and press it.
+- **You should see:** after up to a minute, "Document deleted" and the command's own lines
+  (`rehearsal-button-1: removed N chunk(s), ...` and `recorded as withdrawn`). The row is gone
+  from the list.
+- **Step 4. Check it (your terminal):**
+
+      uv run python -m app.ingest status --doc-id rehearsal-button-1
+      uv run python -m app.ingest withdrawn
+
+  `status` shows `stored 0`; `withdrawn` lists the id, with the reason you picked and `gone`.
+  In **Alerts** there is no `document_delete_failed`. In the audit log (Neon) one row
+  `document_delete_request` (who, the document id, the reason code) and one row `delete`.
+- **If it differs:** "The delete did not finish": press Delete again for the same id (safe to
+  repeat) and send back the lines it printed. A timeout after 150 seconds: run the command of
+  Run 12 (f) in your terminal instead.
+- **Check the host refuses it:** on the deployed API (Render) the button does not appear (the
+  frontend is not on the admin machine) and a direct call is refused with `admin_machine_only`.
+- **Send back:** the lines shown after the delete (names and counts only) and the `status` line.
+- **How to clear:** nothing: the document is gone. Close the windows.
+- **Real calls:** about 3 embedding calls for the ingest; the delete makes none. **Safe to repeat:**
+  yes, with a new throw-away id each time.
+
+## Run 44. The purge of all data (Change round 1, step 6): PENDING
+
+- **Verifies:** that `python -m app.maintenance purge` and the Maintenance screen's button show what
+  would be erased, ask for the phrase, and (only when you go on) erase the right things and keep
+  the right things.
+- **IRREVERSIBLE.** The real purge erases the document vectors, the cached answers, every chat,
+  the customer and staff accounts, the review queue, the alert rows and the metrics of the stores
+  in YOUR window. Do steps 1 and 2 freely. Do step 3 only on data you are willing to lose
+  (a rehearsal database of your own, or a real reset on purpose). It keeps the admin accounts, the
+  audit log, the allow-list entries, the withdrawn-document list and the settings.
+- **Before it:** Runs 3 and 6 (the stores and an admin account work). Take a Qdrant snapshot first
+  if you may want the documents back (Run 28 gives the command).
+- **Needs:** `DATABASE_URL` (direct Neon address), `QDRANT_URL`, `QDRANT_API_KEY`,
+  `UPSTASH_REDIS_URL` in the window (set them as in Run 6). The command always works on the
+  `documents` collection and cannot be pointed at another.
+- **Step 1. The dry run (changes nothing):**
+
+      uv run python -m app.maintenance purge --dry-run
+
+  You should see `would be erased:` with a count for each kind (document chunks, chats, messages,
+  thumbs, accounts, review items, alert rows, metric rows, counter rows), `and every cached answer`,
+  `kept: admin accounts; the audit log; the allow-list entities; ...` with your number of admins,
+  `not touched: Langfuse traces, the evaluation database, the original PDF files`, then
+  `dry run: nothing was changed`. Exit code 0.
+- **Step 2. The gates (changes nothing):**
+
+      uv run python -m app.maintenance purge
+
+  It prints the counts and the warning, then asks `Type DELETE ALL DATA to confirm:`. Type `no` (or
+  anything else): it must say `not confirmed; nothing was erased` and exit 1. Run the dry run again:
+  the same counts.
+- **Step 3. The real purge (IRREVERSIBLE).** Only if you mean it: run the same command and type the
+  phrase exactly. You should see `erasing the document vectors`, `clearing the cached answers`,
+  `erasing the database rows`, an `erased: ...` line with the counts, and `done`. Then:
+  - the dry run shows zeros and the same number of admins;
+  - sign in again as the admin: it works; the Documents screen is empty; "My chats" is empty;
+  - in Neon, the audit log has a row `purge_all` with the counts (and no names or text).
+  Ingest a document again (Run 12): it works without any set-up.
+- **Step 4. The button.** With the frontend started with `ADMIN_MACHINE=true` and the API started
+  in the same window, open **Maintenance**, press **Purge Database Data**: a red panel shows the
+  counts and the warning; **Erase everything** is grey until you tick the box AND type the phrase.
+  Press **Cancel** (do not erase unless you mean it). On the deployed (Render) service the screen
+  only says that erasing is done on the admin machine, and a direct call is refused with
+  `admin_machine_only`.
+- **If a line differs:** `purge incomplete: run the same command again`: run it again (it is safe to
+  repeat) and send back the lines it printed. A store named in `incomplete` shows which one failed.
+- **Send back:** the dry-run output of step 1 (counts only) and, if you did step 3, the `erased:`
+  line and the `done` line.
+- **How to clear:** close the window.
+- **Real calls:** the dry run reads counts from your real stores; the real purge deletes. No model
+  call, no key of a provider. **Safe to repeat:** the dry run yes; the real purge yes (a second run
+  finds nothing to erase), but it can never be undone.
+
+## Run 45. The Dark mode switch (Change round 1, step 7): PENDING
+
+- **Verifies:** that the "Dark mode" switch in the sidebar draws the whole page in the dark or the
+  light colours whatever theme your browser shows, and that no screen is left half dark.
+- **Before it:** Run 17 (the frontend runs and you can look at every screen).
+- **Needs:** nothing new.
+- **Steps.** Start the API and the frontend as in Run 17 and sign in as an admin. The switch is
+  under **New chat**. It starts to match your browser's theme.
+  1. Switch it the other way. The page background, the sidebar, the chat cards, the notices and
+     the chips must change at once.
+  2. Open each screen in turn with the switch ON and again with it OFF: Chat, Documents, Entities,
+     Review queue, Users, Alerts, Dashboards, Rollout, Evaluation, Maintenance. Look for text you
+     cannot read, a white box on a dark page (or a dark box on a light page), a table that is hard to
+     read, a drop-down list that is the wrong colour, and a button you cannot see.
+  3. Reload the page: the switch goes back to matching your browser (it is remembered for this tab
+     only).
+- **Known limit.** Streamlit's own widgets (inputs, buttons, drop-downs, tables) take their colours
+  from Streamlit's theme, which no code can change. When the switch picks the OTHER theme the page
+  repaints them with CSS rules that follow Streamlit's markup (tables are inverted). If one looks
+  wrong in your Streamlit version, send back the screen's name and which theme: it is a CSS fix.
+- **Send back:** for each screen and theme: fine, or a short note of what looks wrong.
 - **Real calls:** none. **Safe to repeat:** yes.
 
 ---

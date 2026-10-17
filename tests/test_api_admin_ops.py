@@ -337,13 +337,17 @@ def test_alerts_are_counts_by_name_and_the_banner_shows_for_critical_ones(env, a
     svc.emit("login_throttled", scope="user")
     svc.emit("login_throttled", scope="user")
     body = env.client.get("/admin/alerts", headers=headers).json()
-    assert body["banner"] is False and {"name": "login_throttled", "count": 2} in body["events"]
+    assert body["banner"] is False
+    assert {"name": "login_throttled", "count": 2, "codes": {}} in body["events"]
     svc.emit("persist_queue_overflow")
     svc.emit("persist_job_dead_lettered", reason="ValueError")
     body = env.client.get("/admin/alerts", headers=headers).json()
     assert body["banner"] is True
     assert body["critical"] == ["persist_job_dead_lettered", "persist_queue_overflow"]
-    assert "ValueError" not in json.dumps(body)  # names and counts only
+    # a reason CODE (a class name) is shown for an event, and nothing else of its fields is
+    dead = next(e for e in body["events"] if e["name"] == "persist_job_dead_lettered")
+    assert dead == {"name": "persist_job_dead_lettered", "count": 1, "codes": {"ValueError": 1}}
+    assert "login_throttled" in body["reasons"] and "user" not in json.dumps(body["events"])
 
 
 def test_the_critical_list_is_the_one_the_owner_approved():

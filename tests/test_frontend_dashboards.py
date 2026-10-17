@@ -38,6 +38,26 @@ def dashboards_api():
                             "cooling": 1,
                             "state": "cooling_down",
                             "tiers": {"answer": "closed"},
+                            "calls_today": 14,
+                            "tokens_today": 9000,
+                            "daily_calls_per_key": 1000,
+                            "daily_tokens_per_key": 200000,
+                            "per_key": [
+                                {
+                                    "fingerprint": "ab12cd34",
+                                    "calls": 9,
+                                    "tokens": 6000,
+                                    "calls_left": 991,
+                                    "tokens_left": 194000,
+                                },
+                                {
+                                    "fingerprint": "ef56ab78",
+                                    "calls": 5,
+                                    "tokens": 3000,
+                                    "calls_left": 995,
+                                    "tokens_left": 197000,
+                                },
+                            ],  # fmt: skip
                         },
                         {
                             "provider": "gemini",
@@ -45,8 +65,22 @@ def dashboards_api():
                             "cooling": 0,
                             "state": "healthy",
                             "tiers": {},
+                            "calls_today": 2,
+                            "tokens_today": 80,
+                            "daily_calls_per_key": None,
+                            "daily_tokens_per_key": None,
+                            "per_key": [
+                                {
+                                    "fingerprint": "99aa00bb",
+                                    "calls": 2,
+                                    "tokens": 80,
+                                    "calls_left": None,
+                                    "tokens_left": None,
+                                },
+                            ],  # fmt: skip
                         },
-                    ]
+                    ],
+                    "day": "2026-10-17",
                 },
             ),
             ("GET", "/admin/dashboards/usage"): json_response(
@@ -168,9 +202,18 @@ def test_the_deciders_table_has_each_step_decider_and_share(monkeypatch):
 def test_the_key_panel_shows_counts_and_never_a_key(monkeypatch):
     at = open_panel(dashboards_api(), monkeypatch, "Key pools")
     text = at.dataframe[0].value.to_string()
-    assert "groq" in text and "cooling down" in text
+    assert "groq" in text and "cooling down" in text and "calls today" in text
     assert FAKE_TOKEN not in text
     assert any("never shown" in c.value for c in at.caption)
+
+
+def test_the_key_panel_shows_the_pool_size_calls_today_and_what_is_left_per_key(monkeypatch):
+    at = open_panel(dashboards_api(), monkeypatch, "Key pools")
+    assert any(m.label == "Keys in all pools" and m.value == "3" for m in at.metric)
+    per_key = at.dataframe[1].value.to_string()
+    assert "ab12cd34" in per_key and "991" in per_key and "194000" in per_key
+    assert "not set" in per_key  # gemini has no configured daily limit
+    assert FAKE_TOKEN not in per_key
 
 
 def test_billed_and_shadow_cost_are_in_separate_columns_with_their_own_headings(monkeypatch):

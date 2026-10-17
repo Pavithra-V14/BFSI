@@ -516,16 +516,29 @@ web route of its own (the chat API is Phase 10).
   opens your real database. It READS your real Qdrant and never writes to it; Upstash is touched only
   with `--with-cache`. Nothing happens without `--run`. It uses the variables already in your shell;
   add `--load-env` to let it read your `.env` file itself (only the names it needs, never printed).
+- **Dark mode switch** (`frontend/theme.py`, sidebar, **[P]**, Change round 1). Starts from your
+  browser's theme; the page's own colours change at once and, when you pick the other theme,
+  CSS rules repaint Streamlit's own widgets (Run 45 is the look at every screen).
+- **Purge all data** (`app/maintenance/`, **[P]**, Change round 1). `uv run python -m app.maintenance
+  purge --dry-run` shows what would be erased; without `--dry-run` it asks you to type `DELETE ALL
+  DATA`. It erases the document vectors, the cached answers, every chat, the customer and staff
+  accounts, the review queue, the alert rows and the metrics. It keeps the admin accounts, the audit
+  log, the allow-list entities, the withdrawn-document list and the settings. The same thing is the
+  button "Purge Database Data" on the Maintenance tab (admin machine only). Never on Render.
 - **Langfuse sink** (`app/pipeline/langfuse_sink.py`, **[P]**). Off by default. It turns on only when
   `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` and `LANGFUSE_USER_HASH_KEY` are all
   set to real values (the last must be its own key, not `JWT_SECRET_KEY` or `AUDIT_HASH_KEY`).
-  It sends span records only: stage names, timings, decider, model, key fingerprint, token counts,
-  costs, flags, prompt hashes, corpus version, and errors as exception type names. It never sends the
-  question, the answer, chunk text, history, summary, username or email; the user and session appear
-  only as keyed hashes. It uses Langfuse's plain ingestion API over httpx, not the SDK (the SDK can
-  capture inputs and outputs automatically). A Langfuse failure or slowness cannot touch an answer:
-  background batches, a 3 s timeout, a bounded queue of 200 that drops when full, sent after the answer
-  is final. Alert events: `langfuse_failed`, `langfuse_dropped`, `langfuse_disabled` (type names only,
+  It sends the trace of every request through the Langfuse SDK (pinned in `requirements.txt`; no
+  decorator, no integration, no automatic capture: our code sets every field). One observation per
+  stage, typed (retriever, embedding, guardrail, generation), with the real start and end time, and
+  its input, output and metadata (`app/pipeline/langfuse_content.py` says exactly what). **Text:**
+  only the MASKED stored question and answer (the pass-2 copies the chat store keeps; withheld if
+  they still look like personal data), the retrieved passages and the answer prompt (company
+  documents and our own instructions). Never the raw question, the copy the models receive, a
+  rewritten question, chat history, a summary, a username or an email; the user and session appear
+  only as keyed hashes. `LANGFUSE_SEND_TEXT=false` sends no input or output at all. A Langfuse
+  failure or slowness cannot touch an answer: the SDK sends in its own threads with a 3 s timeout,
+  a bounded queue of 200 drops when full, and it all happens after the answer is final. Alert events: `langfuse_failed`, `langfuse_dropped`, `langfuse_disabled` (type names only,
   at most one a minute). To try it yourself: `uv run python scripts/pipeline_smoke.py --run --langfuse`
   sends one real trace and prints only `SENT`, or the exception type that stopped it.
 
@@ -554,9 +567,9 @@ web route of its own (the chat API is Phase 10).
   `tracing_switched_off`, `summary_rejected_injection`, `summary_fold_failed`, `budget_charge_failed`,
   and since round 2 `rate_limit_unavailable`, `budget_check_unavailable`, `persist_flush_skipped`,
   `persist_job_dead_lettered`, `soft_retry_skipped`, `soft_retry_failed`, `filter_values_unavailable`.
-  A turn queued while its session was still unwritten loses its Langfuse session link, and the
-  Langfuse payload schema (path, event and field names, the 207 answer) cannot be checked offline:
-  your own `pipeline_smoke.py --run --langfuse` is the check.
+  A turn queued while its session was still unwritten loses its Langfuse session link, and what
+  Langfuse shows for a trace (the observation types, the waterfall, the input and output) cannot be
+  checked offline: your own `pipeline_smoke.py --run --langfuse` is the check (Run 13).
 - **Phase 14 (testing completion).** Masking runs on the event loop thread and takes about 20 ms; load
   tests must show whether that matters. Masking and the building of the stored copy run on the event
   loop, so their time limits cannot interrupt them. A step that times out leaves its worker thread
@@ -778,7 +791,9 @@ that enters it holds a question, an answer, a username or a key.
   its class name only. To check a real log file: `uv run python -m app.observability.scan LOGFILE`
   (it prints rule names and line numbers, never the text; Run 12 and Run 18 use it).
 - **Traces.** The Langfuse sink also sends the retrieved chunk ids, their content hashes and the
-  clause references (a long or odd one is dropped, not cut). No masked text is sent. When a chat is
+  clause references (a long or odd one is dropped, not cut). Since Change round 1 it also sends the
+  masked stored question and answer and the retrieved passages (see the Langfuse sink above;
+  `LANGFUSE_SEND_TEXT=false` turns the text off). When a chat is
   deleted (one, all, or by the 90-day sweep) its traces are removed by the keyed session hash, in
   the background, with a persisted queue and bounded retries (5, then one critical alert).
 - **Alerts.** Persisted for 30 days and shown in the banner (`/admin/alerts`). `critical` also goes

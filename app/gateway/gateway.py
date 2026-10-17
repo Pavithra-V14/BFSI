@@ -351,6 +351,7 @@ class Gateway:
                 except Exception as exc:
                     error = classify(exc)
                     pool.correct(lease, error.used_tokens)  # a failed answer still used tokens
+                    pool.note_call(fp, error.used_tokens)  # the provider counted it too
                     lease = None  # settled
                     if isinstance(error, ContextWindowExceeded):
                         raise error from None
@@ -429,6 +430,7 @@ class Gateway:
                     await self._clock.sleep(delay)
                     continue
                 pool.correct(lease, actual)
+                pool.note_call(fp, actual)
                 lease = None
                 breaker.record_success()
                 return StepOutcome(True, value, fp)
@@ -1166,6 +1168,59 @@ class Gateway:
             degraded=True,
             skipped=skipped,
         )
+
+    # ---- the daily key counts (the admin key panel) ---------------------------------------
+
+    def key_usage(self) -> dict[str, dict[str, Any]]:
+        """Per pool: the number of keys, and per key (fingerprint only) the calls and tokens of
+        today (UTC) with the daily limits of the plan. A limit that is not set is None."""
+        report: dict[str, dict[str, Any]] = {}
+        for name, pool in self._pools.items():
+            if pool.size == 0:
+                continue
+            limits = pool.limits
+            per_key = []
+            for row in pool.usage_today():
+                calls, tokens = int(row["calls"]), int(row["tokens"])
+                rpd, tpd = getattr(limits, "rpd", None), getattr(limits, "tpd", None)
+                per_key.append(
+                    {
+                        "fingerprint": row["fingerprint"],
+                        "calls": calls,
+                        "tokens": tokens,
+                        "calls_left": None if rpd is None else max(int(rpd) - calls, 0),
+                        "tokens_left": None if tpd is None else max(int(tpd) - tokens, 0),
+                    }
+                )
+            report[name] = {
+                "keys": pool.size,
+                "daily_calls_per_key": getattr(limits, "rpd", None),
+                "daily_tokens_per_key": getattr(limits, "tpd", None),
+                "per_key": per_key,
+            }
+        return report
+
+    def take_key_usage(self) -> list[tuple[str, str, str, int, int]]:
+        """The counts not yet saved, as (day, pool, fingerprint, calls, tokens); forgotten here
+        until `restore_key_usage` puts them back (when the save failed)."""
+        out = []
+        for name, pool in self._pools.items():
+            for (day, fp), (calls, tokens) in pool.take_unsaved().items():
+                out.append((day, name, fp, calls, tokens))
+        return out
+
+    def restore_key_usage(self, taken: list[tuple[str, str, str, int, int]]) -> None:
+        for day, name, fp, calls, tokens in taken:
+            pool = self._pools.get(name)
+            if pool is not None:
+                pool.restore_unsaved({(day, fp): [calls, tokens]})
+
+    def seed_key_usage(self, rows: dict[str, dict[str, tuple[int, int]]]) -> None:
+        """Start today's counts from the saved rows: pool -> fingerprint -> (calls, tokens)."""
+        for name, by_key in rows.items():
+            pool = self._pools.get(name)
+            if pool is not None:
+                pool.seed_today(by_key)
 
     # ---- health ---------------------------------------------------------------------
 

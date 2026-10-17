@@ -84,6 +84,10 @@ class Services:
     entity_review_enabled: bool = False  # ENTITY_REVIEW_ENABLED=true: opt-in, default off [P]
     observability: Any = None  # app.observability.service.Observability, or None
     evaluation: Any = None  # app.eval.access.EvalAccess, or None (Phase 13)
+    # runs `python -m app.ingest ARGS` for the page's Delete button; tests put a fake here
+    ingest_runner: Callable[[list[str]], Any] | None = None
+    # runs `python -m app.maintenance ARGS` for the purge screen; tests put a fake here
+    maintenance_runner: Callable[[list[str]], Any] | None = None
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     # The last EVENT_BUFFER events: what Phase 12's alerts and dashboards will read.
     events: deque = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER))

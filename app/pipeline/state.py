@@ -172,6 +172,9 @@ class PipelineState:
     # stage 8-12
     query_vector: list[float] | None = None
     candidates: list[ContextChunk] = field(default_factory=list, repr=False)  # chunk text
+    # What the search itself returned, before the rerank (for the Langfuse trace): one entry per
+    # chunk, (chunk_id, doc_id, clause_ref, fused score). No text.
+    retrieved: list[tuple[str, str, str | None, float]] = field(default_factory=list, repr=False)
     filters_applied: list[str] = field(default_factory=list)
     soft_applied: dict[str, str] = field(default_factory=dict)  # the soft filters of the search
     soft_retried: bool = False  # the search was repeated once without the soft filters

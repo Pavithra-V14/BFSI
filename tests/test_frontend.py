@@ -730,6 +730,7 @@ SECTIONS = [
     "Dashboards",
     "Rollout",
     "Evaluation",
+    "Maintenance",
 ]
 
 
@@ -879,10 +880,10 @@ def test_documents_show_status_and_commands_to_copy_only_on_the_admin_machine(mo
     commands = [c.value for c in local.code]
     assert any("app.ingest ingest" in c for c in commands)
     assert any("app.ingest delete" in c for c in commands)
-    # the page never runs anything: no button starts those commands
-    assert not [
-        b for b in local.button if "ingest" in b.label.lower() or "delete" in b.label.lower()
-    ]
+    # the page never starts an ingest; only the Delete button (next to each document) runs a command
+    assert not [b for b in local.button if "ingest" in b.label.lower()]
+    assert [b.label for b in local.button if "delete" in b.label.lower()] == ["Delete"]
+    assert not [b for b in host.button if "delete" in b.label.lower()]  # none on the host
 
 
 def test_entities_are_listed_for_reading_and_changed_only_on_the_admin_machine(monkeypatch):

@@ -226,6 +226,7 @@ async def retrieve_candidates(ctx: PipelineState, span: Span) -> None:
     except StoreUnavailable:
         raise StageError("retrieve", "vector_store_unavailable") from None
     ctx.candidates = candidates_from(points)
+    ctx.retrieved = snapshot(ctx.candidates)
     span.add(candidates=len(ctx.candidates), filters=ctx.filters_applied)
     ctx.trace.record(filters_applied=ctx.filters_applied)
 
@@ -252,6 +253,11 @@ def candidates_from(points: Sequence[Any]) -> list[ContextChunk]:
     return [c for c in (chunk_from_point(p) for p in points) if c is not None]
 
 
+def snapshot(chunks: Sequence[ContextChunk]) -> list[tuple[str, str, str | None, float]]:
+    """What a search returned, without the text: id, document, clause and the fused score."""
+    return [(c.chunk_id, c.doc_id, c.clause_ref, round(c.score, 6)) for c in chunks]
+
+
 def best_score(chunks: Sequence[ContextChunk]) -> float:
     return max((c.score for c in chunks), default=0.0)
 
@@ -266,6 +272,7 @@ async def retry_without_soft_filters(ctx: PipelineState, span: Span, timeout_s: 
     _, rerank_min = cfg.limits_for("rerank")
     began = time.perf_counter()
     first = list(ctx.candidates)
+    first_retrieved = list(ctx.retrieved)
     first_reranker, first_filters = ctx.reranker, list(ctx.filters_applied)
     text = ctx.question.text if ctx.question else ""
     try:
@@ -285,9 +292,11 @@ async def retry_without_soft_filters(ctx: PipelineState, span: Span, timeout_s: 
         ctx.emit("soft_retry_skipped", reason="no_time")
         return
     ctx.candidates = found
+    ctx.retrieved = snapshot(found)
     await rerank_candidates(ctx, span, left)
     if best_score(ctx.candidates) < best_score(first):  # the retry did not help: keep the first
         ctx.candidates, ctx.reranker = first, first_reranker
+        ctx.retrieved = first_retrieved
         ctx.filters_applied = first_filters
         return
     ctx.soft_applied = {}

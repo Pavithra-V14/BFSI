@@ -1,8 +1,10 @@
 """The admin sections (spec 24). Shown only to an admin; the API checks the role on every call.
 
 Where each one runs [P]: documents status, review queue, users and roles, the alerts banner and the
-rollout stage work against the hosted API. Ingest and delete are COMMANDS shown for the admin
-machine (the browser never starts them), and entity review is shown only when `ADMIN_MACHINE=true`
+rollout stage work against the hosted API. Ingest is a COMMAND shown for the admin
+machine (the browser never starts it); a document is deleted by the Delete button, which works
+on the admin machine only and asks for the document id; and entity review is shown only when
+`ADMIN_MACHINE=true`
 (the API also refuses it on the host and unless `ENTITY_REVIEW_ENABLED=true`). The evaluation
 dashboard is a shell until Phase 13.
 
@@ -32,6 +34,7 @@ SECTIONS = (
     "Dashboards",
     "Rollout",
     "Evaluation",
+    "Maintenance",
 )
 PAGE = 20
 FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
@@ -91,6 +94,89 @@ def alerts_banner(client: ApiClient) -> None:
 
 
 # ---- sections --------------------------------------------------------------------------------
+DELETE_PICK = "fx_doc_delete_pick"  # the document whose Delete button was pressed
+DELETE_NOTE = "fx_doc_del_note"  # what the last delete said (kept until the next one)
+
+
+def _document_rows(client: ApiClient, rows: list[dict[str, Any]]) -> None:
+    """One line per ingested document with its Delete button beside it (admin machine only)."""
+    if not rows:
+        st.caption("No documents are stored.")
+        return
+    widths = [3, 2, 2, 1, 1, 1, 2]
+    head = st.columns(widths)
+    head[0].caption("document")
+    head[1].caption("access")
+    head[2].caption("product line")
+    head[3].caption("active")
+    head[4].caption("held back")
+    head[5].caption("version")
+    for row in rows:
+        doc_id = str(row.get("doc_id") or "")
+        cells = st.columns(widths)
+        cells[0].write(render.safe_text(doc_id))
+        cells[1].write(render.safe_text(row.get("access_role")))
+        cells[2].write(render.safe_text(row.get("product_line")))
+        cells[3].write(render.safe_text(row.get("chunks_active")))
+        cells[4].write(render.safe_text(row.get("chunks_held_back")))
+        cells[5].write(render.safe_text(row.get("document_version")))
+        if cells[6].button("Delete", key=f"fx_doc_del_{doc_id}"):
+            st.session_state[DELETE_PICK] = doc_id
+            st.session_state.pop(DELETE_NOTE, None)
+            st.rerun()
+
+
+def _delete_panel(client: ApiClient) -> None:
+    """The confirmation of a delete: the id typed again, a reason from a fixed list, then the
+    command runs on this machine. Nothing is deleted before the typed id matches."""
+    note = st.session_state.get(DELETE_NOTE)
+    if note:
+        _show_delete_note(note)
+    doc_id = st.session_state.get(DELETE_PICK)
+    if not isinstance(doc_id, str) or not doc_id:
+        return
+    render.show_notice(
+        "danger",
+        "Delete this document?",
+        f"{render.safe_text(doc_id)} will be removed from the search (every stored passage and "
+        "allow-list entry), chats that cited it are marked 'source removed', and its id is "
+        "recorded as withdrawn so a restore cannot bring it back. This cannot be undone here.",
+        urgent=True,
+    )
+    reason = st.selectbox(
+        "Reason",
+        list(messages.DELETE_REASONS),
+        format_func=lambda v: messages.DELETE_REASON_TEXT[v],
+        index=len(messages.DELETE_REASONS) - 1,
+        key="fx_doc_del_reason",
+    )
+    typed = st.text_input("Type the document id to confirm", key="fx_doc_del_typed")
+    left, right = st.columns(2)
+    if right.button("Cancel", key="fx_doc_del_cancel"):
+        st.session_state.pop(DELETE_PICK, None)
+        st.rerun()
+    if left.button("Delete permanently", key="fx_doc_del_go", disabled=typed.strip() != doc_id):
+        reply = client.delete_document(doc_id, typed.strip(), reason)
+        if reply.ok and isinstance(reply.data, dict):
+            lines = [str(x) for x in reply.data.get("lines") or []]
+            if reply.data.get("deleted"):
+                st.session_state[DELETE_PICK] = None
+                st.session_state[DELETE_NOTE] = ("ok", "Document deleted", lines)
+            else:
+                st.session_state[DELETE_NOTE] = (
+                    "warn",
+                    "The delete did not finish",
+                    lines + ["Press Delete again to finish it; it is safe to repeat."],
+                )
+            st.rerun()
+        render.show_notice("danger", "Not deleted", friendly(reply), urgent=True)
+
+
+def _show_delete_note(note: tuple[str, str, list[str]]) -> None:
+    kind, title, lines = note
+    render.show_notice(kind, title, " ".join(render.safe_text(line) for line in lines))
+
+
 def documents(client: ApiClient, settings: Settings) -> None:
     render.show(render.who("Documents"))
     first = _load(client.documents(limit=1))
@@ -101,12 +187,15 @@ def documents(client: ApiClient, settings: Settings) -> None:
     data = _load(client.documents(limit=PAGE, offset=offset))
     if data is None:
         return
-    _table(data.get("documents") or [])
+    rows = [d for d in data.get("documents") or [] if isinstance(d, dict)]
     if settings.admin_machine:
-        st.subheader("Ingest or delete a document")
+        _document_rows(client, rows)
+        _delete_panel(client)
+        st.subheader("Ingest a document")
         st.caption(
-            "These run on this machine, in your own terminal. The page never starts them. "
-            "Replace the words in capitals."
+            "Ingesting runs on this machine, in your own terminal; the page never starts it. "
+            "Replace the words in capitals. The Delete button above runs the delete command on "
+            "this machine for you, after you type the document id."
         )
         st.code(
             "uv run python -m app.ingest ingest PDF_FILE --doc-id SLUG "
@@ -116,6 +205,7 @@ def documents(client: ApiClient, settings: Settings) -> None:
         st.code("uv run python -m app.ingest status --doc-id SLUG", language="text")
         st.code("uv run python -m app.ingest delete --doc-id SLUG", language="text")
     else:
+        _table(rows)
         st.caption("Ingesting and deleting documents is done on the admin machine.")
 
 
@@ -289,6 +379,19 @@ def users(client: ApiClient) -> None:
         render.show_notice("danger", "Not saved", friendly(reply), urgent=True)
 
 
+def _reason_box(name: str, reason: Any, codes: Any) -> None:
+    """The reason of one alert or event, in an expander: what it means, what to do, and the reason
+    codes the running service saw. All of it is fixed text or a class name, shown as plain text."""
+    if not isinstance(reason, dict):
+        return
+    with st.expander(render.label_text("View reason: " + name.replace("_", " "), 80)):
+        render.caption(f"What it means: {reason.get('meaning')}")
+        render.caption(f"What to do: {reason.get('action')}")
+        if isinstance(codes, dict) and codes:
+            seen = ", ".join(f"{code} ({times})" for code, times in codes.items())
+            render.caption(f"Reason codes seen: {seen}")
+
+
 def alerts(client: ApiClient) -> None:
     render.show(render.who("Alerts"))
     data = _load(client.alerts())
@@ -302,6 +405,7 @@ def alerts(client: ApiClient) -> None:
         render.show_notice("info", "Warnings", names)
     else:
         render.show_notice("ok", "All quiet", "No critical event among the recent ones.")
+    reasons = data.get("reasons") if isinstance(data.get("reasons"), dict) else {}
     st.subheader("Alerts of the last 24 hours")
     recent = [a for a in data.get("recent") or [] if isinstance(a, dict)]
     _table(
@@ -312,12 +416,29 @@ def alerts(client: ApiClient) -> None:
                 "count": a.get("count"),
                 "sent to webhook": "yes" if a.get("notified") else "no",
                 "at": a.get("at"),
+                "what it means": (reasons.get(a.get("name")) or {}).get("meaning"),
             }
             for a in recent
         ]
     )
+    for name in sorted({str(a.get("name")) for a in recent}):
+        _reason_box(name, reasons.get(name), {})
     st.subheader("Events seen by this running service")
-    _table([{"event": e.get("name"), "count": e.get("count")} for e in data.get("events") or []])
+    events = [e for e in data.get("events") or [] if isinstance(e, dict)]
+    _table(
+        [
+            {
+                "event": e.get("name"),
+                "count": e.get("count"),
+                "reason codes": ", ".join(
+                    f"{code} ({times})" for code, times in (e.get("codes") or {}).items()
+                ),
+            }
+            for e in events
+        ]
+    )
+    for event in events:
+        _reason_box(str(event.get("name")), reasons.get(str(event.get("name"))), event.get("codes"))
     render.caption(
         f"The alerts above are saved in the database and survive a restart. The event counts "
         f"(the last {number(data.get('window'))} events of the past 24 hours) are kept in memory "
@@ -362,6 +483,88 @@ def rollout(client: ApiClient) -> None:
         st.caption("Nothing hidden yet.")
 
 
+PURGE_OPEN = "fx_purge_open"  # the confirmation panel of the purge is showing
+PURGE_NOTE = "fx_purge_note"  # what the last purge said (kept until the next one)
+PURGE_LABELS = (
+    ("chunks", "document chunks (vectors)"),
+    ("chats", "chats"),
+    ("messages", "messages"),
+    ("feedback", "thumbs"),
+    ("users", "customer and staff accounts"),
+    ("review_items", "review-queue items"),
+    ("alert_rows", "alert rows"),
+    ("metric_rows", "metric rows"),
+    ("counter_rows", "per-key call count rows"),
+)
+
+
+def maintenance(client: ApiClient, settings: Settings) -> None:
+    """The purge of all data: a button, then a red panel with the counts, the warning, a box to
+    tick and the phrase to type. Admin machine only; the API refuses it anywhere else."""
+    render.show(render.who("Maintenance"))
+    if not settings.admin_machine:
+        st.caption("Erasing data is done on the admin machine.")
+        return
+    note = st.session_state.get(PURGE_NOTE)
+    if note:
+        kind, title, lines = note
+        render.show_notice(kind, title, " ".join(render.safe_text(line) for line in lines))
+    st.subheader("Purge database data")
+    st.caption(
+        "Erases every document vector, every cached answer, every chat, every customer and staff "
+        "account, the review queue, the alert rows and the metrics. Admin accounts, the audit "
+        "log, the allow-list entries, the withdrawn-document list and the settings are kept. "
+        "Take a Qdrant snapshot first if you may want the documents back."
+    )
+    if not st.session_state.get(PURGE_OPEN):
+        if st.button("Purge Database Data", key="fx_purge_start"):
+            st.session_state[PURGE_OPEN] = True
+            st.session_state.pop(PURGE_NOTE, None)
+            st.rerun()
+        return
+    plan = _load(client.purge_plan())
+    if plan is None:
+        if st.button("Cancel", key="fx_purge_cancel_error"):
+            st.session_state.pop(PURGE_OPEN, None)
+            st.rerun()
+        return
+    phrase = str(plan.get("phrase") or "")
+    counts = plan.get("counts") if isinstance(plan.get("counts"), dict) else {}
+    render.show_notice("danger", "Erase everything?", str(plan.get("warning") or ""), urgent=True)
+    _table([{"will be erased": label, "count": counts.get(key)} for key, label in PURGE_LABELS])
+    kept = ", ".join(str(k) for k in plan.get("kept") or [])
+    other = ", ".join(str(k) for k in plan.get("not_touched") or [])
+    render.caption(
+        f"Kept: {kept} ({number(counts.get('admins_kept'))} admin account(s)). "
+        f"Not touched: {other}."
+    )
+    understood = st.checkbox("I understand that this cannot be undone.", key="fx_purge_understood")
+    typed = st.text_input(render.label_text(f"Type {phrase} to confirm"), key="fx_purge_typed")
+    left, right = st.columns(2)
+    if right.button("Cancel", key="fx_purge_cancel"):
+        st.session_state.pop(PURGE_OPEN, None)
+        st.rerun()
+    if left.button(
+        "Erase everything",
+        key="fx_purge_go",
+        disabled=not (understood and phrase and typed.strip() == phrase),
+    ):
+        reply = client.purge(typed.strip())
+        if reply.ok and isinstance(reply.data, dict):
+            lines = [str(x) for x in reply.data.get("lines") or []]
+            if reply.data.get("erased"):
+                st.session_state[PURGE_NOTE] = ("ok", "The data was erased", lines)
+            else:
+                st.session_state[PURGE_NOTE] = (
+                    "warn",
+                    "The purge did not finish",
+                    lines + ["Open the purge again and repeat it; it is safe to repeat."],
+                )
+            st.session_state.pop(PURGE_OPEN, None)
+            st.rerun()
+        render.show_notice("danger", "Not erased", friendly(reply), urgent=True)
+
+
 def render_section(name: str, client: ApiClient, settings: Settings) -> None:
     if name == "Documents":
         documents(client, settings)
@@ -383,3 +586,5 @@ def render_section(name: str, client: ApiClient, settings: Settings) -> None:
         from frontend.views.evaluation import render_evaluation
 
         render_evaluation(client, settings)
+    elif name == "Maintenance":
+        maintenance(client, settings)

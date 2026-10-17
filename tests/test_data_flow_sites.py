@@ -47,11 +47,12 @@ SITES: dict[str, tuple[tuple[str, ...], str]] = {
     "app/vector/sparse.py": (("Qdrant",), "sparse vectors"),
     "app/vector/status.py": (("Qdrant",), "document counts"),
     "app/ingest/delete.py": (("Qdrant",), "delete (admin machine)"),
+    "app/maintenance/purge.py": (("Qdrant",), "erase every point (admin machine)"),
     "app/ingest/index.py": (("Qdrant",), "ingest (admin machine)"),
     "app/ingest/sparse_refresh.py": (("Qdrant",), "refresh (admin machine)"),
     "app/eval/scenarios.py": (("Qdrant",), "test collection edits (admin machine)"),
     # tracing and alerts
-    "app/pipeline/langfuse_sink.py": (("Langfuse",), "per-stage records, no text"),
+    "app/pipeline/langfuse_sink.py": (("Langfuse",), "the per-stage trace, through the SDK"),
     "app/observability/traces.py": (("Langfuse",), "deletion of a chat's traces by hashed id"),
     "app/observability/webhook.py": (("webhook",), "the alert's name and a count"),
 }

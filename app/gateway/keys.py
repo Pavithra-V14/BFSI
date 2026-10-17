@@ -7,7 +7,10 @@ are only ever identified by a short fingerprint in logs and results.
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from app.gateway.clock import Clock
 from app.gateway.limiter import Limits, Reservation, SlidingWindowLimiter
@@ -44,12 +47,20 @@ class Lease:
     reservation: Reservation
 
 
+def utc_day() -> str:
+    """Today's UTC date as YYYY-MM-DD (the day the daily limits and the saved counts use)."""
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
 class _KeyState:
     def __init__(self, key: str, limits: Limits, clock: Clock) -> None:
         self.key = key
         self.fingerprint = fingerprint(key)
         self.limiter = SlidingWindowLimiter(limits, clock)
         self.cooldown_until = 0.0
+        self.day = ""  # the UTC day the two counters below belong to
+        self.calls = 0
+        self.tokens = 0
 
 
 class KeyPool:
@@ -64,13 +75,19 @@ class KeyPool:
         *,
         strategy: str = "round_robin",
         default_cooldown: float = DEFAULT_COOLDOWN_SECONDS,
+        today: Callable[[], str] = utc_day,
     ) -> None:
         self.provider = provider
+        self.limits = limits
         self._clock = clock
         self._strategy = strategy
         self._default_cooldown = default_cooldown
         self._states = [_KeyState(key, limits, clock) for key in keys]
         self._next = 0
+        self._today = today
+        self._counts_lock = threading.Lock()
+        # increments not yet saved: (day, fingerprint) -> [calls, tokens]
+        self._unsaved: dict[tuple[str, str], list[int]] = {}
 
     @property
     def size(self) -> int:
@@ -129,6 +146,67 @@ class KeyPool:
         for state in self._states:
             if state.fingerprint == lease.fingerprint:
                 state.limiter.correct(lease.reservation, actual_tokens)
+
+    # ---- the daily counts (the key panel) ---------------------------------------------------
+
+    def note_call(self, fp: str, tokens: int) -> None:
+        """Count one call that reached the provider on the key with this fingerprint (a failed
+        call counts too: the provider counted it). Never raises."""
+        day = self._today()
+        used = max(int(tokens or 0), 0)
+        with self._counts_lock:
+            for state in self._states:
+                if state.fingerprint != fp:
+                    continue
+                if state.day != day:
+                    state.day, state.calls, state.tokens = day, 0, 0
+                state.calls += 1
+                state.tokens += used
+                row = self._unsaved.setdefault((day, fp), [0, 0])
+                row[0] += 1
+                row[1] += used
+                return
+
+    def seed_today(self, rows: dict[str, tuple[int, int]]) -> None:
+        """Start today's counts from what was saved before a restart: fingerprint -> (calls,
+        tokens). Counts made since this process started are kept on top."""
+        day = self._today()
+        with self._counts_lock:
+            for state in self._states:
+                saved = rows.get(state.fingerprint)
+                if saved is None:
+                    continue
+                if state.day != day:
+                    state.day, state.calls, state.tokens = day, 0, 0
+                state.calls += int(saved[0])
+                state.tokens += int(saved[1])
+
+    def usage_today(self) -> list[dict[str, int | str]]:
+        """Per key, today: its fingerprint, calls and tokens (a key with no call yet shows zero)."""
+        day = self._today()
+        with self._counts_lock:
+            return [
+                {
+                    "fingerprint": s.fingerprint,
+                    "calls": s.calls if s.day == day else 0,
+                    "tokens": s.tokens if s.day == day else 0,
+                }
+                for s in self._states
+            ]
+
+    def take_unsaved(self) -> dict[tuple[str, str], list[int]]:
+        """The increments waiting to be saved (and forget them): `restore_unsaved` puts them back
+        when the save fails."""
+        with self._counts_lock:
+            taken, self._unsaved = self._unsaved, {}
+        return taken
+
+    def restore_unsaved(self, taken: dict[tuple[str, str], list[int]]) -> None:
+        with self._counts_lock:
+            for key, (calls, tokens) in taken.items():
+                row = self._unsaved.setdefault(key, [0, 0])
+                row[0] += calls
+                row[1] += tokens
 
     def cool_down(self, fp: str, seconds: float | None = None) -> None:
         until = self._clock.now() + (self._default_cooldown if seconds is None else seconds)

@@ -3,6 +3,11 @@
     uv run python scripts/record_cassettes.py            # shows the plan, calls nothing
     uv run python scripts/record_cassettes.py --run      # five real calls, one per provider
     uv run python scripts/record_cassettes.py --run --only cohere_rerank
+    uv run python scripts/record_cassettes.py --run --only gemini_embedding --explain
+
+`--explain` adds one line to a failed call: the error class, its HTTP status and a shortened,
+scrubbed message (your key values, a credential after `key`, `token` or `authorization`, query
+strings and long token-like words are removed). Without it only the class name is printed.
 
 Nothing is called without `--run`. The keys are read from this terminal's settings (names in
 `scripts/cassette_tools.KEY_SETTINGS`); a value is never printed, logged or written: the
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -43,6 +49,34 @@ def keys_from(env: Mapping[str, str]) -> tuple[dict[str, str], list[str]]:
     return keys, missing
 
 
+_LONG_WORD = re.compile(r"[A-Za-z0-9_-]{24,}")
+_CREDENTIAL = re.compile(
+    r"(?i)\b(key|api[_-]?key|token|authorization|bearer|secret)\b[\s=:\"']+\S+"
+)
+_QUERY = re.compile(r"\?[^\s\"'<>]+")
+
+
+def scrubbed_detail(error: BaseException, secrets: list[str], limit: int = 320) -> str:
+    """One line about a failed call that is safe to print: the class, the HTTP status when the
+    error has one, and a short message with every key value, credential, query string and long
+    token-like word removed. The cause of the error is added when there is one."""
+    parts = []
+    for item in (error, getattr(error, "__cause__", None)):
+        if item is None:
+            continue
+        status = getattr(item, "status_code", None)
+        text = " ".join(str(item).split())
+        label = type(item).__name__ + (f" status={status}" if status else "")
+        parts.append(f"{label}: {text}")
+    text = " | ".join(parts)
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = text.replace(secret, "[KEY]")
+    text = _CREDENTIAL.sub(lambda m: m.group(1) + "=[REMOVED]", text)
+    text = _QUERY.sub("?[query removed]", text)
+    text = _LONG_WORD.sub("[long token removed]", text)
+    return text[:limit] + (" ..." if len(text) > limit else "")
+
+
 def _main(
     argv: list[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -53,6 +87,9 @@ def _main(
     parser = argparse.ArgumentParser(prog="record_cassettes", description=__doc__.split("\n")[0])
     parser.add_argument("--run", action="store_true", help="make the real calls")
     parser.add_argument("--only", choices=tools.NAMES, help="record one cassette")
+    parser.add_argument(
+        "--explain", action="store_true", help="print a scrubbed detail line for a failed call"
+    )
     args = parser.parse_args(argv)
     env = os.environ if env is None else env
     chosen = [args.only] if args.only else list(tools.NAMES)
@@ -90,6 +127,8 @@ def _main(
         except Exception as error:  # the class name only: a provider error may echo a request
             path.unlink(missing_ok=True)
             out(f"{name}: FAILED ({type(error).__name__}); nothing was written")
+            if args.explain:
+                out("  detail: " + scrubbed_detail(error, list(keys.values())))
             failed += 1
             continue
         problems = (

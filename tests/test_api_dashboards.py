@@ -110,12 +110,21 @@ def test_the_decider_panel_has_health_per_provider_and_shares_per_step(env, admi
         assert set(windows) == {"hour", "day"}
 
 
-def test_the_key_panel_shows_counts_and_states_and_no_key_or_fingerprint(env, admin):
+def test_the_key_panel_shows_counts_states_and_each_key_by_its_fingerprint_only(env, admin):
     response = get(env, admin, "/admin/dashboards/keys")
-    for provider in response.json()["providers"]:
-        assert set(provider) == {"provider", "keys", "cooling", "state", "tiers"}
+    body = response.json()
+    assert len(body["day"]) == 10
+    for provider in body["providers"]:
+        assert set(provider) == {
+            "provider", "keys", "cooling", "state", "tiers", "calls_today", "tokens_today",
+            "daily_calls_per_key", "daily_tokens_per_key", "per_key",
+        }  # fmt: skip
         assert isinstance(provider["keys"], int) and isinstance(provider["cooling"], int)
-    assert "fingerprint" not in response.text
+        assert provider["calls_today"] == sum(k["calls"] for k in provider["per_key"])
+        for key in provider["per_key"]:
+            assert set(key) == {"fingerprint", "calls", "tokens", "calls_left", "tokens_left"}
+            assert len(key["fingerprint"]) == 8  # a name for the key, never the key
+    assert "secretvalue" not in response.text and "sk-" not in response.text
 
 
 def test_the_ingestion_panel_has_counts_and_the_last_audit_rows(env, admin):

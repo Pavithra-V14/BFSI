@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from frontend import messages, render, state
+from frontend import messages, render, state, theme
 from frontend.api import ApiClient, SessionExpired
 from frontend.views import chat as chat_view
 from frontend.views.common import friendly, number
@@ -80,6 +80,7 @@ def render_sidebar(client: ApiClient) -> None:
         if st.button("New chat", key="fx_new_chat", use_container_width=True):
             state.new_chat()
             st.rerun()
+        st.toggle("Dark mode", value=theme.current_theme() == "dark", key=theme.DARK_KEY)
         render.show(render.who("My chats"))
         limit = min(int(st.session_state.get(state.SESSIONS_LIMIT, PAGE)), MAX_LIST)
         reply = client.sessions(limit=limit)

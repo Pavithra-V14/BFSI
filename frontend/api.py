@@ -18,6 +18,9 @@ import httpx
 
 from frontend.config import Settings
 
+DELETE_TIMEOUT_SECONDS = 170.0  # the delete command may take a while (the API waits up to 150 s)
+PURGE_TIMEOUT_SECONDS = 320.0  # the purge may take longer (the API waits up to 300 s)
+
 # Tests put an `httpx.MockTransport` here; the running service leaves it None (real network).
 TRANSPORT: httpx.BaseTransport | None = None
 
@@ -98,14 +101,15 @@ class ApiClient:
         *,
         json: Any = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Reply:
         headers = {"Accept": "application/json"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-        timeout = httpx.Timeout(self._timeout, connect=10.0)
+        limit = httpx.Timeout(self._timeout if timeout is None else timeout, connect=10.0)
         try:
             with httpx.Client(
-                base_url=self._base, timeout=timeout, transport=TRANSPORT, follow_redirects=False
+                base_url=self._base, timeout=limit, transport=TRANSPORT, follow_redirects=False
             ) as client:
                 response = client.request(method, path, json=json, params=params, headers=headers)
         except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -194,6 +198,28 @@ class ApiClient:
 
     def documents(self, limit: int = 50, offset: int = 0) -> Reply:
         return self.request("GET", "/admin/documents", params={"limit": limit, "offset": offset})
+
+    def purge_plan(self) -> Reply:
+        """What a purge would erase (counts only). Admin machine only."""
+        return self.request("GET", "/admin/maintenance/purge-plan")
+
+    def purge(self, phrase: str) -> Reply:
+        """Erase the data on the admin machine (it waits for the command to finish)."""
+        return self.request(
+            "POST",
+            "/admin/maintenance/purge",
+            json={"phrase": phrase},
+            timeout=PURGE_TIMEOUT_SECONDS,
+        )
+
+    def delete_document(self, doc_id: str, confirm_id: str, reason: str) -> Reply:
+        """Delete a document on the admin machine (it waits for the command to finish)."""
+        return self.request(
+            "POST",
+            f"/admin/documents/{doc_id}/delete",
+            json={"confirm_id": confirm_id, "reason": reason},
+            timeout=DELETE_TIMEOUT_SECONDS,
+        )
 
     def entities(self, status: str = "pending", limit: int = 50, offset: int = 0) -> Reply:
         return self.request(

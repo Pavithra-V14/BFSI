@@ -140,3 +140,13 @@ STAGE_TEXT = {
     "open": "Open: everyone sees answers",
 }
 ROLE_TEXT = {"customer": "Customer", "staff": "Staff", "admin": "Admin"}
+
+# The reasons of the Delete button on the Documents screen (the API takes the same fixed list).
+DELETE_REASONS = ("outdated", "incorrect", "compliance", "replaced", "other")
+DELETE_REASON_TEXT = {
+    "outdated": "Outdated: a newer version replaces it",
+    "incorrect": "Incorrect: it contained a mistake",
+    "compliance": "Compliance: it must not be used",
+    "replaced": "Replaced by another document",
+    "other": "Other",
+}

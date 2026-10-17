@@ -32,6 +32,7 @@ from app.api.routes import (
     admin,
     admin_dashboards,
     admin_eval,
+    admin_maintenance,
     admin_ops,
     auth,
     chat,
@@ -113,6 +114,8 @@ def create_app(
     rollout_cache_seconds: float | None = None,
     observability: Any = None,
     evaluation: Any = None,
+    ingest_runner: Callable[[list[str]], Any] | None = None,
+    maintenance_runner: Callable[[list[str]], Any] | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -132,6 +135,9 @@ def create_app(
                 await asyncio.to_thread(sampler.stop)
             if observability is not None:
                 await asyncio.to_thread(observability.stop)
+            tracing = getattr(getattr(pipeline, "deps", None), "langfuse", None)
+            if tracing is not None:  # hands over and flushes what the Langfuse SDK still holds
+                await asyncio.to_thread(tracing.stop)
 
     app = SecureFastAPI(
         title="BFSI assistant API",
@@ -154,6 +160,8 @@ def create_app(
         entity_review_enabled=entity_review_enabled,
         observability=observability,
         evaluation=evaluation,
+        ingest_runner=ingest_runner,
+        maintenance_runner=maintenance_runner,
     )
     svc = app.state.services
     svc.rollout = Rollout(
@@ -182,6 +190,7 @@ def create_app(
     app.include_router(admin.router)
     app.include_router(admin_ops.router)
     app.include_router(admin_dashboards.router)
+    app.include_router(admin_maintenance.router)
     app.include_router(admin_eval.router)
     app.include_router(chat.router)
     app.include_router(sessions.router)
@@ -235,6 +244,7 @@ def create_app_from_env(env: Mapping[str, str] | None = None) -> FastAPI:
     except (ValueError, WebhookConfigError) as error:
         # The message names the variable and the rule, never a value (the address is a secret).
         raise SystemExit(f"refusing to start: {error}") from None
+    observability.key_source = gateway  # the per-key call counts are saved with the other rollups
     printer = printer_from_env(env, running_on_render=running_on_render(env))
     if printer is not None and pipeline is not None:  # DEV_STAGE_TRACE=true, never on Render
         deps = pipeline.deps

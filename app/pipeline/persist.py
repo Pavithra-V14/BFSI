@@ -70,6 +70,7 @@ class PendingTurn:
     assistant_message_id: str | None = None
     attempts: int = 0  # failed tries while the database itself was reachable (see `flush`)
     shadowed: bool = False  # the answer must stay hidden from its user (rollout stage)
+    new_session: bool = False  # `session_id` was handed out by `build_job`: the write creates it
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -109,9 +110,16 @@ def build_job(ctx: PipelineState) -> PendingTurn:
         else None
     )
     entities = match_entities(ctx.pass1.text, ctx.allow) if plan.update_facts and ctx.pass1 else []
+    # A first question gets its conversation id NOW, not when the write ends: the answer must carry
+    # it even when the write fails or is late, or the next question would start another chat.
+    session_id = ctx.request.session_id
+    new_session = session_id is None
+    if new_session:
+        session_id = str(uuid.uuid4())
     return PendingTurn(
         user_id=ctx.request.user_id,
-        session_id=ctx.request.session_id,
+        session_id=session_id,
+        new_session=new_session,
         question=question,
         answer=answer,
         ended_answer=ended,
@@ -176,8 +184,10 @@ def write_turn(db: Any, job: PendingTurn, now: datetime) -> bool:
     ended the exchange (the stored reply is then the fixed ending)."""
     with job.lock:
         if "session" not in job.done:
-            if job.session_id is None:
-                job.session_id = store.create_session(db, job.user_id, now=now)
+            if job.new_session or job.session_id is None:
+                job.session_id = store.create_session(
+                    db, job.user_id, now=now, session_id=job.session_id
+                )
             job.done.add("session")
         sid = job.session_id
         if job.unclear is not None and "unclear" not in job.done:
@@ -245,6 +255,12 @@ class PersistQueue:
                 self._jobs.popleft()
             self._jobs.append(job)
             return dropped
+
+    def has_session(self, user_id: str, session_id: str) -> bool:
+        """True when a turn of this user's conversation is waiting to be written (so the
+        conversation exists for the user even though its row is not in the database yet)."""
+        with self._mutex:
+            return any(j.user_id == user_id and j.session_id == session_id for j in self._jobs)
 
     def _remove(self, job: PendingTurn) -> None:
         with self._mutex:
@@ -331,6 +347,8 @@ def queue_unwritten(ctx: PipelineState, reason: str) -> None:
         return
     ctx.stored_copy = (job.question.text, job.answer.text)
     ctx.drop_raw()
+    if ctx.result is not None:
+        ctx.result.session_id = job.session_id  # the user keeps one conversation id
     dropped = ctx.deps.queue.add(job)
     ctx.emit("persist_queued", reason=reason, queued=len(ctx.deps.queue))
     if dropped:
@@ -353,6 +371,10 @@ async def persist_stage(ctx: PipelineState, span: Span, timeout_s: float) -> Non
     ctx.stored_copy = (job.question.text, job.answer.text)
     ctx.drop_raw()  # the raw question is not needed any more
     now = ctx.deps.now()
+    if ctx.result is not None:
+        # before the write: a write that fails, is late or is cancelled still leaves the answer
+        # with its conversation id, so the next question joins this chat
+        ctx.result.session_id = job.session_id
     # The write runs in a worker thread that a timeout cannot stop. It is tracked so that the
     # session stays locked until it has ended (the answer is still returned at once).
     future = _WRITER.submit(write_turn, ctx.db, job, now)

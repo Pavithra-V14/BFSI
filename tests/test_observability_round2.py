@@ -245,9 +245,13 @@ def test_an_in_process_event_leaves_the_banner_after_a_day(env, admin):
     base = {"now": 1_000_000.0}
     services.clock = lambda: base["now"]
     services.emit("persist_queued", queued=3)
-    assert alerts_body(env, admin)["events"] == [{"name": "persist_queued", "count": 1}]
+    assert alerts_body(env, admin)["events"] == [
+        {"name": "persist_queued", "count": 1, "codes": {}}
+    ]
     base["now"] += 24 * 3600 - 60
-    assert alerts_body(env, admin)["events"] == [{"name": "persist_queued", "count": 1}]
+    assert alerts_body(env, admin)["events"] == [
+        {"name": "persist_queued", "count": 1, "codes": {}}
+    ]
     base["now"] += 120
     body = alerts_body(env, admin)
     assert body["events"] == [] and body["window"] == 0
@@ -294,6 +298,42 @@ def test_the_alerts_section_lists_the_last_day_with_severity_and_no_stale_captio
     captions = " ".join(c.value for c in at.caption)
     assert "survive a restart" in captions and "kept in memory" in captions
     assert "Phase" not in captions
+
+
+def test_each_alert_and_event_has_a_view_reason_box_with_fixed_text_and_the_codes_seen(monkeypatch):
+    recent = [
+        {"name": "graph_failed", "severity": "critical", "count": 2, "notified": True, "at": "t2"}
+    ]
+    reasons = {
+        "graph_failed": {"meaning": "A bug stopped a request.", "action": "Send the class name."},
+        "persist_queued": {"meaning": "A turn is waiting.", "action": "No action."},
+    }
+    events = [{"name": "persist_queued", "count": 3, "codes": {"TimeoutError": 3}}]
+    api = alerts_api(
+        banner=True, critical=["graph_failed"], recent=recent, events=events, reasons=reasons
+    )
+    at = open_section(signed_in(api, monkeypatch, role="admin", username="boss").run(), "Alerts")
+    labels = [e.label for e in at.expander]
+    assert "View reason graph failed" in labels and "View reason persist queued" in labels
+    text = " ".join(c.value for c in at.caption)
+    assert "What it means A bug stopped a request." in text
+    assert "What to do No action." in text
+    assert "Reason codes seen" in text and "TimeoutError" in text
+    assert "A bug stopped a request." in page_text(at)  # also in the table of the last day
+
+
+def test_a_hostile_reason_text_from_the_service_is_shown_as_plain_text(monkeypatch):
+    hostile = "see https://evil.example $x$ :warning: a@evil.example [t](u)"
+    recent = [
+        {"name": "graph_failed", "severity": "critical", "count": 1, "notified": 0, "at": "t"}
+    ]
+    api = alerts_api(
+        recent=recent, reasons={"graph_failed": {"meaning": hostile, "action": hostile}}
+    )
+    at = open_section(signed_in(api, monkeypatch, role="admin", username="boss").run(), "Alerts")
+    text = " ".join(c.value for c in at.caption)
+    for bad in ("https://", "$x$", ":warning:", "a@evil", "](u)", "[t]"):
+        assert bad not in text, bad
 
 
 # ============================================================================ a UTC day (L5) ====

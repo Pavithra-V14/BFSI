@@ -156,6 +156,19 @@ def test_delete_asks_for_the_doc_id_and_does_nothing_otherwise(rig, tmp_path):
     assert rig.points() == {}
 
 
+def test_delete_with_confirm_id_needs_no_prompt_and_a_wrong_id_deletes_nothing(rig, tmp_path):
+    run = Run(rig, tmp_path)
+    run.go(*run.ingest_args())
+
+    def never(prompt):
+        raise AssertionError("the page has no keyboard: the prompt must not be asked")
+
+    assert run.go("delete", "--doc-id", "doc-a", "--confirm-id", "doc-b", confirm=never) == 1
+    assert len(rig.active()) == 3 and any("not confirmed" in line for line in run.out)
+    assert run.go("delete", "--doc-id", "doc-a", "--confirm-id", " doc-a ", confirm=never) == 0
+    assert rig.points() == {}
+
+
 def test_a_delete_with_a_failed_bump_exits_nonzero(rig, tmp_path):
     run = Run(rig, tmp_path)
     run.go(*run.ingest_args())

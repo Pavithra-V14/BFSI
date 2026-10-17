@@ -390,14 +390,12 @@ def test_no_provider_library_is_imported_so_every_model_call_is_the_gateways():
     for path in PIPELINE.glob("*.py"):
         for name in imports_of(path):
             top = name.split(".")[0]
-            if (
-                top == "httpx"
-            ):  # only the Langfuse sink posts anywhere: span records, not a model call
-                http_users.add(path.name)
+            if top == "httpx":  # no pipeline module posts anywhere itself: the Langfuse sink
+                http_users.add(path.name)  # hands its trace to the SDK, which is not a model call
                 continue
             assert top not in FORBIDDEN_FOR_MODEL_CALLS[:-1], (path.name, name)
             assert not name.startswith("app.gateway.backend"), (path.name, name)
-    assert http_users <= {"langfuse_sink.py"}
+    assert http_users == set()
 
 
 def test_the_pipeline_imports_no_ingestion_or_heavy_nlp_package_and_only_retrieval_uses_qdrant():

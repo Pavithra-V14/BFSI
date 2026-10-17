@@ -118,6 +118,13 @@ def test_the_run_uses_its_own_users_per_role_and_never_a_real_account(rig):
     assert names == {"eval_customer", "eval_staff"}
 
 
+def test_a_resumed_run_reuses_the_users_the_scratch_file_already_holds(rig):
+    first = rig.harness.user_for("customer")
+    rig.harness._users.clear()  # a new process on the next day: same scratch file, empty memory
+    assert rig.harness.user_for("customer") == first
+    assert rig.db.query_one("SELECT COUNT(*) FROM users")[0] == 1
+
+
 def test_a_customer_cannot_be_answered_from_the_staff_only_document(rig):
     case, item = run_case(rig, "r01-customer-spread")
     assert "1.85" not in item["answer_text"]

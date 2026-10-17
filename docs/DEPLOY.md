@@ -209,7 +209,7 @@ the admin. Ingesting, deleting and entity approval are done on the **admin machi
 | Job | Where | How |
 |---|---|---|
 | Rollout stage (shadow, staff beta, open), Users and roles, Documents (counts), Review queue, Alerts banner, Dashboards, Evaluation numbers (read-only) | the hosted frontend (its Render address) | sign in as the admin; the sections appear in the sidebar. `ADMIN_MACHINE` is not set on Render and must not be |
-| Ingest and delete a document, restore, snapshots, retention, evaluation runs | the admin machine's terminal | the commands of this guide and `docs/OWNER_RUNS.md`; the browser never starts them |
+| Ingest and delete a document, restore, snapshots, retention, evaluation runs | the admin machine's terminal | the commands of this guide and `docs/OWNER_RUNS.md`; the browser starts none of them, except the **Delete** button of the Documents screen, which works on the admin machine only and runs the same delete command for you (you type the document id) |
 | The words of the ingest and delete commands, shown ready to copy; the entity buttons | a **local** frontend pointed at the Render API | `$env:API_BASE_URL = "https://YOUR-API.onrender.com"; $env:ADMIN_MACHINE = "true"; uv run streamlit run frontend/app.py`. It shows only the admin-machine controls on top of the same sections |
 | Approve or reject an allow-list entity | the admin machine's terminal, **command line only** | `uv run python -m app.ingest review entities --doc-id SLUG`. **The buttons of the local frontend do not work against Render**: the hosted API refuses entity approval whatever the setting (spec 10), so the command line is the only way |
 
@@ -360,6 +360,7 @@ if you want to change the default. A variable left out, or left empty, uses its 
 | `LANGFUSE_SECRET_KEY` | Langfuse project settings | yes | yes | optional |
 | `LANGFUSE_HOST` | Langfuse (your region's address) | no | yes | optional |
 | `LANGFUSE_USER_HASH_KEY` | you make it (a third random key) | yes | yes | optional |
+| `LANGFUSE_SEND_TEXT` | you choose: `true` (default) shows each stage's masked input and output in Langfuse, `false` sends only the metadata | no | no (add it in Render if you want `false`) | optional |
 | `JWT_SECRET_KEY` | you make it (a random key, see .env.example) | yes | yes | required |
 | `AUDIT_HASH_KEY` | you make it (a second, different random key) | yes | yes | required |
 | `JWT_EXPIRE_MINUTES` | optional tuning: leave it out and the default is used | no | no (add it in Render if you want it) | optional |

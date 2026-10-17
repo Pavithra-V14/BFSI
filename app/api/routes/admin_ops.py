@@ -14,20 +14,23 @@ Every list has a default and a maximum page size.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.accounts import audit, users
+from app.api.commands import run_ingest_command
 from app.api.deps import CurrentUser, Page, get_db, is_uuid, page_params, require_admin, services
 from app.api.errors import ApiError
 from app.api.rollout import STAGES, WITHDRAWN_NOTICE
 from app.db import entities as entity_store
 from app.db import review_queue
 from app.db.connection import Database
+from app.observability.reasons import explain, reason_codes
 from app.vector.status import documents_overview
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -317,6 +320,60 @@ def document_status(
     return found[0].as_dict()
 
 
+class DeleteDocumentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_id: str = Field(min_length=1, max_length=64)  # the document id, typed again
+    reason: Literal["outdated", "incorrect", "compliance", "replaced", "other"] = "other"
+
+
+@router.post("/documents/{doc_id}/delete")
+async def delete_document(
+    body: DeleteDocumentBody,
+    request: Request,
+    doc_id: str = Path(max_length=64, pattern=DOC_ID_PATTERN),
+    current: CurrentUser = Depends(require_admin),
+    db: Database = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete a document everywhere (Change round 1, step 4). Only on the admin machine: the same
+    command as `python -m app.ingest delete`, started here as its own process with this machine's
+    settings, after the document id has been typed again. The command keeps all its safeguards
+    (withdrawn record, audit row, chats flagged, originals moved) and may be repeated."""
+    svc = services(request)
+    if svc.on_render:
+        raise ApiError(
+            409, "admin_machine_only", "Documents are deleted on the admin machine only."
+        )
+    if body.confirm_id.strip() != doc_id:
+        raise ApiError(409, "confirmation_mismatch", "The document id typed does not match.")
+    client = svc.vector_client
+    if client is None:
+        raise ApiError(503, "service_unavailable", "The document store is not available.")
+    if not documents_overview(client, doc_id=doc_id):
+        raise _not_found()
+    with db.transaction(write=True):
+        audit.write_audit(
+            db,
+            actor=current.user.id,
+            action="document_delete_request",
+            target=doc_id,
+            details={"reason": body.reason},
+            now=datetime.now(UTC),
+        )
+    runner = svc.ingest_runner or run_ingest_command
+    result = await asyncio.to_thread(
+        runner, ["delete", "--doc-id", doc_id, "--reason", body.reason, "--confirm-id", doc_id]
+    )
+    ok = result.code == 0
+    if not ok:
+        svc.emit("document_delete_failed", code=result.code)
+    return {
+        "doc_id": doc_id,
+        "deleted": ok,
+        "timed_out": bool(getattr(result, "timed_out", False)),
+        "lines": [str(line) for line in result.lines],
+    }
+
+
 @router.get("/entities")
 def list_entities(
     doc_id: str | None = Query(default=None, max_length=64, pattern=DOC_ID_PATTERN),
@@ -420,21 +477,30 @@ def alerts(request: Request, current: CurrentUser = Depends(require_admin)) -> d
     paired = list(zip(svc.events, svc.event_times, strict=False))[-ALERT_WINDOW:]
     events = [item for item, at in paired if at >= cutoff]
     counts: dict[str, int] = {}
-    for name, _fields in events:
+    seen_fields: dict[str, list[dict[str, Any]]] = {}
+    for name, fields in events:
         counts[name] = counts.get(name, 0) + 1
+        seen_fields.setdefault(name, []).append(fields)
     critical = {name for name in counts if name in CRITICAL_ALERTS}
     # The persisted alerts of the last 24 hours (they survive a restart): name, severity, count and
     # time only. A critical one keeps the banner up.
     recent = svc.observability.alerts.recent() if svc.observability is not None else []
     critical |= {a["name"] for a in recent if a["severity"] == "critical"}
     warnings = {a["name"] for a in recent if a["severity"] == "warning"} - critical
+    # A fixed plain-words reason for every name on the screen (never an error message), and, for the
+    # running service's events, how often each reason CODE (a class name or fixed code) was seen.
+    names = set(counts) | critical | warnings | {a["name"] for a in recent}
     return {
         "banner": bool(critical),
         "critical": sorted(critical),
         "warnings": sorted(warnings),
-        "events": [{"name": n, "count": c} for n, c in sorted(counts.items())],
+        "events": [
+            {"name": n, "count": c, "codes": reason_codes(seen_fields.get(n, []))}
+            for n, c in sorted(counts.items())
+        ],
         "window": len(events),
         "recent": recent,
+        "reasons": {name: explain(name) for name in sorted(names)},
     }
 
 

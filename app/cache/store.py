@@ -513,6 +513,35 @@ class CacheStore:
         the same rule as invalidate_chunk."""
         return self._invalidate("invalidate_doc", doc_set_key(doc_id))
 
+    def clear_cached_answers(self) -> int | None:
+        """Remove EVERY cached answer and the reverse sets that list them (the owner's purge).
+        Counters and rate limits are not touched. The corpus version is bumped first, so that an
+        answer written while this runs sits under an old version and can never be found (the same
+        rule as `_invalidate`). Returns how many answers were removed; None means NOT DONE (an
+        alert event was emitted) and running it again finishes the job."""
+        if self.bump_corpus_version() is None:
+            return None
+
+        def work() -> int:
+            removed_answers = 0
+            for prefix in (ANSWER_PREFIX, "chunk:", "doc:"):
+                batch: list[str] = []
+                for key in self._client.scan_iter(
+                    match=self._k(prefix) + "*", count=INVALIDATE_BATCH
+                ):
+                    batch.append(key)
+                    if len(batch) >= INVALIDATE_BATCH:
+                        deleted = int(self._client.delete(*batch))
+                        removed_answers += deleted if prefix == ANSWER_PREFIX else 0
+                        batch = []
+                if batch:
+                    deleted = int(self._client.delete(*batch))
+                    removed_answers += deleted if prefix == ANSWER_PREFIX else 0
+            return removed_answers
+
+        value = self._run("clear_cached_answers", work, staleness=True)
+        return None if value is _FAILED else value
+
     # ---- counters (12.4) ---------------------------------------------------------------
 
     def incr_counter(self, name: str, window_seconds: int, amount: int = 1) -> int | None:

@@ -276,7 +276,8 @@ def test_when_postgres_fails_the_answer_is_returned_and_the_masked_turn_is_queue
     monkeypatch.setattr(store, "create_session", boom)
     user = rig.new_user()
     result = run(rig.ask("My name is Rahul Sharma. " + QUESTION, user=user))
-    assert result.kind == "answer" and result.session_id is None
+    # the answer still carries its conversation id, so the next question joins the same chat
+    assert result.kind == "answer" and result.session_id
     assert "persist_queued" in rig.event_names and len(rig.deps.queue) == 1
     job = rig.deps.queue._jobs[0]
     assert type(job.question) is StoredQuery
@@ -286,6 +287,43 @@ def test_when_postgres_fails_the_answer_is_returned_and_the_masked_turn_is_queue
     assert len(rig.deps.queue) == 0
     texts = [r[0] for r in rig.db.query_all("SELECT content FROM messages WHERE role = 'user'")]
     assert any("[PERSON]" in t for t in texts) and not any("Rahul" in t for t in texts)
+
+
+def test_questions_stay_in_one_chat_when_the_first_write_fails_and_is_queued(rig, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("database down")
+
+    real = store.create_session
+    monkeypatch.setattr(store, "create_session", boom)
+    user = rig.new_user()
+    first = run(rig.ask(QUESTION, user=user))
+    assert first.session_id and len(rig.deps.queue) == 1
+    monkeypatch.setattr(store, "create_session", real)  # Postgres is back
+    second = run(rig.ask(QUESTION + " again", user=user, session_id=first.session_id))
+    assert second.kind == "answer" and second.session_id == first.session_id
+    assert rig.db.query_one("SELECT COUNT(*) FROM sessions")[0] == 1, "one chat, not two"
+    assert rig.db.query_one("SELECT COUNT(*) FROM messages WHERE role = 'user'")[0] == 2
+    assert len(rig.deps.queue) == 0
+
+
+def test_a_chat_whose_first_turn_is_still_queued_is_not_reported_as_gone(rig, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("database down")
+
+    real = store.create_session
+    monkeypatch.setattr(store, "create_session", boom)
+    user = rig.new_user()
+    first = run(rig.ask(QUESTION, user=user))
+    monkeypatch.setattr(store, "create_session", real)
+    monkeypatch.setattr(rig.deps.queue, "flush", lambda *a, **k: 0)  # the flush was too slow
+    second = run(rig.ask(QUESTION + " again", user=user, session_id=first.session_id))
+    assert second.kind == "answer" and second.reason != "not_found"
+    assert "session_pending_in_queue" in rig.event_names
+
+
+def test_a_conversation_that_was_never_queued_is_still_reported_as_gone(rig):
+    result = run(rig.ask(QUESTION, session_id="0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"))
+    assert result.kind == "session_not_found" and result.reason == "not_found"
 
 
 def test_the_queue_is_bounded_and_says_so_when_it_drops_the_oldest():

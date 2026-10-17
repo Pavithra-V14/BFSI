@@ -48,6 +48,17 @@ def _health(gateway: Any) -> dict[str, Any]:
         return {}
 
 
+def _key_usage(gateway: Any) -> dict[str, Any]:
+    """Today's calls and tokens per key (fingerprints), or nothing when the gateway cannot say."""
+    report = getattr(gateway, "key_usage", None)
+    if report is None:
+        return {}
+    try:
+        return dict(report())
+    except Exception:
+        return {}
+
+
 def _hub(request: Request) -> metrics.MetricsHub:
     observability = services(request).observability
     if observability is None:
@@ -81,19 +92,38 @@ def deciders(request: Request, current: CurrentUser = Depends(require_admin)) ->
 @router.get("/keys")
 def keys(request: Request, current: CurrentUser = Depends(require_admin)) -> dict[str, Any]:
     _hub(request)  # the same availability rule as the other panels
-    health = _health(services(request).gateway)
-    return {
-        "providers": [
+    gateway = services(request).gateway
+    health = _health(gateway)
+    usage = _key_usage(gateway)
+    providers = []
+    for name, info in sorted(health.items()):
+        counts = usage.get(name) or {}
+        per_key = [
+            {
+                # a fingerprint is eight hex characters of a hash: it names a key, it is not one
+                "fingerprint": str(k.get("fingerprint", "")),
+                "calls": int(k.get("calls", 0)),
+                "tokens": int(k.get("tokens", 0)),
+                "calls_left": k.get("calls_left"),
+                "tokens_left": k.get("tokens_left"),
+            }
+            for k in counts.get("per_key") or []
+        ]
+        providers.append(
             {
                 "provider": name,
                 "keys": int(info.get("keys", 0)),
                 "cooling": int(info.get("cooling", 0)),
                 "state": str(info.get("state", "")),
                 "tiers": {str(t): str(s) for t, s in (info.get("tiers") or {}).items()},
+                "calls_today": sum(k["calls"] for k in per_key),
+                "tokens_today": sum(k["tokens"] for k in per_key),
+                "daily_calls_per_key": counts.get("daily_calls_per_key"),
+                "daily_tokens_per_key": counts.get("daily_tokens_per_key"),
+                "per_key": per_key,
             }
-            for name, info in sorted(health.items())
-        ]
-    }
+        )
+    return {"providers": providers, "day": datetime.now(UTC).strftime("%Y-%m-%d")}
 
 
 @router.get("/usage")

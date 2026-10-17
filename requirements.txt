@@ -32,3 +32,8 @@ en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_
 # checkpointer and LangChain / LangSmith tracing is switched off in code (the state holds the raw
 # question). Its dependencies are light (about 27 MB, no torch or numpy); they are resolved at install time.
 langgraph==1.2.14
+# Change round 1, step 5: the Langfuse SDK (spec 14). Used ONLY by app/pipeline/langfuse_sink.py, with no
+# decorator, no integration and no automatic capture: every field is set by our own code. It sends
+# OpenTelemetry spans to Langfuse (the legacy ingestion API it replaces stops on Langfuse Cloud on
+# 2026-11-16). Version 4.16.0 is the newest release that is more than two weeks old.
+langfuse==4.16.0

@@ -234,6 +234,40 @@ def test_a_failing_call_writes_nothing_and_prints_the_class_only(tmp_path):
     assert env["COHERE_API_KEY"] not in shown and not list(tmp_path.iterdir())
 
 
+class ProviderError(Exception):
+    status_code = 503
+
+
+def test_explain_prints_a_scrubbed_detail_and_without_it_only_the_class(tmp_path):
+    secret = made_up_key()
+    other = "Auth" + "orization: " + "Bear" + "er " + "abcdefghijklmnopqrstuvwxyz0123456789"
+
+    async def failing(k):
+        raise ProviderError(
+            f"POST https://example.test/v1/embed?key={secret} failed; {other}; "
+            f"body {'x' * 40}; model gemini-embedding-2 not found"
+        )
+
+    env = keys(COHERE_API_KEY=secret)
+    plain = Lines()
+    record_cassettes.main(
+        ["--run", "--only", "cohere_rerank"], env, out=plain, folder=tmp_path,
+        scenarios={"cohere_rerank": failing},
+    )  # fmt: skip
+    assert "detail" not in "\n".join(plain)
+    out = Lines()
+    status = record_cassettes.main(
+        ["--run", "--only", "cohere_rerank", "--explain"], env, out=out, folder=tmp_path,
+        scenarios={"cohere_rerank": failing},
+    )  # fmt: skip
+    shown = "\n".join(out)
+    assert status == 1 and "detail: ProviderError status=503" in shown
+    assert secret not in shown and "abcdefghijklmnopqrstuvwxyz" not in shown
+    assert "x" * 30 not in shown and "?key=" not in shown
+    assert "gemini-embedding-2 not found" in shown, "the useful words stay"
+    assert not list(tmp_path.iterdir())
+
+
 def test_a_recording_that_breaks_the_hygiene_rules_is_deleted(tmp_path):
     async def leaky(k):
         tools.cassette_path("cohere_rerank").write_text(

@@ -71,7 +71,7 @@ def test_it_sends_the_trace_and_prints_only_sent(tmp_path, capsys):
     for value in values.values():
         assert value not in out  # no key, no host, no value
     assert "waiting period" not in out.lower() and "30 days" not in out
-    assert exporter.events and exporter.events[0]["type"] == "trace-create"
+    assert exporter.records and exporter.records[0].trace_id and exporter.records[0].spans
 
 
 def test_a_failure_prints_only_the_exception_type(tmp_path, capsys):

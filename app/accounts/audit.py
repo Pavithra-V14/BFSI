@@ -44,6 +44,9 @@ AUDITED_ACTIONS = frozenset(
         "retention_sweep",  # the 90-day chat sweep
         "audit_purge",  # the 30-day purge of audit, alert and hourly metric rows
         "evaluation_run",  # an evaluation run estimated or started from the admin page (Phase 13)
+        "document_delete_request",  # the admin page started a document delete (Change round 1)
+        "purge_all_request",  # the admin page started the purge of all data (Change round 1)
+        "purge_all",  # the data was erased by the owner's purge command (Change round 1)
     }
 )
 

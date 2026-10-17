@@ -143,13 +143,20 @@ class Harness:
 
     def user_for(self, role: str) -> str:
         if role not in self._users:
-            user_id = str(uuid.uuid4())
+            # the scratch file lasts across days: a resumed run finds the user of an earlier day
             with self.db.transaction(write=True):
-                self.db.execute(
-                    "INSERT INTO users (id, username, email, password_hash, role) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, f"eval_{role}", f"eval_{role}@eval.invalid", "!", role),
+                found = self.db.query_one(
+                    "SELECT id FROM users WHERE username = ?", (f"eval_{role}",)
                 )
+                if found:
+                    user_id = str(found[0])
+                else:
+                    user_id = str(uuid.uuid4())
+                    self.db.execute(
+                        "INSERT INTO users (id, username, email, password_hash, role) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (user_id, f"eval_{role}", f"eval_{role}@eval.invalid", "!", role),
+                    )
             self._users[role] = user_id
         return self._users[role]
 

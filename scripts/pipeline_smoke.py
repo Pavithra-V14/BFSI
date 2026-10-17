@@ -18,9 +18,11 @@ Run it in your own terminal:
     uv run python scripts/pipeline_smoke.py --run --with-cache
     uv run python scripts/pipeline_smoke.py --run --langfuse
     uv run python scripts/pipeline_smoke.py --run --load-env
-With --langfuse the trace of this one question (span records only: stage names, timings, models,
-key fingerprints, token counts, flags; never the question, the answer or any text) is sent to YOUR
-Langfuse with your own keys, and the script prints only "SENT", or the exception type if it failed.
+With --langfuse the trace of this one question (one observation per stage, with its input, output
+and metadata: the MASKED stored question and answer, the retrieved passages, stage names, timings,
+models, key fingerprints, token counts and flags; never the raw question) is sent through the
+Langfuse SDK to YOUR Langfuse with your own keys, and the script prints only "SENT", or the
+exception type if it failed.
 It needs LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST and LANGFUSE_USER_HASH_KEY.
 
 What it touches, in plain words:

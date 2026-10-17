@@ -36,6 +36,11 @@ def _percent(value: Any) -> str:
         return "0.0 %"
 
 
+def _limit(value: Any) -> Any:
+    """A daily limit or what is left of it; 'not set' when the provider has no configured limit."""
+    return "not set" if value is None else value
+
+
 def _chart(rows: list[dict[str, Any]], x: str, y: str) -> None:
     """A bar chart of rows, drawn only when there is something to draw."""
     clean = [{x: render.safe_text(r.get(x)), y: float(r.get(y) or 0)} for r in rows]
@@ -88,8 +93,9 @@ def key_pools(client: ApiClient) -> None:
     data = _load(client.dash_keys())
     if data is None:
         return
-    render.show(render.who("Key-pool health"))
+    render.show(render.who("Key pools"))
     providers = data.get("providers") or []
+    st.metric("Keys in all pools", sum(number(p.get("keys")) for p in providers))
     _table(
         [
             {
@@ -97,11 +103,37 @@ def key_pools(client: ApiClient) -> None:
                 "state": p.get("state"),
                 "keys": p.get("keys"),
                 "cooling down": p.get("cooling"),
+                "calls today": p.get("calls_today"),
+                "tokens today": p.get("tokens_today"),
+                "daily calls per key": _limit(p.get("daily_calls_per_key")),
+                "daily tokens per key": _limit(p.get("daily_tokens_per_key")),
             }
             for p in providers
         ]
     )
-    st.caption("Only counts are shown: a key is never shown, not even a fingerprint.")
+    render.show(render.who("Each key, today"))
+    _table(
+        [
+            {
+                "provider": p.get("provider"),
+                "key": position,
+                "fingerprint": k.get("fingerprint"),
+                "calls today": k.get("calls"),
+                "calls left today": _limit(k.get("calls_left")),
+                "tokens today": k.get("tokens"),
+                "tokens left today": _limit(k.get("tokens_left")),
+            }
+            for p in providers
+            for position, k in enumerate(p.get("per_key") or [], start=1)
+        ]
+    )
+    render.caption(f"Counts of the UTC day {data.get('day')}.")
+    st.caption(
+        "A day starts at 00:00 UTC, which may not be when a provider resets its own limit. "
+        "A key is never shown: the fingerprint is eight characters of a hash that only names it "
+        "(the same name the key inventory script prints). 'not set' means no daily limit is "
+        "configured for that provider."
+    )
 
 
 def tokens_and_cost(client: ApiClient) -> None:

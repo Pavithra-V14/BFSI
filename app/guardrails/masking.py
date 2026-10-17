@@ -197,6 +197,14 @@ _VERHOEFF_P = (
 )  # fmt: skip
 
 
+def looks_personal(text: str) -> bool:
+    """True when text that is already masked still holds something that looks like an e-mail
+    address, a phone number or a PAN, Aadhaar or passport number. A last check before masked text
+    goes to a trace: the masker should have removed all of these, so a hit is a reason to withhold
+    the text, never to send it."""
+    return any(p.search(text) for p in (_EMAIL, _PHONE, _PAN, _AADHAAR, _PASSPORT))
+
+
 def verhoeff_ok(number: str) -> bool:
     """The checksum of an Aadhaar number (it rejects most random 12-digit strings)."""
     check = 0

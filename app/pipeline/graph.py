@@ -235,9 +235,17 @@ async def local_scan_stage(ctx: PipelineState, span: Span, limit: float) -> None
                 ctx, deadline, load_session, ctx.db, ctx.request.user_id, ctx.request.session_id
             )
         except SessionNotFound:
-            ctx.exited = "local_scan"
-            ctx.result = Result("session_not_found", messages.SESSION_NOT_FOUND, reason="not_found")
-            return
+            if ctx.deps.queue.has_session(ctx.request.user_id, ctx.request.session_id):
+                # the first turn of this chat is still queued (the database was down or slow): the
+                # conversation exists, it just has no stored history yet
+                ctx.first_message = True
+                ctx.emit("session_pending_in_queue")
+            else:
+                ctx.exited = "local_scan"
+                ctx.result = Result(
+                    "session_not_found", messages.SESSION_NOT_FOUND, reason="not_found"
+                )
+                return
         except Exception as error:  # Postgres down for a resume: go on without the history
             ctx.first_message = False
             ctx.emit("session_unavailable", reason=type(error).__name__)

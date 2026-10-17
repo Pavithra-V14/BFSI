@@ -167,10 +167,14 @@ def owned_session(
     return row
 
 
-def create_session(db: Database, user_id: str, *, now: datetime) -> str:
+def create_session(
+    db: Database, user_id: str, *, now: datetime, session_id: str | None = None
+) -> str:
+    """`session_id`: the id the answer already carries (the persist stage hands one out before the
+    write, so a write that fails or is late still leaves the user with a conversation id)."""
     require_user(user_id)
     stamp = utc_text(require_aware(now))
-    session_id = str(uuid.uuid4())
+    session_id = session_id or str(uuid.uuid4())
     with db.transaction():
         db.execute(
             "INSERT INTO sessions (id, user_id, created_at, last_active_at) VALUES (?, ?, ?, ?)",

@@ -11,6 +11,7 @@ Nothing here is on the request path except `observe` (a few list appends) and `q
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -19,7 +20,7 @@ from typing import Any
 
 from app.db.connection import Database
 from app.observability import alerts as alerts_module
-from app.observability import metrics, traces
+from app.observability import key_usage, metrics, traces
 from app.observability.webhook import sender_from_env
 from app.pipeline import langfuse_sink
 
@@ -57,6 +58,8 @@ class Observability:
         self.trace_key = trace_key
         self._on_event = on_event
         self._now = now or (lambda: datetime.now(UTC))
+        # the gateway (or a fake): counts each key's calls; set by the API after both are built
+        self.key_source: Any | None = None
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -122,6 +125,35 @@ class Observability:
             db.close()
         return written
 
+    def save_key_usage_once(self) -> int:
+        """Save the per-key call counts the gateway holds. Returns the rows written."""
+        source = self.key_source
+        if source is None:
+            return 0
+        taken = source.take_key_usage()
+        if not taken:
+            return 0
+        try:
+            db = self._db_factory()
+            try:
+                return key_usage.add_usage(db, taken)
+            finally:
+                db.close()
+        except Exception:
+            source.restore_key_usage(taken)  # not saved: they join the next pass
+            raise
+
+    def seed_key_usage(self) -> None:
+        """Today's saved counts become the start of today's counts in the gateway (once)."""
+        source = self.key_source
+        if source is None:
+            return
+        db = self._db_factory()
+        try:
+            source.seed_key_usage(key_usage.load_day(db, self._now().strftime("%Y-%m-%d")))
+        finally:
+            db.close()
+
     def check_retention_once(self) -> bool:
         """True when the scheduled retention task looks overdue, and then raises the warning
         `retention_overdue`. The task writes one `retention_sweep` row every time it runs; the
@@ -177,11 +209,13 @@ class Observability:
             return
         try:
             self.seed_tokens()
+            self.seed_key_usage()
         except Exception as error:  # a down database must not stop the service from starting
             self._event("observability_failed", {"reason": type(error).__name__})
         self.alerts.start()
         for target, seconds, name in (
             (self.rollup_once, ROLLUP_SECONDS, "rollup-writer"),
+            (self.save_key_usage_once, ROLLUP_SECONDS, "key-usage-writer"),
             (self.process_traces_once, TRACE_SECONDS, "trace-deleter"),
             (self.check_retention_once, RETENTION_CHECK_SECONDS, "retention-check"),
         ):
@@ -219,6 +253,8 @@ class Observability:
             self.flush_pending()  # the last increments
         except Exception:
             pass
+        with contextlib.suppress(Exception):
+            self.save_key_usage_once()
 
 
 def from_env(
