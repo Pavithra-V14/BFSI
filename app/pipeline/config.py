@@ -26,6 +26,23 @@ NODE_LIMITS: dict[str, tuple[float, float]] = {
     "persist": (3.0, 0.3),
 }
 
+# On a machine that is NOT on Render (the owner's own PC, checking the service live) the stores are
+# far away: the cache lookup is three network calls in a row (the corpus version, the entry, the
+# Qdrant read-back that verifies a hit) and one second is not enough, so a valid hit never gets
+# served. A hit saves about four seconds, so the local limit is longer. On Render the API is meant
+# to run next to its stores and the limit stays at one second. [T]
+LOCAL_CACHE_LOOKUP_SECONDS = 2.5
+
+
+def node_limits_for(on_render: bool) -> dict[str, tuple[float, float]]:
+    """The node limits of this deployment: the standard ones on Render, and a longer cache lookup
+    everywhere else."""
+    limits = dict(NODE_LIMITS)
+    if not on_render:
+        limits["cache_lookup"] = (LOCAL_CACHE_LOOKUP_SECONDS, NODE_LIMITS["cache_lookup"][1])
+    return limits
+
+
 # The network parts of authenticate and local_scan each get their own slice inside the node's
 # timeout, so that a slow Upstash or Postgres degrades (fails open) instead of using the whole node.
 # [P] (spec 4.5). The slice is also capped by what is left of the node.
