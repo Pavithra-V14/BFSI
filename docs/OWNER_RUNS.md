@@ -110,6 +110,7 @@ never set.)
 | 43 | The Delete button of the Documents screen, on a throw-away document | Change round 1, step 4 | pending: owner to confirm | after Run 42 and Run 8 to 12 | no (you run it yourself; it may use free-tier calls) |
 | 44 | The purge of all data: a dry run, then (only when you mean it) the real one | Change round 1, step 6 | pending: owner to confirm | after Run 43 | no (you run it yourself; the real purge cannot be undone) |
 | 45 | The Dark mode switch: look at both themes on every screen | Change round 1, step 7 | pending: owner to confirm | after Run 17 | no (you run it yourself) |
+| 46 | The chat is saved in one step (one-transaction persist): shorter persist stage | Latency work | pending: owner to confirm | after Run 40 | no (you run it yourself; it may use free-tier calls) |
 
 How to read the table. **Status** is "done" with the date, or "pending: owner to confirm": until
 you tell me which runs you have done, every run from 8 onward is shown as pending and nothing is
@@ -2369,6 +2370,30 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
   wrong in your Streamlit version, send back the screen's name and which theme: it is a CSS fix.
 - **Send back:** for each screen and theme: fine, or a short note of what looks wrong.
 - **Real calls:** none. **Safe to repeat:** yes.
+
+## Run 46. The chat is saved in one step (one-transaction persist): PENDING
+
+- **Verifies:** that the `persist` stage now writes a whole turn (the chat, your question, the
+  answer, the chat's facts and any review row) in ONE database step, so it is shorter on your
+  machine (the database is far away) and a half-saved turn can no longer exist.
+- **Before it:** Run 16 and Run 40 (the API and the frontend run locally against your own Neon
+  database; Langfuse is on if you want the timings).
+- **Needs:** the settings of Run 16. No new variable.
+- **Steps.**
+  1. Start the API and the frontend as in Run 16. Sign in as a customer, click **New chat**, and ask
+     three questions in a row.
+  2. In Langfuse open the three traces and note the time of the `persist` stage of each (before the
+     change it was about 2.8 s on your machine).
+  3. In Neon's SQL editor run `SELECT seq, role FROM messages ORDER BY created_at DESC LIMIT 6;`
+     (no text is shown). Each chat must show seq 1, 2, 3, 4, 5, 6 with roles user, assistant,
+     user, assistant, user, assistant, and no number twice.
+- **You should see:** `persist` clearly shorter than 2.8 s (roughly half), no `persist_queued`
+  alert, and the rows as above.
+- **If it differs:** a `persist` time that did not change, a number twice, or a question without
+  its answer. Send back the three `persist` times and the six rows (seq and role only).
+- **Send back:** the three persist times and the rows from step 3.
+- **How to clear:** delete the test chats in "My chats".
+- **Real calls:** about 3 answers (a few free-tier model calls each). **Safe to repeat:** yes.
 
 ---
 

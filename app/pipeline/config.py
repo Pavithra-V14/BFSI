@@ -23,7 +23,7 @@ NODE_LIMITS: dict[str, tuple[float, float]] = {
     "retrieve": (4.0, 1.0),
     "rerank": (6.0, 1.5),
     "generate": (12.0, 6.0),
-    "persist": (3.0, 0.3),
+    "persist": (6.0, 0.3),
 }
 
 # On a machine that is NOT on Render (the owner's own PC, checking the service live) the stores are
@@ -32,15 +32,28 @@ NODE_LIMITS: dict[str, tuple[float, float]] = {
 # served. A hit saves about four seconds, so the local limit is longer. On Render the API is meant
 # to run next to its stores and the limit stays at one second. [T]
 LOCAL_CACHE_LOOKUP_SECONDS = 2.5
+# The same reason holds for the steps before it: from the owner's PC one Neon or Upstash call takes
+# 0.4 to 0.6 s, so with a 0.4 s slice the allow-list, the session history and the budget check all
+# timed out on every request (no history, so no rewrite and no summary). Longer limits for these
+# nodes and a longer slice, off Render only. [T]
+LOCAL_NODE_SECONDS = {"authenticate": 3.0, "local_scan": 4.0}
+LOCAL_SLICE_SECONDS = 2.0
 
 
 def node_limits_for(on_render: bool) -> dict[str, tuple[float, float]]:
-    """The node limits of this deployment: the standard ones on Render, and a longer cache lookup
-    everywhere else."""
+    """The node limits of this deployment: the standard ones on Render, and longer ones for the
+    cache lookup, authenticate and local_scan everywhere else."""
     limits = dict(NODE_LIMITS)
     if not on_render:
         limits["cache_lookup"] = (LOCAL_CACHE_LOOKUP_SECONDS, NODE_LIMITS["cache_lookup"][1])
+        for node, seconds in LOCAL_NODE_SECONDS.items():
+            limits[node] = (seconds, NODE_LIMITS[node][1])
     return limits
+
+
+def slice_seconds_for(on_render: bool) -> float:
+    """The own time slice of one network call in a local node: 0.4 s on Render, 2 s elsewhere."""
+    return SLICE_SECONDS if on_render else LOCAL_SLICE_SECONDS
 
 
 # The network parts of authenticate and local_scan each get their own slice inside the node's

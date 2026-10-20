@@ -11,9 +11,12 @@ from qdrant_client import QdrantClient
 from app.cache.store import CacheStore
 from app.pipeline.config import (
     LOCAL_CACHE_LOOKUP_SECONDS,
+    LOCAL_SLICE_SECONDS,
     NODE_LIMITS,
+    SLICE_SECONDS,
     PipelineConfig,
     node_limits_for,
+    slice_seconds_for,
 )
 
 
@@ -22,12 +25,22 @@ def test_on_render_the_limits_are_the_standard_ones():
     assert node_limits_for(True)["cache_lookup"][0] == 1.0
 
 
-def test_everywhere_else_only_the_cache_lookup_is_longer():
+LONGER_LOCALLY = ("cache_lookup", "authenticate", "local_scan")
+
+
+def test_everywhere_else_only_the_store_nodes_are_longer():
     local = node_limits_for(False)
     assert local["cache_lookup"][0] == LOCAL_CACHE_LOOKUP_SECONDS == 2.5
-    assert local["cache_lookup"][1] == NODE_LIMITS["cache_lookup"][1]  # the same minimum to start
-    others = {name: limit for name, limit in local.items() if name != "cache_lookup"}
-    assert others == {n: v for n, v in NODE_LIMITS.items() if n != "cache_lookup"}
+    assert local["authenticate"][0] == 3.0 and local["local_scan"][0] == 4.0
+    for name in LONGER_LOCALLY:
+        assert local[name][1] == NODE_LIMITS[name][1]  # the same minimum to start
+    others = {name: limit for name, limit in local.items() if name not in LONGER_LOCALLY}
+    assert others == {n: v for n, v in NODE_LIMITS.items() if n not in LONGER_LOCALLY}
+
+
+def test_a_network_call_gets_two_seconds_locally_and_four_tenths_on_render():
+    assert slice_seconds_for(False) == LOCAL_SLICE_SECONDS == 2.0
+    assert slice_seconds_for(True) == SLICE_SECONDS == 0.4
 
 
 def test_the_standard_table_is_not_changed_by_asking_for_the_local_one():
@@ -89,5 +102,12 @@ def test_a_service_on_render_keeps_the_one_second_limit(build):
 def test_the_other_limits_are_the_same_in_both(build):
     local, hosted = build(), build(RENDER="true")
     for name in NODE_LIMITS:
-        if name != "cache_lookup":
+        if name not in LONGER_LOCALLY:
             assert local.limits_for(name) == hosted.limits_for(name), name
+
+
+def test_the_service_uses_the_slice_of_where_it_runs(build):
+    assert build().slice_seconds == 2.0
+    assert build(RENDER="true").slice_seconds == 0.4
+    assert build().limits_for("local_scan")[0] == 4.0
+    assert build(RENDER="true").limits_for("local_scan")[0] == 2.0

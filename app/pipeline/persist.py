@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -179,64 +181,96 @@ def _write_review(db: Any, job: PendingTurn, now: datetime) -> None:
         )
 
 
-def write_turn(db: Any, job: PendingTurn, now: datetime) -> bool:
-    """Write the turn, step by step and at most once each. Returns True when this unclear turn
-    ended the exchange (the stored reply is then the fixed ending)."""
-    with job.lock:
-        if "session" not in job.done:
-            if job.new_session or job.session_id is None:
-                job.session_id = store.create_session(
-                    db, job.user_id, now=now, session_id=job.session_id
-                )
-            job.done.add("session")
+STEPS = ("session", "unclear", "user", "assistant", "facts", "review")
+WRITE_ATTEMPTS = store.MAX_SEQ_RETRIES
+
+
+def _write_in_one_transaction(db: Any, job: PendingTurn, now: datetime) -> tuple[bool, str, str]:
+    """The whole turn in ONE transaction: the session (when it is new), the unclear-turn count, the
+    user message, the answer, the session facts and the review row. One commit instead of one per
+    step, no second look at a session that was just checked, and the answer's number is the one
+    after the question's. Returns (the unclear turn ended the chat, the answer's message id, the
+    session id). Nothing is changed on the job here: a failure rolls everything back."""
+    with db.transaction(write=True):
         sid = job.session_id
-        if job.unclear is not None and "unclear" not in job.done:
+        checked = False  # has this transaction already seen that the session is the user's?
+        if job.new_session or sid is None:
+            sid = store.create_session(db, job.user_id, now=now, session_id=job.session_id)
+            checked = True
+        ended = False
+        if job.unclear is not None:
             outcome = record_turn(db, job.user_id, sid, unclear=job.unclear, now=now)
-            job.ended = bool(outcome.ended and job.ended_answer is not None)
-            job.done.add("unclear")
-        if "user" not in job.done:
-            store.add_user_message(
-                db, job.user_id, sid, job.question, now=now, history_excluded=job.history_excluded
+            ended = bool(outcome.ended and job.ended_answer is not None)
+            checked = True
+        question = store.add_user_message(
+            db,
+            job.user_id,
+            sid,
+            job.question,
+            now=now,
+            history_excluded=job.history_excluded,
+            owned=checked,
+        )
+        follow = {"seq": question.seq + 1, "owned": True}
+        if ended and job.ended_answer is not None:
+            message = store.add_fixed_reply(
+                db, job.user_id, sid, job.ended_answer, now=now, shadowed=job.shadowed, **follow
             )
-            job.done.add("user")
-        if "assistant" not in job.done:
-            if job.ended and job.ended_answer is not None:
-                message = store.add_fixed_reply(
-                    db, job.user_id, sid, job.ended_answer, now=now, shadowed=job.shadowed
-                )
-            elif job.fixed:
-                message = store.add_fixed_reply(
-                    db, job.user_id, sid, job.answer, now=now, shadowed=job.shadowed
-                )
-            else:
-                message = store.add_assistant_message(
-                    db,
-                    job.user_id,
-                    sid,
-                    job.answer,
-                    citations=job.citations,
-                    grounded=job.grounded,
-                    now=now,
-                    shadowed=job.shadowed,
-                )
-            job.assistant_message_id = message.id
-            job.done.add("assistant")
-        if "facts" not in job.done:
-            if job.product_line or job.topic or job.entities:
-                update_facts(
-                    db,
-                    job.user_id,
-                    sid,
-                    product_line=job.product_line,
-                    topic=job.topic,
-                    entities=job.entities,
-                )
-            job.done.add("facts")
-        if "review" not in job.done:
-            if job.review_reason:
-                _write_review(db, job, now)
-            job.done.add("review")
-        return job.ended
+        elif job.fixed:
+            message = store.add_fixed_reply(
+                db, job.user_id, sid, job.answer, now=now, shadowed=job.shadowed, **follow
+            )
+        else:
+            message = store.add_assistant_message(
+                db,
+                job.user_id,
+                sid,
+                job.answer,
+                citations=job.citations,
+                grounded=job.grounded,
+                now=now,
+                shadowed=job.shadowed,
+                **follow,
+            )
+        if job.product_line or job.topic or job.entities:
+            update_facts(
+                db,
+                job.user_id,
+                sid,
+                product_line=job.product_line,
+                topic=job.topic,
+                entities=job.entities,
+            )
+        if job.review_reason:
+            # the review row is linked to the stored reply (both are undone if the write fails)
+            job.session_id, job.assistant_message_id = sid, message.id
+            _write_review(db, job, now)
+    return ended, message.id, sid
+
+
+def write_turn(db: Any, job: PendingTurn, now: datetime) -> bool:
+    """Write the turn in one transaction. Returns True when this unclear turn ended the exchange
+    (the stored reply is then the fixed ending). All or nothing: a failure leaves no half-written
+    turn, so a retry starts clean and nothing is ever written twice. Another writer taking the
+    next message number (Postgres) makes the whole write retry after a short random wait."""
+    with job.lock:
+        if "committed" in job.done:
+            return job.ended
+        before = (job.session_id, job.assistant_message_id)
+        for attempt in range(WRITE_ATTEMPTS):
+            try:
+                ended, message_id, session_id = _write_in_one_transaction(db, job, now)
+            except Exception as error:
+                job.session_id, job.assistant_message_id = before  # undone with the rollback
+                if store.is_unique_violation(error) and attempt + 1 < WRITE_ATTEMPTS:
+                    time.sleep(random.uniform(0, store.SEQ_BACKOFF_SECONDS * (attempt + 1)))
+                    continue
+                raise
+            job.ended, job.assistant_message_id, job.session_id = ended, message_id, session_id
+            job.done.update(STEPS)
+            job.done.add("committed")
+            return job.ended
+        return job.ended  # not reached: the last attempt raises
 
 
 class PersistQueue:

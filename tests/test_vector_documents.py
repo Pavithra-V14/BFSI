@@ -45,6 +45,8 @@ def test_payload_indexes_cover_every_filter_field_of_section_7():
     assert {"access_role", "effective_to", "product_line", "clause_type"} <= fields
     assert {"doc_id", "chunk_id"} <= fields  # the cache check and the delete flow look up by id
     types = dict(PAYLOAD_INDEXES)
+    # the start-up check and the sparse refresh filter on it (a number in the payload)
+    assert types["sparse_version"] == models.PayloadSchemaType.INTEGER
     assert types["effective_to"] == models.PayloadSchemaType.DATETIME
     assert types["access_role"] == models.PayloadSchemaType.KEYWORD
 

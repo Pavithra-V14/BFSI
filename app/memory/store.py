@@ -317,16 +317,23 @@ def _add_message(
     now: datetime,
     shadowed: bool = False,
     fixed_reply: bool = False,
+    seq: int | None = None,
+    owned: bool = False,
 ) -> StoredMessage:
+    """`seq` is the number to try first (the one after the message just written in the same
+    transaction): the unique rule on (session, seq) is still the judge. `owned=True` says the caller
+    has just checked, in this transaction, that the session is the user's and open."""
     if not text.strip():
         raise ValueError("a message cannot be empty")
     stamp = utc_text(require_aware(now))
-    owned_session(db, user_id, session_id, writable=True)
+    if not owned:
+        owned_session(db, user_id, session_id, writable=True)
+    nested = db.in_transaction  # a larger transaction is open: the caller retries the whole write
     title = " ".join(text.split())[:TITLE_CHARACTERS] if role == "user" else None
     # never backwards: a late write from a slow request must not make the chat look older
     newest = "GREATEST(last_active_at, ?)" if db.kind == "postgres" else "MAX(last_active_at, ?)"
     for attempt in range(MAX_SEQ_RETRIES):
-        seq = _next_seq(db, session_id)
+        number = seq if (seq is not None and attempt == 0) else _next_seq(db, session_id)
         message_id = str(uuid.uuid4())
         try:
             with db.transaction():
@@ -337,7 +344,7 @@ def _add_message(
                     (
                         message_id,
                         session_id,
-                        seq,
+                        number,
                         role,
                         text,
                         json.dumps(citations, sort_keys=True),
@@ -355,13 +362,15 @@ def _add_message(
                 )
         except Exception as error:
             if is_unique_violation(error):
+                if nested:
+                    raise  # a spoiled open transaction is rolled back and the caller retries
                 # another writer took this number: wait a little, at random, then read a fresh one
                 time.sleep(random.uniform(0, SEQ_BACKOFF_SECONDS * (attempt + 1)))
                 continue
             raise
         return StoredMessage(
             message_id,
-            seq,
+            number,
             role,
             text,
             tuple(citations),
@@ -383,13 +392,25 @@ def add_user_message(
     *,
     now: datetime,
     history_excluded: bool = False,
+    seq: int | None = None,
+    owned: bool = False,
 ) -> StoredMessage:
     """`history_excluded=True` for a question that tripped the injection scan or whose answer was
     a refusal: it is kept in the transcript and never feeds history or the summary."""
     if not is_minted(stored, StoredQuery):
         raise TypeError("a user message must be a StoredQuery (made by mask_for_storage)")
     return _add_message(
-        db, user_id, session_id, "user", stored.text, [], None, bool(history_excluded), now
+        db,
+        user_id,
+        session_id,
+        "user",
+        stored.text,
+        [],
+        None,
+        bool(history_excluded),
+        now,
+        seq=seq,
+        owned=owned,
     )
 
 
@@ -403,6 +424,8 @@ def add_assistant_message(
     grounded: bool,
     now: datetime,
     shadowed: bool = False,
+    seq: int | None = None,
+    owned: bool = False,
 ) -> StoredMessage:
     if not is_minted(stored, StoredAnswer):
         raise TypeError("an assistant message must be a StoredAnswer (made by mask_for_storage)")
@@ -419,6 +442,8 @@ def add_assistant_message(
         False,
         now,
         shadowed=bool(shadowed),
+        seq=seq,
+        owned=owned,
     )
 
 
@@ -430,6 +455,8 @@ def add_fixed_reply(
     *,
     now: datetime,
     shadowed: bool = False,
+    seq: int | None = None,
+    owned: bool = False,
 ) -> StoredMessage:
     """A fixed reply (a greeting, the unclear-turn ending, a refusal, the low-confidence text):
     always `grounded = False` and never cited, so it can never feed history."""
@@ -447,6 +474,8 @@ def add_fixed_reply(
         now,
         shadowed=bool(shadowed),
         fixed_reply=True,
+        seq=seq,
+        owned=owned,
     )
 
 

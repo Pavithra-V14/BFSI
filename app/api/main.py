@@ -315,7 +315,7 @@ def _build_pipeline(
     from app.gateway.tokens import TokenCounter
     from app.guardrails.domains import curated_domains
     from app.pipeline import langfuse_sink
-    from app.pipeline.config import PipelineConfig, node_limits_for
+    from app.pipeline.config import PipelineConfig, node_limits_for, slice_seconds_for
     from app.pipeline.run import Pipeline
     from app.pipeline.startup import MaskerHolder
     from app.pipeline.state import Deps
@@ -333,7 +333,10 @@ def _build_pipeline(
         masker=holder,
         counter=TokenCounter(),
         usage=limits,
-        config=PipelineConfig(node_limits=node_limits_for(running_on_render(env))),
+        config=PipelineConfig(
+            node_limits=node_limits_for(running_on_render(env)),
+            slice_seconds=slice_seconds_for(running_on_render(env)),
+        ),
         curated_domains=curated_domains(env),
         langfuse=sink,
     )

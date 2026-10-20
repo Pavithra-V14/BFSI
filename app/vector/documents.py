@@ -55,6 +55,9 @@ PAYLOAD_INDEXES: tuple[tuple[str, models.PayloadSchemaType], ...] = (
     ("doc_id", models.PayloadSchemaType.KEYWORD),
     ("chunk_id", models.PayloadSchemaType.KEYWORD),
     ("content_type", models.PayloadSchemaType.KEYWORD),
+    # the start-up check and the sparse refresh count chunks by it; Qdrant Cloud refuses a filter on
+    # a field that has no index
+    ("sparse_version", models.PayloadSchemaType.INTEGER),
 )
 
 
