@@ -209,6 +209,7 @@ class Gateway:
             "gemini": self._pool("gemini", c.gemini_keys, "GEMINI"),
             "openrouter": self._pool("openrouter", c.openrouter_keys, "OPENROUTER"),
             "eval_openrouter": self._pool("eval_openrouter", c.eval_openrouter_keys, "OPENROUTER"),
+            "eval_judge_groq": self._pool("eval_judge_groq", c.eval_judge_groq_keys, "GROQ"),
             "gemini_embedding": self._pool(
                 "gemini_embedding", c.embedding_keys, "EMBEDDING", "ordered"
             ),
@@ -264,8 +265,15 @@ class Gateway:
         return unique
 
     def judge_steps(self) -> list[Step]:
-        judge = self.config.eval_judge_model
-        return [Step("openrouter", judge, pool="eval_openrouter")] if judge else []
+        """The judge: Groq with its own key first (when it has a key and a model), then OpenRouter
+        with the evaluation keys. Each is skipped when it has no model or no key."""
+        c = self.config
+        steps: list[Step] = []
+        if c.eval_judge_groq_model and c.eval_judge_groq_keys:
+            steps.append(Step("groq", c.eval_judge_groq_model, pool="eval_judge_groq"))
+        if c.eval_judge_model:
+            steps.append(Step("openrouter", c.eval_judge_model, pool="eval_openrouter"))
+        return steps
 
     # ---- timing ---------------------------------------------------------------------
 

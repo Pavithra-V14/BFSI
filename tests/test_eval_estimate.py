@@ -68,8 +68,8 @@ def test_a_multi_turn_case_pays_for_every_turn(all_cases):
 def test_the_estimate_lists_every_provider_group_against_its_daily_limit(all_cases):
     estimate = est.estimate_run(active(all_cases), config())
     judge = estimate["providers"]["judge"]
-    # two keys are in the pool, but the free allowance is counted ONCE (one account per provider)
-    assert judge["keys"] == 2 and judge["daily_request_limit"] == 50
+    # two keys are in the pool and each adds its own allowance (the owner's decision, 2026-10-21)
+    assert judge["keys"] == 2 and judge["daily_request_limit"] == 2 * 50
     assert judge["requests"] == sum(
         est.case_need(x).requests.get("judge", 0) for x in active(all_cases)
     )
@@ -92,18 +92,17 @@ def test_a_run_that_cannot_fit_one_day_is_split_into_batches(all_cases):
         assert est.fits(need, limits, c.DAILY_LIMIT_SAFETY) or len(batch) == 1
 
 
-def test_more_keys_do_not_make_fewer_batches_because_free_quota_is_never_pooled(all_cases):
-    """Owner decision (Phase 16, docs/READINESS.md): one key per provider from one account. A
-    capacity plan that added up the allowances of several free accounts would plan a day that
-    the provider's terms do not allow."""
+def test_each_key_adds_its_daily_limit_by_the_owners_decision_of_2026_10_21(all_cases):
+    """Owner decision (2026-10-21, replacing the Phase 16 rule): each key of a pool is from its own
+    account, so the plan counts keys x one key's limit and needs fewer batches."""
     few = est.estimate_run(active(all_cases), config())
     many = est.estimate_run(
         active(all_cases), config(eval_openrouter_keys=[KEYS + str(i) for i in range(4)])
     )
     assert many["providers"]["judge"]["keys"] == 4
-    assert many["providers"]["judge"]["daily_request_limit"] == 50
-    assert len(many["batches"]) == len(few["batches"])
-    assert est.ONE_KEY_PER_PROVIDER is True
+    assert many["providers"]["judge"]["daily_request_limit"] == 4 * 50
+    assert len(many["batches"]) < len(few["batches"])
+    assert est.ONE_KEY_PER_PROVIDER is False
 
 
 def test_a_run_without_the_judge_needs_no_judge_requests_and_one_batch(all_cases):
@@ -199,9 +198,9 @@ def test_a_resumed_guard_continues_from_what_was_used():
 # =============================================================================== settings ====
 def test_the_limits_read_the_pool_sizes_and_the_provider_limits():
     limits = est.daily_limits(config(groq_keys=["a" * 12, "b" * 12]))
-    # two keys are listed (the pool exists for rotation), one key's allowance is counted
-    assert limits.keys["answer"] == 2 and limits.requests["answer"] == 1000
-    assert limits.tokens["answer"] == 200_000 and limits.keys["jev"] == 1
+    # two keys are listed and each adds its own allowance (the owner's decision, 2026-10-21)
+    assert limits.keys["answer"] == 2 and limits.requests["answer"] == 2000
+    assert limits.tokens["answer"] == 400_000 and limits.keys["jev"] == 1
 
 
 def test_a_provider_without_a_published_daily_limit_has_none():
@@ -239,3 +238,29 @@ def test_the_daily_room_counts_what_runs_already_used_today(tmp_path):
 def test_limits_object_has_the_fields_the_estimate_reads():
     lim = Limits(rpm=1, rpd=7)
     assert lim.rpd == 7 and lim.tpd is None
+
+
+def test_earlier_use_today_shrinks_the_first_batch_only(all_cases):
+    """A run is planned for today's room: what earlier runs already used today comes off the first
+    batch, so it is not refused at the start; the later batches (other days) keep their size."""
+    cfg = config()
+    limits = est.daily_limits(cfg)
+    fresh, _ = est.plan_batches(all_cases, limits)
+    used = {"judge": (int(limits.requests["judge"] * c.DAILY_LIMIT_SAFETY * 0.5), 0)}
+    shrunk, _ = est.plan_batches(all_cases, limits, used_today=used)
+    assert len(shrunk[0]) < len(fresh[0])
+    assert shrunk[1:] and len(shrunk[1]) >= 1
+    need = est.Need()
+    for cid in shrunk[0]:
+        need.merge(est.case_need(next(x for x in all_cases if x.id == cid)))
+    need.add("judge", *used["judge"])
+    assert est.fits(need, limits, c.DAILY_LIMIT_SAFETY) or len(shrunk[0]) == 1
+
+
+def test_a_day_that_is_already_used_up_does_not_empty_the_first_batch(all_cases):
+    cfg = config()
+    limits = est.daily_limits(cfg)
+    used = {"judge": (int(limits.requests["judge"]), 0)}
+    batches, _ = est.plan_batches(all_cases, limits, used_today=used)
+    assert batches and all(batches)
+    assert sum(len(b) for b in batches) == len(all_cases)

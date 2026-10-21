@@ -39,6 +39,7 @@ from app.eval.judging import judge_item
 from app.eval.metrics import score_item
 from app.eval.notscored import NotScored
 from app.eval.scenarios import Scenario
+from app.gateway.config import effective_judge_model
 from app.pipeline.state import Request
 
 MAIN_MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -295,7 +296,7 @@ def system_version(config: Any, corpus_version: str | None = None) -> dict[str, 
             for k in ("GROQ_MODEL", "GEMINI_MODEL", "OPENROUTER_MODEL", "JEV_MODEL")
             if k in models
         },
-        "judge_model": getattr(config, "eval_judge_model", None),
+        "judge_model": effective_judge_model(config),
     }
     try:
         import hashlib
@@ -327,7 +328,13 @@ def prepare_run(
     the confirmation code the owner must give to start it)."""
     from app.eval.estimate import confirmation_code
 
-    estimate = estimate_run(cases, config, judged=judged)
+    moment = now or datetime.now(UTC)
+    estimate = estimate_run(
+        cases,
+        config,
+        judged=judged,
+        used_today=store.usage_for_day(eval_db, moment.strftime("%Y-%m-%d")),
+    )
     code = confirmation_code(estimate, kind=kind, dataset_version=dataset_version)
     batches = estimate["batches"]
     run_id = store.create_run(
@@ -346,6 +353,36 @@ def prepare_run(
     return run_id, estimate, code
 
 
+def cases_for_today(
+    eval_db: Database,
+    run: dict[str, Any],
+    cases: dict[str, Case],
+    config: Any,
+    *,
+    now: datetime,
+) -> list[str]:
+    """The cases of the current batch that still wait AND fit what is left of today's free-tier
+    limits (what every run already used today counted), in batch order. The estimate is on the high
+    side, so a batch that does not fit whole is run in part: the rest stays pending in the same
+    batch (`_close_batch` keeps its number) for the next day. Empty: not even one case fits."""
+    from app.eval.estimate import Need, case_need
+
+    pending = set(store.pending_case_ids(eval_db, run["id"]))
+    judged = bool(run["estimate"].get("judged", True))
+    chosen: list[str] = []
+    taken = Need()
+    for case_id in current_batch(run):
+        if case_id not in pending or case_id not in cases:
+            continue
+        trial = Need()
+        trial.merge(taken)
+        trial.merge(case_need(cases[case_id], judged=judged))
+        if room_problem(eval_db, trial, config, now=now) is None:
+            chosen.append(case_id)
+            taken = trial
+    return chosen
+
+
 def day_room_problem(
     eval_db: Database,
     run: dict[str, Any],
@@ -354,15 +391,20 @@ def day_room_problem(
     *,
     now: datetime,
 ) -> str | None:
-    """None when the current batch fits what is left of today's free-tier limits (what every run
-    already used today counted), else a plain sentence saying which group would be passed."""
+    """None when at least one case of the current batch fits what is left of today's free-tier
+    limits (what every run already used today counted), else a plain sentence saying which group
+    would be passed."""
     from app.eval.estimate import Need, case_need
 
-    need = Need()
+    if cases_for_today(eval_db, run, cases, config, now=now):
+        return None
+    pending = set(store.pending_case_ids(eval_db, run["id"]))
     judged = bool(run["estimate"].get("judged", True))
+    need = Need()
     for case_id in current_batch(run):
-        if case_id in cases:
+        if case_id in cases and case_id in pending:
             need.merge(case_need(cases[case_id], judged=judged))
+            break  # the first waiting case is the smallest piece of the batch
     return room_problem(eval_db, need, config, now=now)
 
 

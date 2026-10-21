@@ -31,7 +31,9 @@ TURN_GENERATE = ("answer", 1, 3_600)  # prompt with five chunks plus the answer
 TURN_REWRITE = ("answer", 1, 800)  # a follow-up's standalone question
 
 # What the judge does for one answered case: text calls on the judge model, typed verdicts on Jev.
-JUDGE_TEXT_CALLS = 18  # RAGAS faithfulness, relevancy (3), precision per chunk, recall, entities,
+JUDGE_TEXT_CALLS = (
+    18  # RAGAS faithfulness, relevancy, precision per chunk, recall (no entities now),
+)
 # correctness, one retry's worth of unreadable output, and G-Eval
 JUDGE_TEXT_TOKENS = 1_800
 JUDGE_VERDICT_CALLS = 3  # relevance of the chunks, support of the citations, the refusal
@@ -47,7 +49,7 @@ SHARED_WITH_PRODUCTION = ("jev", "embedding", "rerank")
 
 PROVIDER_LABELS = {
     "answer": "answer models (Groq, Gemini)",
-    "judge": "judge model (OpenRouter, evaluation keys)",
+    "judge": "judge model (Groq with its own key, else OpenRouter; evaluation keys)",
     "jev": "Jev (OpenRouter Decisions API)",
     "embedding": "embeddings (Gemini)",
     "rerank": "rerank (Cohere or Jina)",
@@ -109,10 +111,11 @@ def case_need(case: Case, *, judged: bool = True) -> Need:
     return need
 
 
-# Owner decision (Phase 16, docs/READINESS.md "Terms of service"): one key per provider, from one
-# account. A capacity plan must not assume pooled free keys, so a provider's daily limit is counted
-# ONCE however many keys the pool holds (the pool is for rotation overlap and paid plans).
-ONE_KEY_PER_PROVIDER = True
+# Owner decision of 2026-10-21 (it replaces the Phase 16 rule in docs/READINESS.md "Terms of
+# service"): the owner uses a separate account for each key of the judge pool, so a provider's daily
+# limit is counted PER KEY (keys x one key's limit). This holds for EVERY pool: a pool whose keys
+# are from ONE account would be planned too generously, so keep each pool to keys you mean to count.
+ONE_KEY_PER_PROVIDER = False
 
 
 @dataclass(frozen=True)
@@ -139,14 +142,20 @@ def daily_limits(config: Any) -> DailyLimits:
 
     groq_keys = max(len(config.groq_keys), 0)
     gemini_keys = max(len(config.gemini_keys), 0)
-    judge_keys = len(config.eval_openrouter_keys)
+    groq_judge = bool(
+        getattr(config, "eval_judge_groq_keys", None)
+        and getattr(config, "eval_judge_groq_model", None)
+    )
+    judge_keys = (
+        len(config.eval_judge_groq_keys) if groq_judge else len(config.eval_openrouter_keys)
+    )
     answer_rpd = [
         x for x in (per_day("GROQ", groq_keys)[0], per_day("GEMINI", gemini_keys)[0]) if x
     ]
     answer_tpd = [
         x for x in (per_day("GROQ", groq_keys)[1], per_day("GEMINI", gemini_keys)[1]) if x
     ]
-    jr, jt = per_day("OPENROUTER", judge_keys)
+    jr, jt = per_day("GROQ" if groq_judge else "OPENROUTER", judge_keys)
     return DailyLimits(
         requests={
             # the answer pools are tried in turn: the most generous one bounds the day
@@ -184,16 +193,26 @@ def fits(need: Need, limits: DailyLimits, share: float) -> bool:
     return True
 
 
+def _used(used_today: Mapping[str, tuple[int, int]] | None) -> Need:
+    need = Need()
+    for who, (requests, tokens) in (used_today or {}).items():
+        need.add(who, int(requests), int(tokens))
+    return need
+
+
 def plan_batches(
     cases: Sequence[Case], limits: DailyLimits, *, judged: bool = True,
     share: float = c.DAILY_LIMIT_SAFETY,
+    used_today: Mapping[str, tuple[int, int]] | None = None,
 ) -> tuple[list[list[str]], list[str]]:  # fmt: skip
     """Split the cases into batches that each fit one day's limits (at `share` of them).
+    `used_today` (requests, tokens per group that earlier runs already used today) shrinks the FIRST
+    batch, which runs today; the later batches run on days that have not started.
     Returns (batches of case ids, ids of cases that do not fit a day on their own)."""
     batches: list[list[str]] = []
     too_big: list[str] = []
     current: list[str] = []
-    running = Need()
+    running = _used(used_today)
     for case in cases:
         need = case_need(case, judged=judged)
         if not fits(need, limits, share):
@@ -204,6 +223,8 @@ def plan_batches(
         if current and not fits(trial, limits, share):
             batches.append(current)
             current, running = [], Need()
+        elif not current and running.total_requests and not fits(trial, limits, share):
+            running = Need()  # even one case does not fit what is left today: it opens batch 1
         current.append(case.id)
         running.merge(need)
     if current:
@@ -217,12 +238,13 @@ def estimate_run(
     *,
     judged: bool = True,
     minutes_per_request: float = 0.05,
+    used_today: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     limits = daily_limits(config)
     total = Need()
     for case in cases:
         total.merge(case_need(case, judged=judged))
-    batches, too_big = plan_batches(cases, limits, judged=judged)
+    batches, too_big = plan_batches(cases, limits, judged=judged, used_today=used_today)
     providers: dict[str, Any] = {}
     for who in sorted(set(total.requests) | set(total.tokens)):
         daily_r, daily_t = limits.requests.get(who), limits.tokens.get(who)

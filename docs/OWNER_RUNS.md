@@ -111,6 +111,7 @@ never set.)
 | 44 | The purge of all data: a dry run, then (only when you mean it) the real one | Change round 1, step 6 | pending: owner to confirm | after Run 43 | no (you run it yourself; the real purge cannot be undone) |
 | 45 | The Dark mode switch: look at both themes on every screen | Change round 1, step 7 | pending: owner to confirm | after Run 17 | no (you run it yourself) |
 | 46 | The chat is saved in one step (one-transaction persist): shorter persist stage | Latency work | pending: owner to confirm | after Run 40 | no (you run it yourself; it may use free-tier calls) |
+| 47 | The Groq judge with an OpenRouter fallback, and RAGAS with one real sample | Evaluation | pending: owner to confirm | after Run 20 | no (you run it yourself; free-tier calls) |
 
 How to read the table. **Status** is "done" with the date, or "pending: owner to confirm": until
 you tell me which runs you have done, every run from 8 onward is shown as pending and nothing is
@@ -2394,6 +2395,30 @@ A routine drill never needs the reinstate flag, and `rehearsal-ecas-1` stays wit
 - **Send back:** the three persist times and the rows from step 3.
 - **How to clear:** delete the test chats in "My chats".
 - **Real calls:** about 3 answers (a few free-tier model calls each). **Safe to repeat:** yes.
+
+## Run 47. The Groq judge with an OpenRouter fallback, and RAGAS with one real sample: PENDING
+
+- **Verifies:** that the judge on Groq (its own key, model `EVAL_JUDGE_GROQ_MODEL`) answers, that
+  the OpenRouter judge takes over when it fails, and that RAGAS scores one made-up sample through
+  our judge path with `strictness` 1.
+- **Before it:** Run 20 (evaluation keys exist) and `uv pip install -r requirements-eval.txt`.
+- **Needs (names only):** `EVAL_JUDGE_GROQ_API_KEYS` (a Groq key made for this, from the same Groq
+  account), `EVAL_JUDGE_GROQ_MODEL` (check the exact name in the Groq console; a model that does not
+  exist answers `model_not_found`), and, for the fallback, `EVAL_OPENROUTER_API_KEYS` and
+  `EVAL_JUDGE_MODEL`. Load them with the helper (`env_to_powershell.py --emit | Invoke-Expression`).
+- **Step 1, offline (no call):** `uv run python scripts/ragas_smoke.py`. You should see
+  `strictness ok`, `faithfulness scored`, `answer_relevancy scored` and
+  `done: RAGAS works through the wrapper (offline)`.
+- **Step 2, the Groq judge (one call):** `uv run python scripts/judge_smoke.py --run`. You should see
+  `judge model (Groq) set` and `judge call OK provider=groq`. Then repeat with the Groq key left
+  empty to see the OpenRouter judge answer.
+- **Step 3, RAGAS with the real judge (a handful of calls):**
+  `uv run python scripts/ragas_smoke.py --run`. You should see both metrics `scored` and
+  `judge requests used count=...` (about 4).
+- **If it differs:** `why groq:model_not_found` is a wrong model name; `rate_limited` is the day's
+  allowance; `NOT SCORED why=unreadable_output` on a metric: send back the metric name.
+- **Send back:** every output line (no key appears in them).
+- **Real calls:** about 6 (free tier). **Safe to repeat:** yes.
 
 ---
 

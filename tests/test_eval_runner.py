@@ -17,6 +17,7 @@ from app.eval.cases import Op
 from app.eval.guard import CostGuard, NotConfirmed
 from app.eval.runner import (
     RunExecutor,
+    cases_for_today,
     current_batch,
     guard_for,
     prepare_run,
@@ -369,6 +370,33 @@ def test_a_run_that_does_not_fit_a_day_pauses_after_a_batch_and_resumes(rig, eva
     ex2, run = executor(rig, eval_db, run_id)
     second = asyncio.run(ex2.run_batch(current_batch(run)))
     assert second.status in (c.RUN_PAUSED, c.RUN_FINISHED)
+
+
+def test_a_batch_that_does_not_fit_today_runs_in_part_and_the_rest_waits(rig, eval_db):
+    """The estimate is high: when the day's room is short, the cases that fit run today and the rest
+    stay pending in the SAME batch for the next day (nothing is refused while one case fits)."""
+    store.sync_cases(eval_db, rig.cases)
+    cases = [
+        x for x in rig.cases if x.id in ("f04-stamp-duty", "f01-penal-charge", "t01-spread-cr4")
+    ]
+    cfg = config(eval_openrouter_keys=["j" * 12])  # 50 judge requests a day
+    run_id, estimate, code = prepare_run(
+        eval_db, cases=cases, kind="active", environment="local",
+        dataset_version=rig.version, config=cfg, created_by="test", judged=True, now=NOW,
+    )  # fmt: skip
+    start_run(eval_db, run_id, code, now=NOW)
+    run = store.get_run(eval_db, run_id)
+    by_id = {x.id: x for x in cases}
+    everyone = [x for x in current_batch(run) if x in by_id]
+    # today's room already mostly used by other runs: only part of the batch fits
+    store.add_usage(eval_db, run_id, NOW.strftime("%Y-%m-%d"), "judge", requests=30, tokens=0)
+    today = cases_for_today(eval_db, run, by_id, cfg, now=NOW)
+    assert len(today) < len(everyone)
+    # nothing fits when the day is used up: the old refusal stays
+    store.add_usage(eval_db, run_id, NOW.strftime("%Y-%m-%d"), "judge", requests=100, tokens=0)
+    assert cases_for_today(eval_db, run, by_id, cfg, now=NOW) == []
+    with pytest.raises(c.EvalConfigError):
+        start_run(eval_db, run_id, code, cases=by_id, config=cfg, now=NOW)
 
 
 def test_usage_is_written_per_day_and_group(rig, eval_db):

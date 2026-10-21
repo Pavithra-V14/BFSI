@@ -75,6 +75,28 @@ def test_every_prompt_ragas_makes_goes_to_the_function_we_gave_it():
     assert calls.prompts and all(isinstance(p, str) for p in calls.prompts)
 
 
+def test_answer_relevancy_asks_the_judge_for_one_completion_not_three():
+    """RAGAS would ask for 3 completions of one prompt; our judge returns one, so the metric is
+    set to 1 on purpose: no warning and no hidden extra requests."""
+    assert ra.STRICTNESS == 1
+    metric = ra._metric("answer_relevancy", ra.GatewayLLM(scripted(Calls())), None)
+    assert metric.strictness == 1
+
+
+def test_answer_correctness_is_scored_through_the_wrapper():
+    """RAGAS builds the similarity part of this metric in `init()`, which the single-sample path
+    never calls; it raised "AnswerSimilarity must be set" for every case."""
+
+    async def ask(prompt: str) -> str:
+        low = prompt.lower()
+        if "tp" in low and "fp" in low:
+            return json.dumps({"TP": [{"statement": "s", "reason": "r"}], "FP": [], "FN": []})
+        return json.dumps({"statements": ["The penal charge is 2 per cent."]})
+
+    result = score(ask, metrics=["answer_correctness"])
+    assert result["answer_correctness"] is not None and result["answer_correctness"] > 0.5
+
+
 def test_a_metric_that_needs_a_reference_is_skipped_when_there_is_none():
     calls = Calls()
     result = score(scripted(calls), metrics=["faithfulness", "context_recall"], reference=None)
@@ -115,8 +137,30 @@ def test_the_sync_paths_are_not_available():
     llm = ra.GatewayLLM(scripted(Calls()))
     with pytest.raises(NotImplementedError):
         llm.generate_text(None)
-    with pytest.raises(NotImplementedError):
-        ra.GatewayEmbeddings(embed).embed_query("x")
+
+
+def test_the_embedding_step_ragas_runs_synchronously_works_inside_a_running_loop():
+    """RAGAS's answer relevancy embeds in a plain (sync) call made inside the event loop. It used
+    to raise, so the metric was never scored."""
+
+    async def inside_a_loop():
+        embeddings = ra.GatewayEmbeddings(embed)
+        return embeddings.embed_query("abc"), embeddings.embed_documents(["a", "bb"])
+
+    one, many = run(inside_a_loop())
+    assert one[2] == 0.0 and len(many) == 2 and many[1][2] == 2.0
+
+
+def test_answer_relevancy_is_scored_end_to_end_through_the_wrapper():
+    calls = Calls()
+
+    async def ask(prompt: str) -> str:
+        calls.prompts.append(prompt)
+        return json.dumps({"question": "What penal charge applies?", "noncommittal": 0})
+
+    result = score(ask, metrics=["answer_relevancy"], reference=None)
+    assert result["answer_relevancy"] is not None
+    assert len(calls.prompts) == 1  # strictness 1: one judge request for this metric
 
 
 def test_embeddings_go_through_the_function_we_gave():
@@ -131,8 +175,9 @@ def test_the_usage_report_is_switched_off_before_the_import():
 def test_only_the_named_metrics_exist_and_none_is_multi_modal():
     assert set(ra.METRICS) == {
         "faithfulness", "answer_relevancy", "context_precision", "context_recall",
-        "context_entity_recall", "answer_correctness",
+        "answer_correctness",
     }  # fmt: skip
+    assert "context_entity_recall" not in ra.METRICS  # removed by the owner on 2026-10-21
     assert not any("multi_modal" in module for module, *_ in ra.METRICS.values())
     # (ragas itself imports that module when it loads; the advisory concerns calling it, which
     # nothing here does: no metric of ours is built from it)

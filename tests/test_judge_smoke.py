@@ -109,7 +109,47 @@ def test_it_refuses_on_render(capsys):
     assert code == 1 and "refused" in out and made == []
 
 
+def test_a_groq_judge_is_named_with_its_fallback_and_needs_no_openrouter_key(capsys):
+    groq_only = {
+        "EVAL_GROQ_API_KEYS": "g" * 20,
+        "EVAL_JUDGE_GROQ_API_KEYS": "j" * 20,
+        "EVAL_JUDGE_GROQ_MODEL": "qwen/qwen3.8-27b",
+    }
+    code, out, made = run(["--run"], groq_only, capsys)
+    assert code == 0 and "judge model (Groq)" in out and "model=qwen/qwen3.8-27b" in out
+    assert "fallback" not in out and len(made[0].calls) == 1
+    both = {**groq_only, **ENV}
+    code, out, _ = run(["--run"], both, capsys)
+    assert code == 0 and "fallback model" in out and "j" * 20 not in out
+
+
 @pytest.mark.parametrize("flag", ["--RUN", "run", "-run"])
 def test_only_the_exact_flag_counts(flag, capsys):
     code, _out, made = run([flag], ENV, capsys)
     assert code == 0 and made == []
+
+
+def test_a_stored_case_is_read_from_the_local_database_read_only(tmp_path):
+    import json
+    import sqlite3
+
+    from scripts import ragas_smoke
+
+    path = tmp_path / "eval.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE eval_cases (id TEXT, turns TEXT, expect TEXT)")
+        db.execute(
+            "CREATE TABLE eval_items (case_id TEXT, answer_kind TEXT, answer_text TEXT, "
+            "contexts TEXT, finished_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO eval_cases VALUES ('c1', ?, ?)",
+            (json.dumps(["Q one?", "Q two?"]), json.dumps({"reference": "R"})),
+        )
+        db.execute(
+            "INSERT INTO eval_items VALUES ('c1', 'answer', 'A', ?, '2026-10-21')",
+            (json.dumps(["p1", "p2"]),),
+        )
+    case = ragas_smoke.stored_case("c1", path)
+    assert case == {"question": "Q two?", "answer": "A", "contexts": ["p1", "p2"], "reference": "R"}
+    assert ragas_smoke.stored_case("missing", path) is None

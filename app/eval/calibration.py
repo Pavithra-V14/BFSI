@@ -25,6 +25,7 @@ from app.eval.cases import CalibrationItem
 from app.eval.estimate import PROVIDER_LABELS, Need
 from app.eval.guard import CostGuard
 from app.eval.judge import Judge
+from app.gateway.config import effective_judge_model
 
 
 def agreement(pairs: Sequence[tuple[bool | None, bool]]) -> tuple[float | None, int]:
@@ -104,7 +105,7 @@ async def run_calibration(
 
     config = getattr(gateway, "config", None)
     jev_model = (getattr(config, "models", None) or {}).get("JEV_MODEL")
-    judge_model = getattr(config, "eval_judge_model", None)
+    judge_model = effective_judge_model(config)
     judge_only = Judge(gateway, guard=guard, trusted={})
     jev_only = Judge(gateway, guard=guard, trusted={metric: True for metric in VERDICT_TEXT})
     verdicts: dict[str, dict[str, list[tuple[bool | None, bool]]]] = defaultdict(

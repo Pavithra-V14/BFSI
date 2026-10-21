@@ -18,6 +18,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.gateway.embeddings import running_on_render
 from app.gateway.keys import MAX_KEYS_PER_PROVIDER, ConfigError, parse_keys
@@ -34,6 +35,7 @@ KEY_VARIABLES = (
     "COHERE_API_KEY",
     "JINA_API_KEY",
     "EVAL_OPENROUTER_API_KEYS",
+    "EVAL_JUDGE_GROQ_API_KEYS",
 )
 MODEL_VARIABLES = (
     "GROQ_MODEL",
@@ -51,6 +53,7 @@ LIMIT_PROVIDERS = ("GROQ", "GEMINI", "OPENROUTER", "JEV", "EMBEDDING", "COHERE",
 LIMIT_VARIABLES = tuple(f"GATEWAY_LIMITS_{p}" for p in LIMIT_PROVIDERS)
 OTHER_VARIABLES = (
     "EVAL_JUDGE_MODEL",
+    "EVAL_JUDGE_GROQ_MODEL",
     "GATEWAY_TIMEOUT_SECONDS",
     "GATEWAY_CONTEXT_OVERRIDES",
     "GATEWAY_ENABLE_MOCK",
@@ -257,6 +260,16 @@ def judge_model_problem(judge: str | None, answer_models: Mapping[str, str]) -> 
     return None
 
 
+def effective_judge_model(config: Any) -> str | None:
+    """The judge model that answers first: the Groq one when it has a key, else the OpenRouter one.
+    Works on any object that has the fields (a test double may have only `eval_judge_model`)."""
+    if getattr(config, "eval_judge_groq_keys", None) and getattr(
+        config, "eval_judge_groq_model", None
+    ):
+        return config.eval_judge_groq_model
+    return getattr(config, "eval_judge_model", None)
+
+
 def _truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -267,6 +280,7 @@ ADMIN_ONLY_KEY_VARIABLES = (
     "EVAL_GROQ_API_KEYS",
     "EVAL_GEMINI_API_KEYS",
     "EVAL_OPENROUTER_API_KEYS",
+    "EVAL_JUDGE_GROQ_API_KEYS",
 )
 
 
@@ -278,6 +292,8 @@ def check_render_rules(config: GatewayConfig, env: Mapping[str, str] | None = No
     names = [name for name in ADMIN_ONLY_KEY_VARIABLES if (env.get(name) or "").strip()]
     if config.eval_openrouter_keys and "EVAL_OPENROUTER_API_KEYS" not in names:
         names.append("EVAL_OPENROUTER_API_KEYS")
+    if config.eval_judge_groq_keys and "EVAL_JUDGE_GROQ_API_KEYS" not in names:
+        names.append("EVAL_JUDGE_GROQ_API_KEYS")
     if config.enable_mock:
         names.append("GATEWAY_ENABLE_MOCK")
     if names:
@@ -294,6 +310,9 @@ class GatewayConfig:
     gemini_keys: list[str] = field(default_factory=list, repr=False)
     openrouter_keys: list[str] = field(default_factory=list, repr=False)
     eval_openrouter_keys: list[str] = field(default_factory=list, repr=False)
+    eval_judge_groq_keys: list[str] = field(
+        default_factory=list, repr=False
+    )  # the judge's own Groq key
     jev_key: str | None = field(default=None, repr=False)
     embedding_keys: list[str] = field(default_factory=list, repr=False)  # key A, then key B
     cohere_key: str | None = field(default=None, repr=False)
@@ -304,7 +323,8 @@ class GatewayConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     context_overrides: dict[str, int] = field(default_factory=dict)
     enable_mock: bool = False
-    eval_judge_model: str | None = None  # set in the evaluation phase
+    eval_judge_model: str | None = None  # the OpenRouter judge (the fallback when Groq judges)
+    eval_judge_groq_model: str | None = None  # [P] the judge on Groq, tried first when it has a key
     reasoning_allowance: int = DEFAULT_REASONING_ALLOWANCE
     reasoning_effort_answer: str | None = DEFAULT_REASONING_EFFORT
     reasoning_effort_decide: str | None = DEFAULT_REASONING_EFFORT
@@ -315,12 +335,18 @@ class GatewayConfig:
         object.__setattr__(self, "limits", {**DEFAULT_LIMITS, **self.limits})
         object.__setattr__(self, "plans", {**DEFAULT_PLANS, **self.plans})
         validate_jev_model(self.models["JEV_MODEL"])
-        clash = judge_model_problem(self.eval_judge_model, self.models)
-        if clash is not None:
-            raise ConfigError(
-                f"EVAL_JUDGE_MODEL must be a different model family than {clash} "
-                "and the other answer models"
-            )
+        for variable, judge in (
+            ("EVAL_JUDGE_MODEL", self.eval_judge_model),
+            ("EVAL_JUDGE_GROQ_MODEL", self.eval_judge_groq_model),
+        ):
+            clash = judge_model_problem(judge, self.models)
+            if clash is not None:
+                raise ConfigError(
+                    f"{variable} must be a different model family than {clash} "
+                    "and the other answer models"
+                )
+        if self.eval_judge_groq_keys and not self.eval_judge_groq_model:
+            raise ConfigError("EVAL_JUDGE_GROQ_API_KEYS is set but EVAL_JUDGE_GROQ_MODEL is not")
         for provider, limits in self.limits.items():
             validate_limits(limits, f"GATEWAY_LIMITS_{provider}")
         for provider, plan in self.plans.items():
@@ -356,6 +382,7 @@ class GatewayConfig:
             "GEMINI_API_KEYS": (self.gemini_keys, MAX_KEYS_PER_PROVIDER),
             "OPENROUTER_API_KEYS": (self.openrouter_keys, MAX_KEYS_PER_PROVIDER),
             "EVAL_OPENROUTER_API_KEYS": (self.eval_openrouter_keys, MAX_KEYS_PER_PROVIDER),
+            "EVAL_JUDGE_GROQ_API_KEYS": (self.eval_judge_groq_keys, MAX_KEYS_PER_PROVIDER),
             "GEMINI_EMBEDDING_KEY_A and GEMINI_EMBEDDING_KEY_B": (self.embedding_keys, 2),
             "JEV_OPENROUTER_API_KEY": ([self.jev_key] if self.jev_key else [], 1),
             "COHERE_API_KEY": ([self.cohere_key] if self.cohere_key else [], 1),
@@ -409,12 +436,16 @@ class GatewayConfig:
             eval_openrouter_keys=parse_keys(
                 env.get("EVAL_OPENROUTER_API_KEYS"), name="EVAL_OPENROUTER_API_KEYS"
             ),
+            eval_judge_groq_keys=parse_keys(
+                env.get("EVAL_JUDGE_GROQ_API_KEYS"), name="EVAL_JUDGE_GROQ_API_KEYS"
+            ),
             jev_key=(env.get("JEV_OPENROUTER_API_KEY") or "").strip() or None,
             embedding_keys=[k for k in (key_a, key_b) if k],
             cohere_key=(env.get("COHERE_API_KEY") or "").strip() or None,
             jina_key=(env.get("JINA_API_KEY") or "").strip() or None,
             models=models,
             eval_judge_model=(env.get("EVAL_JUDGE_MODEL") or "").strip() or None,
+            eval_judge_groq_model=(env.get("EVAL_JUDGE_GROQ_MODEL") or "").strip() or None,
             limits=limits,
             plans={
                 p: _parse_plan(
@@ -442,12 +473,19 @@ class GatewayConfig:
 
         The system under test answers with the EVALUATION keys (`EVAL_GROQ_API_KEYS`,
         `EVAL_GEMINI_API_KEYS`), so a run never spends the production keys' limits or budgets.
-        The judge uses `EVAL_OPENROUTER_API_KEYS`. There is no OpenRouter answer fallback in a run
-        and the offline mock answer is switched off (a mock text must never be scored)."""
+        The judge uses its own Groq key (`EVAL_JUDGE_GROQ_API_KEYS`, model
+        `EVAL_JUDGE_GROQ_MODEL`) first when both are set, and falls back to
+        `EVAL_OPENROUTER_API_KEYS` with `EVAL_JUDGE_MODEL`. There is no OpenRouter answer fallback
+        in a run and the offline mock answer is switched off (a mock text must never be scored)."""
         values = dict(os.environ if env is None else env)
         if running_on_render(values):
             raise ConfigError("refusing to start on Render: evaluation is for the admin machine")
-        names = ("EVAL_GROQ_API_KEYS", "EVAL_GEMINI_API_KEYS", "EVAL_OPENROUTER_API_KEYS")
+        names = (
+            "EVAL_GROQ_API_KEYS",
+            "EVAL_GEMINI_API_KEYS",
+            "EVAL_OPENROUTER_API_KEYS",
+            "EVAL_JUDGE_GROQ_API_KEYS",
+        )
         if not any((values.get(name) or "").strip() for name in names):
             raise ConfigError("no evaluation key is set (EVAL_GROQ_API_KEYS, EVAL_GEMINI_API_KEYS)")
         values["GROQ_API_KEYS"] = values.get("EVAL_GROQ_API_KEYS") or ""

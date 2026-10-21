@@ -675,7 +675,7 @@ def test_the_terms_of_service_section_matches_what_the_estimate_and_the_inventor
     from app.eval import estimate
     from scripts import key_inventory
 
-    assert estimate.ONE_KEY_PER_PROVIDER is True
+    assert estimate.ONE_KEY_PER_PROVIDER is False  # the owner's decision of 2026-10-21
     limits = estimate.daily_limits(
         __import__("tests.test_eval_estimate", fromlist=["config"]).config(
             groq_keys=["a" * 12, "b" * 12, "c" * 12]
@@ -684,7 +684,7 @@ def test_the_terms_of_service_section_matches_what_the_estimate_and_the_inventor
     one_key = estimate.daily_limits(
         __import__("tests.test_eval_estimate", fromlist=["config"]).config(groq_keys=["a" * 12])
     )
-    assert limits.requests["answer"] == one_key.requests["answer"], "three keys, one key's limit"
+    assert limits.requests["answer"] == 3 * one_key.requests["answer"], "each key adds its limit"
     out = Lines()
     key_inventory.main([], {"GROQ_API_KEYS": "a" * 20 + "," + "b" * 20}, out=out)
     assert "NOTE: Groq holds 2 different keys" in out.text

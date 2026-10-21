@@ -6,8 +6,8 @@ could produce is `None` ("not scored"). The functions here make no call themselv
 `Judge`, which goes through the gateway under the cost guard.
 
 Which library does what:
-- RAGAS: faithfulness, answer relevancy, context precision / recall / entity recall, answer
-  correctness (the RAG set of 15.4a);
+- RAGAS: faithfulness, answer relevancy, context precision / recall, answer correctness (the RAG
+  set of 15.4a without entity recall, which the owner removed on 2026-10-21);
 - typed verdicts (Jev when calibration trusts the metric, else the judge model): relevance of each
   passage, support of each citation, correctness of a refusal;
 - DeepEval's G-Eval: wording judgements (a refusal is polite and invents nothing; an answer is
@@ -43,6 +43,30 @@ def _decider(verdict: Any) -> str:
     return verdict.decider
 
 
+def strip_fixed_text(answer: str) -> str:
+    """The answer without the paragraphs our own code appended (the disclaimer of 9.5 and the
+    warnings of 9.4). They are not claims about the documents: left in, RAGAS counts each sentence
+    as an unsupported statement (a correct one-line answer scored faithfulness 0.25 because of the
+    disclaimer). The original text stays in the stored item and in every rule-based check."""
+    from app.guardrails import messages
+
+    def squash(text: str) -> str:
+        return " ".join(text.split())
+
+    fixed = squash(messages.DISCLAIMER)
+    starts = (
+        squash(messages.WARNING_NUMBERS.split("{", 1)[0]),
+        squash(messages.WARNING_CITATIONS),
+    )
+    kept = []
+    for paragraph in answer.split("\n\n"):
+        text = squash(paragraph)
+        if not text or text == fixed or any(text.startswith(prefix) for prefix in starts):
+            continue
+        kept.append(paragraph.strip())
+    return "\n\n".join(kept) or answer
+
+
 async def judge_item(
     item: dict[str, Any],
     *,
@@ -56,6 +80,7 @@ async def judge_item(
     production sample)."""
     kind = item.get("answer_kind") or ""
     answer = item.get("answer_text") or ""
+    claims = strip_fixed_text(answer) if item.get("answer_kind") == "answer" else answer
     contexts: list[str] = list(item.get("contexts") or [])[:MAX_PASSAGES]
     models = item.get("models") or []
     reference = case.reference if case and case.reference else None
@@ -98,7 +123,7 @@ async def judge_item(
             support = await judge.verdicts(
                 "citation_supports",
                 cited,
-                {"claim": answer, "passages": {k: passages[k] for k in cited}},
+                {"claim": claims, "passages": {k: passages[k] for k in cited}},
             )
             scores.append(
                 Score(
@@ -122,11 +147,11 @@ async def judge_item(
         )
 
     if answered and contexts and use_ragas and judge.judge_model:
-        scores.extend(await _ragas_scores(question, answer, contexts, reference, judge))
+        scores.extend(await _ragas_scores(question, claims, contexts, reference, judge))
     elif answered and use_ragas:
         scores.extend(_not_scored(["faithfulness", "answer_relevancy"], "no_judge_model"))
     if use_deepeval and judge.judge_model and (case is not None):
-        scores.extend(await _deepeval_scores(question, answer, kind, case, judge))
+        scores.extend(await _deepeval_scores(question, claims, kind, case, judge))
     return scores
 
 

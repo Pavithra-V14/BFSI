@@ -38,6 +38,7 @@ EVALUATION_KEYS: dict[str, str] = {
     "EVAL_GROQ_API_KEYS": "evaluation: Groq",
     "EVAL_GEMINI_API_KEYS": "evaluation: Gemini",
     "EVAL_OPENROUTER_API_KEYS": "evaluation: OpenRouter and the judge",
+    "EVAL_JUDGE_GROQ_API_KEYS": "evaluation: the judge on Groq",
 }
 # provider -> the settings that may hold its keys (the one-key-per-provider note counts these)
 PROVIDERS: dict[str, tuple[str, ...]] = {

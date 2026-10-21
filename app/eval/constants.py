@@ -47,7 +47,7 @@ CALIBRATION_THRESHOLD = 0.85
 # A run stops when it has used more than the confirmed estimate plus this share (owner addition a).
 OVER_ESTIMATE_MARGIN = 0.25
 # A batch is planned to use at most this share of the tightest daily limit (the rest is room).
-DAILY_LIMIT_SAFETY = 0.8
+DAILY_LIMIT_SAFETY = 0.9  # owner decision: was 0.8; the estimate itself is on the high side
 SAMPLE_RATE = 0.05  # [T] about 5 % of live answers (spec 15.4)
 SAMPLE_RETENTION_DAYS = 30  # [T] masked samples are purged by the retention command
 VARIANCE_RUNS = 3  # spec 15.4: a band needs this many runs of the active set

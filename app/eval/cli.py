@@ -41,6 +41,7 @@ from app.eval.corpus import verify_files
 from app.eval.estimate import confirmation_code, describe
 from app.eval.guard import CostGuard, NotConfirmed, OverEstimate, check_confirmation
 from app.eval.judge import Judge
+from app.gateway.config import effective_judge_model
 
 WORKDIR = store.ROOT / "eval_data"
 
@@ -129,7 +130,7 @@ def _trusted(db: Any, gateway: Any) -> dict[str, bool]:
     return calibration.trusted_metrics(
         db,
         jev_model=(getattr(config, "models", None) or {}).get("JEV_MODEL"),
-        judge_model=getattr(config, "eval_judge_model", None),
+        judge_model=effective_judge_model(config),
     )
 
 
@@ -272,6 +273,7 @@ def cmd_estimate(args, env, out, services_factory) -> int:
 def cmd_run(args, env, out, services_factory) -> int:
     from app.eval.runner import (
         RunExecutor,
+        cases_for_today,
         current_batch,
         guard_for,
         prompt_lines,
@@ -337,7 +339,15 @@ def cmd_run(args, env, out, services_factory) -> int:
             embed=embed,
         )
         executor = RunExecutor(db, harness, guard, judge, cases, run["id"], lines=prompt_lines())
-        outcome = asyncio.run(executor.run_batch(current_batch(run)))
+        today = cases_for_today(
+            db, run, cases, GatewayConfig.for_evaluation(env), now=datetime.now(UTC)
+        )
+        if len(today) < len([x for x in current_batch(run) if x in cases]):
+            out(
+                f"today's room fits {len(today)} of the batch's waiting cases; "
+                "the rest waits for the next UTC day"
+            )
+        outcome = asyncio.run(executor.run_batch(today))
         out(
             f"run {run['id']}: {outcome.status}; finished {outcome.finished_items} case(s); "
             f"{outcome.requests_used} requests, {outcome.tokens_used} tokens used"

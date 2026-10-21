@@ -15,9 +15,11 @@ A metric that cannot be computed (the judge is down, the output could not be rea
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.eval.notscored import NotScored
@@ -34,6 +36,12 @@ from ragas.run_config import RunConfig  # noqa: E402
 Ask = Callable[[str], Awaitable[str]]
 Embed = Callable[[list[str]], Awaitable[list[list[float]]]]
 
+# RAGAS's answer relevancy asks the judge for this many completions of ONE prompt and averages
+# them. Our judge call returns one completion (most providers, and OpenRouter's free models, cannot
+# return several), so it is set to 1 on purpose: no extra requests and no "returned 1 generations
+# instead of 3" warning. [P] The score is noisier than with 3; revisit when the judge has room.
+STRICTNESS = 1
+
 # metric name used in our results -> (module, class, needs reference, needs embeddings)
 METRICS: dict[str, tuple[str, str, bool, bool]] = {
     "faithfulness": ("ragas.metrics._faithfulness", "Faithfulness", False, False),
@@ -42,9 +50,8 @@ METRICS: dict[str, tuple[str, str, bool, bool]] = {
         "ragas.metrics._context_precision", "LLMContextPrecisionWithReference", True, False,
     ),
     "context_recall": ("ragas.metrics._context_recall", "LLMContextRecall", True, False),
-    "context_entity_recall": (
-        "ragas.metrics._context_entities_recall", "ContextEntityRecall", True, False,
-    ),
+    # context_entity_recall is left out on purpose (owner decision, 2026-10-21): it failed on
+    # nearly every real case ("providers_failed") and adds little beside context recall.
     "answer_correctness": ("ragas.metrics._answer_correctness", "AnswerCorrectness", True, True),
 }  # fmt: skip
 # Reference-free ones, for a production sample (no expected answer exists).
@@ -84,11 +91,22 @@ class GatewayEmbeddings(BaseRagasEmbeddings):
         self._embed = embed
         self.run_config = RunConfig(max_retries=1, max_wait=1, max_workers=1)
 
+    def _blocking(self, texts: list[str]) -> list[list[float]]:
+        """RAGAS's answer-relevancy metric compares vectors in a SYNCHRONOUS step that runs inside
+        the event loop, where `asyncio.run` is refused. The embedding call therefore runs on a
+        short-lived worker thread with its own loop (the gateway holds no loop-bound object)."""
+
+        async def embed_all() -> list[list[float]]:
+            return await self._embed(list(texts))
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, embed_all()).result()
+
     def embed_query(self, text: str) -> list[float]:
-        raise NotImplementedError("the evaluation scores asynchronously")
+        return self._blocking([text])[0]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        raise NotImplementedError("the evaluation scores asynchronously")
+        return self._blocking(list(texts))
 
     async def aembed_query(self, text: str) -> list[float]:
         return (await self._embed([text]))[0]
@@ -103,8 +121,16 @@ def _metric(name: str, llm: BaseRagasLLM, embeddings: BaseRagasEmbeddings) -> An
     module, cls, _reference, wants_embeddings = METRICS[name]
     metric = getattr(importlib.import_module(module), cls)()
     metric.llm = llm
+    if hasattr(metric, "strictness"):
+        metric.strictness = STRICTNESS
     if wants_embeddings:
         metric.embeddings = embeddings
+    if name == "answer_correctness" and getattr(metric, "answer_similarity", True) is None:
+        # RAGAS builds this part in `init()`, which the single-sample path never calls: without it
+        # the metric raised "AnswerSimilarity must be set" on every case
+        from ragas.metrics._answer_similarity import AnswerSimilarity
+
+        metric.answer_similarity = AnswerSimilarity(embeddings=embeddings)
     return metric
 
 

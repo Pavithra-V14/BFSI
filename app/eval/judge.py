@@ -17,7 +17,7 @@ from typing import Any
 
 from app.eval.guard import CostGuard
 from app.eval.notscored import NotScored
-from app.gateway.config import model_family
+from app.gateway.config import effective_judge_model, model_family
 from app.gateway.decisions import NoulAnswer
 from app.gateway.errors import AllProvidersFailed
 from app.gateway.questions import eval_verdict
@@ -93,7 +93,7 @@ class Judge:
     # ---- configuration -----------------------------------------------------------------
     @property
     def judge_model(self) -> str | None:
-        return getattr(self.gateway.config, "eval_judge_model", None)
+        return effective_judge_model(self.gateway.config)
 
     def family_clash(self, models_used: Iterable[str]) -> bool:
         """True when the judge model is of the family of any model that wrote the answer."""

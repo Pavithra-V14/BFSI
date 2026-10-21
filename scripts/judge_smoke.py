@@ -1,5 +1,5 @@
-"""ONE real call through the evaluation judge key (EVAL_OPENROUTER_API_KEYS). Owner-run, off by
-default.
+"""ONE real call through the evaluation judge (the Groq judge key, else EVAL_OPENROUTER_API_KEYS).
+Owner-run, off by default.
 
     uv run python scripts/judge_smoke.py --run
 
@@ -44,14 +44,22 @@ def line(name: str, status: str, **details: object) -> None:
 
 async def one_call(gateway: Gateway) -> int:
     config = gateway.config
-    if not config.eval_openrouter_keys:
+    groq = bool(config.eval_judge_groq_keys and config.eval_judge_groq_model)
+    if not groq and not config.eval_openrouter_keys:
         line("judge key", "NOT SET", variable="EVAL_OPENROUTER_API_KEYS")
         return 1
-    if not config.eval_judge_model:
+    if not groq and not config.eval_judge_model:
         line("judge model", "NOT SET", variable="EVAL_JUDGE_MODEL")
         return 1
-    line("judge key", "set", keys=len(config.eval_openrouter_keys))
-    line("judge model", "set", model=config.eval_judge_model)
+    if groq:  # the Groq judge answers first; the OpenRouter one (when set) is the fallback
+        line("judge key (Groq)", "set", keys=len(config.eval_judge_groq_keys))
+        line("judge model (Groq)", "set", model=config.eval_judge_groq_model)
+    if config.eval_openrouter_keys and config.eval_judge_model:
+        line("fallback key", "set", keys=len(config.eval_openrouter_keys))
+        line("fallback model", "set", model=config.eval_judge_model)
+    elif not groq:
+        line("judge key", "set", keys=len(config.eval_openrouter_keys))
+        line("judge model", "set", model=config.eval_judge_model)
     try:
         result = await gateway.complete_judge(PROMPT, max_tokens=16, timeout_s=30.0)
     except GatewayError as error:
@@ -59,6 +67,10 @@ async def one_call(gateway: Gateway) -> int:
         line(
             "judge call", "FAILED", error=type(error).__name__, reason=getattr(error, "reason", "")
         )
+        # why each step was skipped: provider:code pairs (codes such as rate_limited or auth_failed)
+        pairs = getattr(error, "skipped", None) or []
+        if pairs:
+            line("why", ",".join(f"{provider}:{code}" for provider, code in pairs))
         return 1
     text = (result.text or "").strip()
     line(

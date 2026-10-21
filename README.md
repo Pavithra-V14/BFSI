@@ -866,7 +866,7 @@ loaded by it.
   starts nothing, and a crashed run is free again after 10 minutes without a heartbeat. The edit, delete, conflict and source-removed cases
   change the TEST collection and always undo it (a journal repairs a crash).
 - **Scores.** Rules first (behaviour, facts, expected source, leaks, numeric faithfulness), then
-  the judge: RAGAS (faithfulness, relevancy, precision, recall, entity recall, correctness) and
+  the judge: RAGAS (faithfulness, relevancy, precision, recall, correctness; entity recall was removed on 2026-10-21) and
   DeepEval (wording judgements) through the gateway's judge call, and typed verdicts that Jev
   decides only for metrics where calibration reached 85 % [T] with at least 5 of 6 verdicts
   given (an outage is a miss), for the Jev and judge models it was calibrated with. A score
@@ -1140,7 +1140,8 @@ or a stage change.
 - **The readiness score** (`docs/READINESS.md`): five categories of 20 points; **a line with no
   cited evidence scores 0**; the scoring is conservative and is re-scored by a second review.
   Terms of service: one key per provider from one account; the key pool is not for pooling free
-  quota, and capacity plans (`app/eval/estimate.py`, `ONE_KEY_PER_PROVIDER`) count one key.
+  quota, and capacity plans (`app/eval/estimate.py`, `ONE_KEY_PER_PROVIDER`) counted one key until the owner's
+  decision of 2026-10-21 (now `False`: each key adds its own limit; see `docs/READINESS.md`).
 - **The gate and the stage checklists** (`scripts/prelaunch_gate.py`, `--stage staff_beta` or
   `open`): PASS, FAIL or NO EVIDENCE for each of the nine items of spec 17.6, from the readiness
   page and `docs/prelaunch_evidence.json`. `--write` saves the report for the release record.

@@ -93,6 +93,11 @@ An independent second review is also **required before any real customer data** 
 
 ## Terms of service: how provider keys may be used
 
+**Changed by the owner on 2026-10-21:** the evaluation estimate now counts every key's own limit
+(`ONE_KEY_PER_PROVIDER = False`), because the judge pool's two Groq keys are from two different
+accounts. Check Groq's terms on several free accounts yourself: a Gemini key was denied in
+Phase 12 / Run 28 (see below). The rest of this section is the Phase 16 record.
+
 Recorded decision of the owner (Phase 16):
 
 - **One key per provider, from one account the owner owns.** A provider's free plan is meant

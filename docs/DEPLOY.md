@@ -415,7 +415,7 @@ if you want to change the default. A variable left out, or left empty, uses its 
 These belong to your own machine. The gateway refuses to start on Render with an evaluation key or
 the mock switch, and `render.yaml` holds none of them (a test checks it):
 
-`EVAL_GROQ_API_KEYS`, `EVAL_GEMINI_API_KEYS`, `EVAL_OPENROUTER_API_KEYS`, `EVAL_JUDGE_MODEL`, `EVAL_COLLECTION`, `INGEST_COLLECTION`, `DEV_STAGE_TRACE`, `GATEWAY_ENABLE_MOCK`, `COMPANY_NAMES`, `ENTITY_REVIEW_ENABLED`, `ADMIN_MACHINE`
+`EVAL_GROQ_API_KEYS`, `EVAL_GEMINI_API_KEYS`, `EVAL_OPENROUTER_API_KEYS`, `EVAL_JUDGE_MODEL`, `EVAL_JUDGE_GROQ_API_KEYS`, `EVAL_JUDGE_GROQ_MODEL`, `EVAL_COLLECTION`, `INGEST_COLLECTION`, `DEV_STAGE_TRACE`, `GATEWAY_ENABLE_MOCK`, `COMPANY_NAMES`, `ENTITY_REVIEW_ENABLED`, `ADMIN_MACHINE`
 
 Two names that start with `EVAL_` ARE set on Render on purpose: `EVAL_DATABASE_URL` and
 `EVAL_SAMPLE_RATE`, because the running service writes the masked 5 % sample (Phase 13).
